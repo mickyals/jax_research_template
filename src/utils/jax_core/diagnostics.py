@@ -1,8 +1,10 @@
 import jax
 import jax.numpy as jnp
+from flax import linen as nn
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Callable
+from typing import Callable, Sequence, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -494,3 +496,159 @@ def plot_loss_landscape(
     plt.tight_layout()
     plt.show()
     plt.close()
+
+
+
+def model_tabulate(
+    model: nn.Module,
+    *init_inputs,
+    mutable: Optional[Sequence[str]] = None,
+    seed: int = 0,
+) -> None:
+    """Print a Flax tabulate summary including frozen constants.
+
+    A thin wrapper around ``nn.tabulate`` that includes the ``"constants"``
+    collection by default, which ``nn.tabulate`` omits unless explicitly
+    requested. Useful for modules with frozen buffers such as positional
+    encodings or fixed projection matrices.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Any Flax module.
+    *init_inputs
+        All positional arguments required by ``model.init`` for shape tracing.
+        Must include any PRNGKeys the model needs (e.g. for dropout).
+    mutable : sequence of str, optional
+        Variable collections to include in the table.
+        Defaults to ``["params", "constants"]``.
+    seed : int
+        Seed for the PRNGKey passed to ``nn.tabulate``.
+
+    Example
+    -------
+    >>> model_tabulate(model, dummy_input)
+    >>> model_tabulate(model, dummy_input, mutable=["params"])
+    """
+    if mutable is None:
+        mutable = ["params", "constants"]
+    tabulate_fn = nn.tabulate(
+        model, jax.random.PRNGKey(seed), mutable=mutable
+    )
+    print(tabulate_fn(*init_inputs))
+
+
+def plot_output_at_init(
+    model: nn.Module,
+    init_inputs: tuple,
+    grid_inputs: tuple,
+    shape: tuple[int, int],
+    seed: int = 0,
+    cmap: str = "RdBu_r",
+    title: str = "Model output at init",
+    extent: Optional[list] = None,
+    view: str = "cartesian",
+    lon_grid: Optional[np.ndarray] = None,
+    lat_grid: Optional[np.ndarray] = None,
+) -> None:
+    """Forward pass at initialisation over a pre-built coordinate grid.
+
+    The caller builds ``grid_inputs`` in whatever coordinate system the model
+    expects and passes the flat arrays directly. This function handles init,
+    apply, reshape, and plot only.
+
+    For ``view="mollweide"`` the caller must also supply ``lon_grid`` and
+    ``lat_grid`` as 2D arrays of shape ``shape`` (in radians), since
+    pcolormesh needs explicit coordinates for the Mollweide projection.
+    For ``view="cartesian"`` those are not needed -- ``extent`` is sufficient.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Any Flax module.
+    init_inputs : tuple
+        Small subset of inputs used for ``model.init`` shape tracing.
+    grid_inputs : tuple
+        Full grid inputs passed to ``model.apply`` for the plot.
+        The caller is responsible for coordinate system and ordering.
+    shape : tuple[int, int]
+        (rows, cols) to reshape the flat model output into.
+    seed : int
+        PRNGKey seed for init.
+    cmap : str
+        Matplotlib colormap.
+    title : str
+        Plot title.
+    extent : list, optional
+        [xmin, xmax, ymin, ymax] passed to imshow. Only used when
+        ``view="cartesian"``.
+    view : str
+        ``"cartesian"`` uses imshow on a flat grid.
+        ``"mollweide"`` uses pcolormesh on a Mollweide projection.
+    lon_grid : np.ndarray, optional
+        2D array of longitudes in radians, shape ``shape``.
+        Required when ``view="mollweide"``.
+    lat_grid : np.ndarray, optional
+        2D array of latitudes in radians, shape ``shape``.
+        Required when ``view="mollweide"``.
+
+    Example
+    -------
+    >>> # Cartesian -- regional or volume slice, caller builds the grid
+    >>> plot_output_at_init(
+    ...     model,
+    ...     init_inputs=(dummy[:5],),
+    ...     grid_inputs=(grid_coords,),
+    ...     shape=(200, 200),
+    ...     extent=[-100, -40, 0, 30],
+    ... )
+
+    >>> # Mollweide -- caller builds lon/lat meshgrid in radians
+    >>> plot_output_at_init(
+    ...     sphere_model,
+    ...     init_inputs=(dummy[:5],),
+    ...     grid_inputs=(grid_coords,),
+    ...     shape=(200, 200),
+    ...     view="mollweide",
+    ...     lon_grid=LON,
+    ...     lat_grid=LAT,
+    ... )
+    """
+    if view == "mollweide" and (lon_grid is None or lat_grid is None):
+        raise ValueError(
+            "view='mollweide' requires lon_grid and lat_grid as 2D arrays "
+            "in radians of shape `shape`."
+        )
+
+    key = jax.random.PRNGKey(seed)
+    variables = model.init(key, *init_inputs)
+    pred = np.array(model.apply(variables, *grid_inputs)).squeeze()
+
+    assert pred.size == np.prod(shape), (
+        f"Model output size {pred.size} does not match shape {shape} "
+        f"({np.prod(shape)} elements). Check grid_inputs and shape."
+    )
+    pred = pred.reshape(shape)
+    vmax = abs(pred).max()
+
+    fig = plt.figure(figsize=(10, 5))
+
+    if view == "mollweide":
+        ax = fig.add_subplot(111, projection="mollweide")
+        im = ax.pcolormesh(lon_grid, lat_grid, pred, cmap=cmap,
+                           vmin=-vmax, vmax=vmax, shading="auto")
+        ax.grid(True, alpha=0.3)
+        plt.colorbar(im, ax=ax, orientation="horizontal",
+                     pad=0.05, shrink=0.7)
+    else:
+        ax = fig.add_subplot(111)
+        im = ax.imshow(pred, origin="lower", cmap=cmap,
+                       vmin=-vmax, vmax=vmax, aspect="auto",
+                       extent=extent)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        plt.colorbar(im, ax=ax)
+
+    ax.set_title(title)
+    plt.tight_layout()
+    plt.show()

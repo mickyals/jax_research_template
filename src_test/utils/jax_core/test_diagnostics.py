@@ -2,6 +2,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+import numpy as np
 import matplotlib
 matplotlib.use("Agg")  # non-interactive backend for CI
 import matplotlib.pyplot as plt
@@ -18,6 +19,8 @@ from utils.jax_core.diagnostics import (
     visualize_activations,
     plot_loss_landscape,
     _plot_dists,
+    model_tabulate,
+    plot_output_at_init,
 )
 
 
@@ -299,3 +302,179 @@ class TestPlotSmoke:
     def test_plot_loss_landscape_3d(self, mock_show, model_and_params, make_loss_fn):
         _, params = model_and_params
         plot_loss_landscape(params, make_loss_fn, grid_size=5, plot_3d=True)
+
+
+# ---------------------------------------------------------------------------
+# model_tabulate
+# ---------------------------------------------------------------------------
+
+class TestModelTabulate:
+
+    def test_runs_without_error(self, model_and_params, dummy_batch, capsys):
+        model, _ = model_and_params
+        model_tabulate(model, dummy_batch)
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_output_contains_param_collection(self, model_and_params,
+                                               dummy_batch, capsys):
+        model, _ = model_and_params
+        model_tabulate(model, dummy_batch)
+        captured = capsys.readouterr()
+        assert "Dense" in captured.out
+
+    def test_custom_mutable_params_only(self, model_and_params,
+                                        dummy_batch, capsys):
+        model, _ = model_and_params
+        model_tabulate(model, dummy_batch, mutable=["params"])
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_with_constants_collection(self, dummy_batch, capsys):
+        class ModelWithConstants(nn.Module):
+            @nn.compact
+            def __call__(self, x):
+                def init_const(_):
+                    return jnp.ones((4,))
+                _ = self.variable("constants", "bias", init_const, None).value
+                return nn.Dense(4)(x)
+
+        model = ModelWithConstants()
+        model_tabulate(model, dummy_batch)
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_different_seeds_produce_same_structure(self, model_and_params,
+                                                     dummy_batch, capsys):
+        model, _ = model_and_params
+        model_tabulate(model, dummy_batch, seed=0)
+        out0 = capsys.readouterr().out
+        model_tabulate(model, dummy_batch, seed=42)
+        out42 = capsys.readouterr().out
+        # Structure (layer names, param shapes) should be identical
+        # regardless of seed -- seed only affects random init values
+        assert "Dense" in out0
+        assert "Dense" in out42
+
+
+# ---------------------------------------------------------------------------
+# plot_output_at_init
+# ---------------------------------------------------------------------------
+
+class TestPlotOutputAtInit:
+
+    @pytest.fixture
+    def regional_grid(self):
+        res = 20
+        lons = jnp.linspace(-100., -40., res)
+        lats = jnp.linspace(0., 30., res)
+        LON, LAT = jnp.meshgrid(lons, lats)
+        grid = jnp.stack([LON.ravel(), LAT.ravel()], axis=-1)
+        return grid, (res, res), [-100., -40., 0., 30.]
+
+    @pytest.fixture
+    def sphere_grid(self):
+        res = 20
+        lons = jnp.linspace(-jnp.pi, jnp.pi, res)
+        lats = jnp.linspace(-jnp.pi / 2, jnp.pi / 2, res)
+        LON, LAT = jnp.meshgrid(lons, lats)
+        grid = jnp.stack([LAT.ravel(), LON.ravel()], axis=-1)
+        return grid, (res, res), np.array(LON), np.array(LAT)
+
+    @pytest.fixture
+    def tiny_regressor(self):
+        class Regressor(nn.Module):
+            @nn.compact
+            def __call__(self, x):
+                return nn.Dense(1)(nn.Dense(8)(x))
+        return Regressor()
+
+    @patch("matplotlib.pyplot.show")
+    def test_cartesian_runs(self, mock_show, tiny_regressor, regional_grid):
+        grid, shape, extent = regional_grid
+        plot_output_at_init(
+            tiny_regressor,
+            init_inputs=(grid[:5],),
+            grid_inputs=(grid,),
+            shape=shape,
+            extent=extent,
+            view="cartesian",
+        )
+
+    @patch("matplotlib.pyplot.show")
+    def test_mollweide_runs(self, mock_show, tiny_regressor, sphere_grid):
+        grid, shape, LON, LAT = sphere_grid
+        plot_output_at_init(
+            tiny_regressor,
+            init_inputs=(grid[:5],),
+            grid_inputs=(grid,),
+            shape=shape,
+            view="mollweide",
+            lon_grid=LON,
+            lat_grid=LAT,
+        )
+
+    def test_mollweide_raises_without_grids(self, tiny_regressor, sphere_grid):
+        grid, shape, LON, LAT = sphere_grid
+        with pytest.raises(ValueError, match="lon_grid and lat_grid"):
+            plot_output_at_init(
+                tiny_regressor,
+                init_inputs=(grid[:5],),
+                grid_inputs=(grid,),
+                shape=shape,
+                view="mollweide",
+            )
+
+    def test_shape_mismatch_raises(self, tiny_regressor, regional_grid):
+        grid, _, extent = regional_grid
+        with pytest.raises(AssertionError):
+            plot_output_at_init(
+                tiny_regressor,
+                init_inputs=(grid[:5],),
+                grid_inputs=(grid,),
+                shape=(99, 99),   # wrong -- grid is (20, 20) = 400 points
+                extent=extent,
+            )
+
+    @patch("matplotlib.pyplot.show")
+    def test_squeeze_handles_output_dim_1(self, mock_show, regional_grid):
+        # model outputs (N, 1) -- squeeze should handle this silently
+        class SingleOutputModel(nn.Module):
+            @nn.compact
+            def __call__(self, x):
+                return nn.Dense(1)(x)   # (N, 1) not (N,)
+
+        grid, shape, extent = regional_grid
+        plot_output_at_init(
+            SingleOutputModel(),
+            init_inputs=(grid[:5],),
+            grid_inputs=(grid,),
+            shape=shape,
+            extent=extent,
+        )
+
+    @patch("matplotlib.pyplot.show")
+    def test_custom_title_and_cmap(self, mock_show, tiny_regressor, regional_grid):
+        grid, shape, extent = regional_grid
+        plot_output_at_init(
+            tiny_regressor,
+            init_inputs=(grid[:5],),
+            grid_inputs=(grid,),
+            shape=shape,
+            extent=extent,
+            title="custom title",
+            cmap="viridis",
+        )
+
+    @patch("matplotlib.pyplot.show")
+    def test_different_seeds_run(self, mock_show, tiny_regressor, regional_grid):
+        grid, shape, extent = regional_grid
+        for seed in [0, 1, 42]:
+            plot_output_at_init(
+                tiny_regressor,
+                init_inputs=(grid[:5],),
+                grid_inputs=(grid,),
+                shape=shape,
+                extent=extent,
+                seed=seed,
+            )

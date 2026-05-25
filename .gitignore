@@ -226,3 +226,7 @@ __marimo__/
 pytest-cache-files-*/
 __pycache__/
 *.pyc
+
+# windsurf
+.windsurf/
+

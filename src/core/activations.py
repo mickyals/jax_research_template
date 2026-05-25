@@ -1,3 +1,6 @@
+import inspect
+import warnings
+
 import jax
 import jax.numpy as jnp
 import flax.nnx as nnx
@@ -29,7 +32,7 @@ def register_activation(name: str, description: str = ""):
     -------
     >>> @register_activation("MY_ACT", description="Custom activation")
     ... class MyActivation:
-    ...     def __call__(self, x):
+    ...     def __call__(self, x: jax.Array) -> jax.Array:
     ...         return x
     """
     name = name.upper()
@@ -42,16 +45,20 @@ def register_activation(name: str, description: str = ""):
 
     return decorator
 
-
 def get_activation(name: str, **kwargs):
     """Get an activation function by name.
+
+    Inspects the constructor signature and warns about any kwargs that are
+    not accepted by the requested activation class. Unknown kwargs are then
+    dropped rather than forwarded, preventing a TypeError at instantiation.
 
     Parameters
     ----------
     name : str
         Name of the registered activation (case-insensitive).
     **kwargs
-        Arguments forwarded to the activation constructor.
+        Arguments forwarded to the activation constructor. Unknown kwargs
+        trigger a UserWarning and are silently dropped.
 
     Returns
     -------
@@ -67,12 +74,46 @@ def get_activation(name: str, **kwargs):
     -------
     >>> act = get_activation("SINE", omega=30)
     >>> act(jnp.array([0.0, 1.0]))
+
+    >>> # Unknown kwarg -- warns and drops omega, returns ReLU()
+    >>> act = get_activation("RELU", omega=30)
+    UserWarning: get_activation('RELU'): unknown kwargs {'omega'} will be
+    ignored. Valid kwargs: none.
     """
     name = name.upper()
     if name not in ACTIVATIONS:
         available = ", ".join(sorted(ACTIVATIONS.keys()))
-        raise ValueError(f"Activation '{name}' does not exist. Available: {available}")
-    return ACTIVATIONS[name]["cls"](**kwargs)
+        raise ValueError(
+            f"Activation '{name}' does not exist. Available: {available}"
+        )
+
+    cls = ACTIVATIONS[name]["cls"]
+
+    if kwargs:
+        try:
+            sig = inspect.signature(cls.__init__)
+            # exclude self, *args, **kwargs -- only named parameters count
+            valid = {
+                k for k, p in sig.parameters.items()
+                if k != "self"
+                and p.kind not in (
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                )
+            }
+            unknown = set(kwargs.keys()) - valid
+            if unknown:
+                warnings.warn(
+                    f"get_activation('{name}'): unknown kwargs {unknown} "
+                    f"will be ignored. Valid kwargs: {valid or 'none'}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            kwargs = {k: v for k, v in kwargs.items() if k in valid}
+        except (ValueError, TypeError):
+            pass
+
+    return cls(**kwargs)
 
 
 def list_activations() -> dict[str, str]:
@@ -91,7 +132,11 @@ def list_activations() -> dict[str, str]:
 
 
 def _generate_alpha(x: jax.Array) -> jax.Array:
-    """Compute abs(x) + 1 as a scaling factor for FINER-style activations."""
+    """Compute |x| + 1 as a positive scaling factor for FINER-style activations.
+
+    Always >= 1, so it adaptively increases the effective frequency for
+    inputs with larger magnitude.
+    """
     return jnp.abs(x) + 1
 
 
@@ -101,7 +146,7 @@ def _generate_alpha(x: jax.Array) -> jax.Array:
 
 @register_activation("RELU", description="ReLU activation")
 class ReLU:
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return nnx.relu(x)
 
 
@@ -110,25 +155,25 @@ class LeakyReLU:
     def __init__(self, negative_slope: float = 0.01):
         self.negative_slope = negative_slope
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return nnx.leaky_relu(x, self.negative_slope)
 
 
 @register_activation("SILU", description="SiLU (swish) activation")
 class SiLU:
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return nnx.silu(x)
 
 
 @register_activation("SIGMOID", description="Sigmoid activation")
 class Sigmoid:
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return nnx.sigmoid(x)
 
 
 @register_activation("TANH", description="Tanh activation")
 class Tanh:
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return jnp.tanh(x)
 
 
@@ -137,7 +182,7 @@ class GELU:
     def __init__(self, approximate: bool = True):
         self.approximate = approximate
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return nnx.gelu(x, approximate=self.approximate)
 
 
@@ -146,25 +191,25 @@ class ELU:
     def __init__(self, alpha: float = 1.0):
         self.alpha = alpha
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return nnx.elu(x, alpha=self.alpha)
 
 
 @register_activation("SELU", description="Scaled exponential linear unit activation")
 class SELU:
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return nnx.selu(x)
 
 
 @register_activation("SOFTPLUS", description="Softplus activation")
 class Softplus:
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return nnx.softplus(x)
 
 
 @register_activation("IDENTITY", description="Identity (no-op) activation")
 class Identity:
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return x
 
 
@@ -184,13 +229,17 @@ class SineActivation:
     def __init__(self, omega: float = 30.0):
         self.omega = omega
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return jnp.sin(self.omega * x)
 
 
 @register_activation("FINER", description="FINER sine activation")
 class SineFinerActivation:
     """Applies sin(omega * alpha(x) * x) where alpha(x) = |x| + 1.
+
+    The adaptive scaling factor alpha(x) increases effective frequency
+    for inputs with larger magnitude, improving representational capacity
+    over standard SIREN.
 
     Parameters
     ----------
@@ -200,7 +249,7 @@ class SineFinerActivation:
     def __init__(self, omega: float = 30.0):
         self.omega = omega
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         alpha = _generate_alpha(x)
         return jnp.sin(self.omega * alpha * x)
 
@@ -221,7 +270,7 @@ class GaussianActivation:
     def __init__(self, sigma: float = 10.0):
         self.sigma = sigma
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return jnp.exp(-(self.sigma * x) ** 2)
 
 
@@ -240,7 +289,7 @@ class GaussianFinerActivation:
         self.sigma = sigma
         self.omega = omega
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         alpha = _generate_alpha(x)
         finer = jnp.sin(self.omega * alpha * x)
         scaler = self.sigma / self.omega
@@ -255,6 +304,12 @@ class GaussianFinerActivation:
 class WireActivation:
     """Applies exp(j * omega_0 * x) * exp(-(sigma_0 * |x|)^2).
 
+    Returns a complex-valued array. This activation is intended for use
+    in networks explicitly designed for complex arithmetic. Passing the
+    output to a standard real-valued Dense layer will raise a dtype error.
+    Use ``WIRE_REAL`` for a real-valued alternative that takes the
+    magnitude of the complex output.
+
     Parameters
     ----------
     omega_0 : float
@@ -266,15 +321,42 @@ class WireActivation:
         self.omega_0 = omega_0
         self.sigma_0 = sigma_0
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         complex_exp = jnp.exp(1j * self.omega_0 * x)
         real_exp = jnp.exp(-(jnp.abs(self.sigma_0 * x)) ** 2)
         return complex_exp * real_exp
 
 
+@register_activation("WIRE_REAL", description="Real-valued WIRE activation (magnitude)")
+class WireRealActivation:
+    """Applies |exp(j * omega_0 * x) * exp(-(sigma_0 * |x|)^2)|.
+
+    Real-valued version of WIRE that returns the magnitude of the complex
+    Gabor wavelet. Safe to use with standard real-valued Dense layers.
+
+    Parameters
+    ----------
+    omega_0 : float
+        Frequency parameter. Default 20.
+    sigma_0 : float
+        Width parameter. Default 10.
+    """
+    def __init__(self, omega_0: float = 20.0, sigma_0: float = 10.0):
+        self.omega_0 = omega_0
+        self.sigma_0 = sigma_0
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        complex_exp = jnp.exp(1j * self.omega_0 * x)
+        real_exp = jnp.exp(-(jnp.abs(self.sigma_0 * x)) ** 2)
+        return jnp.abs(complex_exp * real_exp)
+
+
 @register_activation("WIRE_FINER", description="FINER WIRE activation")
 class WireFinerActivation:
     """WIRE with FINER-style adaptive frequency scaling.
+
+    Returns a complex-valued array. See ``WireActivation`` for notes on
+    complex output and downstream dtype compatibility.
 
     Parameters
     ----------
@@ -291,7 +373,7 @@ class WireFinerActivation:
         self.sigma_0 = sigma_0
         self.omega_finer = omega_finer
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         alpha = _generate_alpha(x)
         z = alpha * x
         y = jnp.sin(self.omega_finer * z)
@@ -302,6 +384,39 @@ class WireFinerActivation:
         return complex_exp * real_exp
 
 
+@register_activation("WIRE_FINER_REAL",
+                     description="Real-valued FINER WIRE activation (magnitude)")
+class WireFinerRealActivation:
+    """Real-valued version of WIRE_FINER that returns the magnitude.
+
+    Safe to use with standard real-valued Dense layers.
+
+    Parameters
+    ----------
+    omega_0 : float
+        Frequency parameter. Default 20.
+    sigma_0 : float
+        Width parameter. Default 10.
+    omega_finer : float
+        FINER frequency parameter. Default 5.
+    """
+    def __init__(self, omega_0: float = 20.0, sigma_0: float = 10.0,
+                 omega_finer: float = 5.0):
+        self.omega_0 = omega_0
+        self.sigma_0 = sigma_0
+        self.omega_finer = omega_finer
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        alpha = _generate_alpha(x)
+        z = alpha * x
+        y = jnp.sin(self.omega_finer * z)
+        scaler_omega = self.omega_0 / self.omega_finer
+        scaler_sigma = self.sigma_0 / self.omega_finer
+        complex_exp = jnp.exp(1j * scaler_omega * y)
+        real_exp = jnp.exp(-(scaler_sigma * jnp.abs(y)) ** 2)
+        return jnp.abs(complex_exp * real_exp)
+
+
 # ===================================================================
 # HOSC activation (hyperbolic sine composition)
 # ===================================================================
@@ -309,6 +424,9 @@ class WireFinerActivation:
 @register_activation("HOSC", description="Hyperbolic sine composition activation")
 class HoscActivation:
     """Applies tanh(beta * sin(x)).
+
+    Input x should be scaled appropriately (e.g. to [-pi, pi]) since
+    sin(x) is periodic and gradients become highly oscillatory for large x.
 
     Parameters
     ----------
@@ -318,13 +436,16 @@ class HoscActivation:
     def __init__(self, beta: float = 10.0):
         self.beta = beta
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return jnp.tanh(self.beta * jnp.sin(x))
 
 
 @register_activation("HOSC_FINER", description="FINER HOSC activation")
 class HoscFinerActivation:
     """Applies tanh((beta/omega) * sin(omega * alpha(x) * x)).
+
+    Input x should be scaled appropriately (e.g. to [-pi, pi]) since
+    sin is periodic and gradients become highly oscillatory for large x.
 
     Parameters
     ----------
@@ -337,7 +458,7 @@ class HoscFinerActivation:
         self.beta = beta
         self.omega = omega
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         beta_scaler = self.beta / self.omega
         alpha = _generate_alpha(x)
         return jnp.tanh(beta_scaler * jnp.sin(self.omega * alpha * x))
@@ -351,6 +472,8 @@ class HoscFinerActivation:
 class SincActivation:
     """Applies sinc(omega * x) = sin(pi * omega * x) / (pi * omega * x).
 
+    Uses jnp.sinc which computes the normalised sinc: sinc(t) = sin(pi*t) / (pi*t).
+
     Parameters
     ----------
     omega : float
@@ -359,5 +482,5 @@ class SincActivation:
     def __init__(self, omega: float = 30.0):
         self.omega = omega
 
-    def __call__(self, x):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return jnp.sinc(self.omega * x)
