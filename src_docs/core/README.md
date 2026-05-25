@@ -313,3 +313,343 @@ _generate_alpha(x: jax.Array) -> jax.Array
 ```
 
 Computes `|x| + 1`. Always `>= 1`, providing a positive adaptive scaling factor used by all FINER-style activations to increase effective frequency for inputs with larger magnitude.
+
+The `embeddings.py` section in the readme needs to replace the current placeholder line. Here is what to add after the activations section:
+
+---
+
+## Module: `embeddings.py`
+
+A registry-based embedding system for positional and spherical encodings. Embeddings are registered by name and retrieved via `get_embedding`. The registry is extensible via the `@register_embedding` decorator.
+
+All Flax Linen modules -- instantiating a module does not run computation. Call `module.init(key, *inputs)` to initialise and `module.apply(variables, *inputs)` to run a forward pass.
+
+---
+
+### Registry Functions
+
+---
+
+#### `register_embedding`
+
+```
+register_embedding(name: str, description: str = "") -> callable
+```
+
+Class decorator that registers an embedding under a given name. Names are stored uppercase and must be unique.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `name` | `str` | Name used for lookup. Stored uppercase | required |
+| `description` | `str` | Short description shown in `list_embeddings()` | `""` |
+
+**Returns:**
+
+| Type | Description |
+|------|-------------|
+| `callable` | Class decorator |
+
+**Raises:**
+
+| Type | Condition |
+|------|-----------|
+| `ValueError` | If an embedding with the same name is already registered |
+
+---
+
+#### `get_embedding`
+
+```
+get_embedding(name: str, **kwargs) -> nn.Module
+```
+
+Retrieve and instantiate a registered embedding by name. Inspects the constructor signature and emits a `UserWarning` for unknown kwargs. Unknown kwargs are dropped rather than forwarded.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `name` | `str` | Name of the registered embedding (case-insensitive) | required |
+| `**kwargs` | any | Arguments forwarded to the embedding constructor. Unknown kwargs trigger a `UserWarning` and are dropped | |
+
+**Returns:**
+
+| Type | Description |
+|------|-------------|
+| `nn.Module` | An instantiated Flax Linen embedding module |
+
+**Raises:**
+
+| Type | Condition |
+|------|-----------|
+| `ValueError` | If no embedding with the given name exists. Error message lists all available names |
+
+---
+
+#### `list_embeddings`
+
+```
+list_embeddings() -> dict[str, str]
+```
+
+Return a sorted dictionary of all registered embedding names and their descriptions.
+
+**Returns:**
+
+| Type | Description |
+|------|-------------|
+| `dict[str, str]` | Mapping of uppercase name to description string |
+
+---
+
+### General Embeddings
+
+---
+
+#### `GAUSSIAN_POSITIONAL`
+
+```
+GaussianFourierEmbedding(input_dim: int, mapping_dim: int, scale: float, seed: int = 0)
+```
+
+Random Fourier features with a Gaussian frequency matrix. Samples a fixed projection matrix `B ~ N(0, scale^2)` and computes `[cos(2*pi*x*B), sin(2*pi*x*B)]`.
+
+`B` is stored as a plain Python attribute in `setup()` -- invisible to the optimizer and never updated during training. Equivalent to `eqx.static_field()`. Different seeds produce different projections.
+
+Following Tancik et al. 2020 (https://arxiv.org/abs/2006.10739).
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `input_dim` | `int` | Dimensionality of the input coordinates | required |
+| `mapping_dim` | `int` | Output dimensionality. Must be even | required |
+| `scale` | `float` | Standard deviation of the Gaussian used to sample frequencies | required |
+| `seed` | `int` | Seed used to sample the frequency matrix | `0` |
+
+**Attributes:**
+
+| Name | Description |
+|------|-------------|
+| `out_features` | Equal to `mapping_dim` |
+
+**Raises:**
+
+| Type | Condition |
+|------|-----------|
+| `ValueError` | If `mapping_dim` is not even |
+
+---
+
+#### `GENERAL_POSITIONAL`
+
+```
+PositionalEmbedding(input_dim: int, mapping_dim: int, scale: float)
+```
+
+Deterministic positional encoding with geometrically spaced frequencies. Frequencies are spaced as `scale^(j / mapping_dim)` for `j = 0 ... mapping_dim-1`, broadcast across all input dimensions. With `scale=1` this reduces to standard sinusoidal positional encoding. No parameters or constants -- `variables == {}`.
+
+Following Tancik et al. 2020 (https://arxiv.org/abs/2006.10739).
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `input_dim` | `int` | Dimensionality of the input coordinates | required |
+| `mapping_dim` | `int` | Number of frequencies per input dimension | required |
+| `scale` | `float` | Frequency growth base. `scale=1` gives uniform frequencies | required |
+
+**Attributes:**
+
+| Name | Description |
+|------|-------------|
+| `out_features` | Equal to `2 * mapping_dim` |
+
+---
+
+### Spherical Embeddings
+
+All spherical embeddings take `lat` and `lon` in radians as separate arguments. No parameters or constants -- `variables == {}` for all Sphere2Vec variants.
+
+---
+
+#### `SPHERE_GRID`
+
+```
+SphericalGridEmbedding(scale: int, r_min: float, r_max: float = 1.0)
+```
+
+Independent multi-scale sinusoidal encoding of lat and lon. Applies a geometric frequency bank independently to each, concatenating sin and cos. No cross-terms.
+
+output_dim = `4 * scale`
+
+Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `scale` | `int` | Number of frequency bins per coordinate | required |
+| `r_min` | `float` | Minimum frequency | required |
+| `r_max` | `float` | Maximum frequency | `1.0` |
+
+---
+
+#### `SPHERE_C`
+
+```
+SphericalCartesianEmbedding(scale: int, r_min: float, r_max: float = 1.0)
+```
+
+Multi-scale encoding of the 3D unit Cartesian vector. Converts `(lat, lon)` to `(cos(lat)cos(lon), cos(lat)sin(lon), sin(lat))` and applies a geometric frequency bank to each Cartesian component via `sin`.
+
+output_dim = `3 * scale`
+
+Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `scale` | `int` | Number of frequency bins per Cartesian component | required |
+| `r_min` | `float` | Minimum frequency | required |
+| `r_max` | `float` | Maximum frequency | `1.0` |
+
+---
+
+#### `SPHERE_M`
+
+```
+SphericalMultiScaleEmbedding(scale: int, r_min: float, r_max: float = 1.0)
+```
+
+Multi-scale encoding mixing transformed and raw spherical coordinates. Combines multi-scale transformed lat terms with raw lon and vice versa to capture cross-coordinate interactions at different scales.
+
+output_dim = `5 * scale`
+
+Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `scale` | `int` | Number of frequency bins | required |
+| `r_min` | `float` | Minimum frequency | required |
+| `r_max` | `float` | Maximum frequency | `1.0` |
+
+---
+
+#### `DFS`
+
+```
+DoubleFourierSphericalEmbedding(scale: int, r_lat_min: float, r_lon_min: float, r_max: float = 1.0)
+```
+
+Double Fourier Sphere encoding with cross-frequency interaction terms. Computes base sin/cos terms for lat and lon independently, then all pairwise products (cos\*cos, cos\*sin, sin\*cos, sin\*sin) across the scale dimension.
+
+output_dim = `4 * scale + 4 * scale^2`
+
+Output grows quadratically with scale. `scale <= 16` is recommended.
+
+Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `scale` | `int` | Number of frequency bins per coordinate | required |
+| `r_lat_min` | `float` | Minimum frequency for latitude | required |
+| `r_lon_min` | `float` | Minimum frequency for longitude | required |
+| `r_max` | `float` | Maximum frequency | `1.0` |
+
+---
+
+#### `SPHERE_C+`
+
+```
+SphericalCartesianPlusEmbedding(scale: int, r_min: float, r_max: float = 1.0)
+```
+
+Sphere-C augmented with independent lat/lon sinusoidal terms. Extends `SPHERE_C` by adding `sin/cos` of transformed lat and lon alongside the Cartesian component encoding.
+
+output_dim = `6 * scale`
+
+Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `scale` | `int` | Number of frequency bins | required |
+| `r_min` | `float` | Minimum frequency | required |
+| `r_max` | `float` | Maximum frequency | `1.0` |
+
+---
+
+#### `SPHERE_M+`
+
+```
+SphericalMultiScalePlusEmbedding(scale: int, r_min: float, r_max: float = 1.0)
+```
+
+Sphere-M augmented with independent transformed lat/lon sin/cos terms. Extends `SPHERE_M` by adding `sin(lat_t)`, `sin(lon_t)`, `cos(lon_t)`.
+
+output_dim = `8 * scale`
+
+Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `scale` | `int` | Number of frequency bins | required |
+| `r_min` | `float` | Minimum frequency | required |
+| `r_max` | `float` | Maximum frequency | `1.0` |
+
+---
+
+#### `SPHERICAL_HARMONICS`
+
+```
+SphericalHarmonicsEmbedding(legendre_polys: int = 10)
+```
+
+Real spherical harmonic basis functions as positional encoding. Unlike DFS and Sphere2Vec variants, spherical harmonics are natively defined on the sphere and produce no pole artifacts.
+
+Evaluates `Y_l^m(lat, lon)` for degrees `0` to `legendre_polys - 1`. For each degree `l` there are `2l + 1` basis functions, giving `legendre_polys^2` total features.
+
+Normalisation constants are precomputed in `setup()` using plain Python `math.factorial` and stored as a static array -- never traced by JAX. No parameters or constants in the Flax variable system -- `variables == {}`.
+
+output_dim = `legendre_polys^2`
+
+Following Rußwurm et al. 2024 (https://arxiv.org/abs/2310.06743).
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `legendre_polys` | `int` | Number of degrees (0 to `legendre_polys - 1`). Recommended range 5-20. Values above 20 may accumulate numerical errors in the Legendre recursion | `10` |
+
+**Attributes:**
+
+| Name | Description |
+|------|-------------|
+| `out_features` | Equal to `legendre_polys^2` |
+
+**Notes:**
+
+Input `lat` must be in radians in `[-pi/2, pi/2]`. Input `lon` must be in radians in `[-pi, pi]`.
+
+---
+
+### Private Helpers
+
+#### `_make_beta`
+
+```
+_make_beta(scale: int, r_min: float, r_max: float) -> jax.Array
+```
+
+Geometric frequency schedule from `r_min` to `r_max` over `scale` steps. Shared by all Sphere2Vec embeddings. Returns shape `(scale,)`.
