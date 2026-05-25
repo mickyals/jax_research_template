@@ -1,6 +1,6 @@
 # Core
 
-Reusable neural building blocks for JAX/Flax NNX models.
+Reusable neural building blocks for JAX/Flax Linen models.
 
 - **`activations.py`**: Activation function registry with standard, SIREN, FINER, Gaussian, WIRE, HOSC, and Sinc variants
 - **`layers.py`**: Attention, cross-attention, set aggregation, feed-forward blocks, layer norm, type-specific projection layers, masked token padding *(in development)*
