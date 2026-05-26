@@ -88,28 +88,6 @@ Split a PRNGKey into a new root key and a subkey. Standard JAX pattern to avoid 
 
 ---
 
-### `key_to_seed`
-
-```
-key_to_seed(key: jax.Array) -> int
-```
-
-Derive a reproducible integer seed from a JAX PRNGKey. Used to bridge JAX's functional PRNG to stateful RNGs such as `numpy.random.Generator` or `scipy.stats.qmc` samplers.
-
-**Parameters:**
-
-| Name | Type | Description | Default |
-|------|------|-------------|---------|
-| `key` | `jax.Array` | JAX PRNGKey | required |
-
-**Returns:**
-
-| Type | Description |
-|------|-------------|
-| `int` | Integer seed in `[0, 2^31 - 1]` |
-
----
-
 ### `show_jaxpr`
 
 ```
