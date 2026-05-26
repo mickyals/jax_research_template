@@ -101,7 +101,7 @@ All activations are callable classes with signature `__call__(self, x: jax.Array
 
 #### Standard Wrappers
 
-Thin wrappers around `flax.nnx` and `jax.numpy` built-ins. Requires `flax >= 0.8.0` for NNX support.
+Thin wrappers around `flax.linen` and `jax.numpy` built-ins.
 
 | Name | Formula | Parameters |
 |------|---------|------------|
