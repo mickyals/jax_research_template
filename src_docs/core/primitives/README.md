@@ -1,17 +1,18 @@
-# Core
+# Core / Primitives
 
-Reusable neural building blocks for JAX/Flax Linen models.
+Reusable registry-based primitives for JAX/Flax models.
 
-- **`activations.py`**: Activation function registry with standard, SIREN, FINER, Gaussian, WIRE, HOSC, and Sinc variants
-- **`layers.py`**: Attention, cross-attention, set aggregation, feed-forward blocks, layer norm, type-specific projection layers, masked token padding *(in development)*
-- **`embeddings.py`**: Cyclic time encoding, Fourier features, spatial positional encodings, delta-t encodings, learned vs fixed variants *(in development)*
-- **`nets.py`**: Encoder, probabilistic field network, hypernetwork variant, full model *(in development)*
+- **`activations.py`**: Activation function registry with standard wrappers, SIREN, FINER, Gaussian, WIRE, HOSC, and Sinc variants
+- **`embeddings.py`**: Positional and spherical embedding registry with Gaussian Fourier features, deterministic frequency banks, Sphere2Vec variants, DFS, and spherical harmonics
+- **`initializations.py`**: Weight initializer registry with SIREN, FINER, Xavier, LeCun, WIRE, and Gabor variants
+
+All three modules follow the same pattern: a `dict`-backed registry, a `@register_*` decorator, a `get_*` factory, and a `list_*` introspection function. The factory inspects constructor signatures and emits a `UserWarning` for unknown kwargs rather than raising, so hyperparameter sweeps that pass extra keys do not crash at instantiation.
 
 ---
 
 ## Module: `activations.py`
 
-A registry-based activation system. Activations are registered by name and retrieved via `get_activation`. The registry is extensible -- custom activations can be added via the `@register_activation` decorator without modifying the module.
+Activations are plain callable classes -- no Flax module machinery. They can be passed directly to `nn.Dense` as `kernel_init`, stored in a config dict, or called as `act(x)`.
 
 ---
 
@@ -25,7 +26,7 @@ A registry-based activation system. Activations are registered by name and retri
 register_activation(name: str, description: str = "") -> callable
 ```
 
-Class decorator that registers an activation under a given name. Names are stored uppercase and must be unique across the registry.
+Class decorator that registers an activation under a given name. Names are stored uppercase and must be unique.
 
 **Parameters:**
 
@@ -54,7 +55,7 @@ Class decorator that registers an activation under a given name. Names are store
 get_activation(name: str, **kwargs) -> callable
 ```
 
-Retrieve and instantiate a registered activation by name. Inspects the constructor signature and emits a `UserWarning` for any kwargs not accepted by the activation class. Unknown kwargs are dropped rather than forwarded to prevent a `TypeError` at instantiation.
+Retrieve and instantiate a registered activation by name. Unknown kwargs are warned about and dropped rather than forwarded.
 
 **Parameters:**
 
@@ -67,7 +68,7 @@ Retrieve and instantiate a registered activation by name. Inspects the construct
 
 | Type | Description |
 |------|-------------|
-| `callable` | An instantiated activation function |
+| `callable` | An instantiated activation with signature `(x: jax.Array) -> jax.Array` |
 
 **Raises:**
 
@@ -101,7 +102,7 @@ All activations are callable classes with signature `__call__(self, x: jax.Array
 
 #### Standard Wrappers
 
-Thin wrappers around `flax.linen` and `jax.numpy` built-ins.
+Thin wrappers around `flax.nnx` and `jax.numpy` built-ins.
 
 | Name | Formula | Parameters |
 |------|---------|------------|
@@ -140,7 +141,7 @@ Applies `sin(omega * x)`. Standard SIREN activation for implicit neural represen
 SineFinerActivation(omega: float = 30.0)
 ```
 
-Applies `sin(omega * alpha(x) * x)` where `alpha(x) = |x| + 1`. The adaptive scaling factor increases effective frequency for inputs with larger magnitude, improving representational capacity over standard SIREN.
+Applies `sin(omega * alpha(x) * x)` where `alpha(x) = |x| + 1`. The adaptive factor increases effective frequency for larger-magnitude inputs, improving representational capacity over standard SIREN.
 
 **Parameters:**
 
@@ -191,7 +192,7 @@ WireActivation(omega_0: float = 20.0, sigma_0: float = 10.0)
 
 Applies `exp(j * omega_0 * x) * exp(-(sigma_0 * |x|)^2)`.
 
-Returns a **complex-valued** array. Intended for networks explicitly designed for complex arithmetic. Passing the output to a standard real-valued Dense layer will raise a dtype error. Use `WIRE_REAL` for a safe real-valued alternative.
+Returns a **complex-valued** array. Intended for networks explicitly designed for complex arithmetic. Passing the output to a standard real-valued `Dense` layer will raise a dtype error. Use `WIRE_REAL` for a safe real-valued alternative.
 
 **Parameters:**
 
@@ -208,7 +209,7 @@ Returns a **complex-valued** array. Intended for networks explicitly designed fo
 WireRealActivation(omega_0: float = 20.0, sigma_0: float = 10.0)
 ```
 
-Applies `|exp(j * omega_0 * x) * exp(-(sigma_0 * |x|)^2)|`. Real-valued version of `WIRE` that returns the magnitude of the complex Gabor wavelet. Safe to use with standard real-valued Dense layers.
+Applies `|exp(j * omega_0 * x) * exp(-(sigma_0 * |x|)^2)|`. Real-valued magnitude of the complex Gabor wavelet. Safe to use with standard real-valued `Dense` layers.
 
 **Parameters:**
 
@@ -225,7 +226,7 @@ Applies `|exp(j * omega_0 * x) * exp(-(sigma_0 * |x|)^2)|`. Real-valued version 
 WireFinerActivation(omega_0: float = 20.0, sigma_0: float = 10.0, omega_finer: float = 5.0)
 ```
 
-WIRE with FINER-style adaptive frequency scaling via `alpha(x) = |x| + 1`. Returns a **complex-valued** array. See `WIRE` for notes on complex output and downstream dtype compatibility. Use `WIRE_FINER_REAL` for a safe real-valued alternative.
+WIRE with FINER-style adaptive frequency scaling via `alpha(x) = |x| + 1`. Returns a **complex-valued** array. See `WIRE` for notes on complex output. Use `WIRE_FINER_REAL` for a safe real-valued alternative.
 
 **Parameters:**
 
@@ -243,7 +244,7 @@ WIRE with FINER-style adaptive frequency scaling via `alpha(x) = |x| + 1`. Retur
 WireFinerRealActivation(omega_0: float = 20.0, sigma_0: float = 10.0, omega_finer: float = 5.0)
 ```
 
-Real-valued version of `WIRE_FINER` that returns the magnitude of the complex output. Safe to use with standard real-valued Dense layers.
+Real-valued magnitude of `WIRE_FINER`. Safe to use with standard real-valued `Dense` layers.
 
 **Parameters:**
 
@@ -261,7 +262,7 @@ Real-valued version of `WIRE_FINER` that returns the magnitude of the complex ou
 HoscActivation(beta: float = 10.0)
 ```
 
-Applies `tanh(beta * sin(x))`. Input `x` should be scaled to approximately `[-pi, pi]` since `sin(x)` is periodic and gradients become highly oscillatory for large `x`.
+Applies `tanh(beta * sin(x))`. Input `x` should be scaled to approximately `[-pi, pi]`; gradients become highly oscillatory for large `x` due to the periodicity of `sin`.
 
 **Parameters:**
 
@@ -294,7 +295,7 @@ Applies `tanh((beta/omega) * sin(omega * alpha(x) * x))`. Input `x` should be sc
 SincActivation(omega: float = 30.0)
 ```
 
-Applies `sinc(omega * x) = sin(pi * omega * x) / (pi * omega * x)`. Uses `jnp.sinc` which implements the normalised sinc function.
+Applies `sinc(omega * x)`. Uses `jnp.sinc`, which implements the normalised sinc: `sin(pi * t) / (pi * t)`.
 
 **Parameters:**
 
@@ -312,17 +313,13 @@ Applies `sinc(omega * x) = sin(pi * omega * x) / (pi * omega * x)`. Uses `jnp.si
 _generate_alpha(x: jax.Array) -> jax.Array
 ```
 
-Computes `|x| + 1`. Always `>= 1`, providing a positive adaptive scaling factor used by all FINER-style activations to increase effective frequency for inputs with larger magnitude.
-
-The `embeddings.py` section in the readme needs to replace the current placeholder line. Here is what to add after the activations section:
+Computes `|x| + 1`. Always `>= 1`. Shared adaptive scaling factor used by all FINER-style activations.
 
 ---
 
 ## Module: `embeddings.py`
 
-A registry-based embedding system for positional and spherical encodings. Embeddings are registered by name and retrieved via `get_embedding`. The registry is extensible via the `@register_embedding` decorator.
-
-All Flax Linen modules -- instantiating a module does not run computation. Call `module.init(key, *inputs)` to initialise and `module.apply(variables, *inputs)` to run a forward pass.
+A registry-based embedding system for positional and spherical encodings. All embeddings are Flax Linen `nn.Module` subclasses. Instantiating a module does not run computation -- call `module.init(key, *inputs)` to initialise and `module.apply(variables, *inputs)` to run a forward pass.
 
 ---
 
@@ -365,7 +362,7 @@ Class decorator that registers an embedding under a given name. Names are stored
 get_embedding(name: str, **kwargs) -> nn.Module
 ```
 
-Retrieve and instantiate a registered embedding by name. Inspects the constructor signature and emits a `UserWarning` for unknown kwargs. Unknown kwargs are dropped rather than forwarded.
+Retrieve and instantiate a registered embedding by name. Unknown kwargs are warned about and dropped.
 
 **Parameters:**
 
@@ -414,9 +411,9 @@ Return a sorted dictionary of all registered embedding names and their descripti
 GaussianFourierEmbedding(input_dim: int, mapping_dim: int, scale: float, seed: int = 0)
 ```
 
-Random Fourier features with a Gaussian frequency matrix. Samples a fixed projection matrix `B ~ N(0, scale^2)` and computes `[cos(2*pi*x*B), sin(2*pi*x*B)]`.
+Random Fourier features with a Gaussian frequency matrix. Samples a fixed projection matrix `B ~ N(0, scale^2)` at init time and computes `[cos(2*pi*x*B), sin(2*pi*x*B)]`.
 
-`B` is stored as a plain Python attribute in `setup()` -- invisible to the optimizer and never updated during training. Equivalent to `eqx.static_field()`. Different seeds produce different projections.
+`B` is stored as a plain Python attribute in `setup()`, making it invisible to the optimizer and never updated during training. This is equivalent to `eqx.static_field()`. Different seeds produce different projections.
 
 Following Tancik et al. 2020 (https://arxiv.org/abs/2006.10739).
 
@@ -481,9 +478,9 @@ All spherical embeddings take `lat` and `lon` in radians as separate arguments. 
 SphericalGridEmbedding(scale: int, r_min: float, r_max: float = 1.0)
 ```
 
-Independent multi-scale sinusoidal encoding of lat and lon. Applies a geometric frequency bank independently to each, concatenating sin and cos. No cross-terms.
+Independent multi-scale sinusoidal encoding of lat and lon. Applies a geometric frequency bank independently to each and concatenates sin and cos. No cross-terms between lat and lon.
 
-output_dim = `4 * scale`
+`output_dim = 4 * scale`
 
 Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
 
@@ -505,7 +502,7 @@ SphericalCartesianEmbedding(scale: int, r_min: float, r_max: float = 1.0)
 
 Multi-scale encoding of the 3D unit Cartesian vector. Converts `(lat, lon)` to `(cos(lat)cos(lon), cos(lat)sin(lon), sin(lat))` and applies a geometric frequency bank to each Cartesian component via `sin`.
 
-output_dim = `3 * scale`
+`output_dim = 3 * scale`
 
 Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
 
@@ -527,7 +524,7 @@ SphericalMultiScaleEmbedding(scale: int, r_min: float, r_max: float = 1.0)
 
 Multi-scale encoding mixing transformed and raw spherical coordinates. Combines multi-scale transformed lat terms with raw lon and vice versa to capture cross-coordinate interactions at different scales.
 
-output_dim = `5 * scale`
+`output_dim = 5 * scale`
 
 Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
 
@@ -549,7 +546,7 @@ DoubleFourierSphericalEmbedding(scale: int, r_lat_min: float, r_lon_min: float, 
 
 Double Fourier Sphere encoding with cross-frequency interaction terms. Computes base sin/cos terms for lat and lon independently, then all pairwise products (cos\*cos, cos\*sin, sin\*cos, sin\*sin) across the scale dimension.
 
-output_dim = `4 * scale + 4 * scale^2`
+`output_dim = 4 * scale + 4 * scale^2`
 
 Output grows quadratically with scale. `scale <= 16` is recommended.
 
@@ -572,9 +569,9 @@ Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
 SphericalCartesianPlusEmbedding(scale: int, r_min: float, r_max: float = 1.0)
 ```
 
-Sphere-C augmented with independent lat/lon sinusoidal terms. Extends `SPHERE_C` by adding `sin/cos` of transformed lat and lon alongside the Cartesian component encoding.
+Sphere-C augmented with independent lat/lon sinusoidal terms. Extends `SPHERE_C` by adding `sin/cos` of transformed lat and lon directly alongside the Cartesian component encoding.
 
-output_dim = `6 * scale`
+`output_dim = 6 * scale`
 
 Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
 
@@ -596,7 +593,7 @@ SphericalMultiScalePlusEmbedding(scale: int, r_min: float, r_max: float = 1.0)
 
 Sphere-M augmented with independent transformed lat/lon sin/cos terms. Extends `SPHERE_M` by adding `sin(lat_t)`, `sin(lon_t)`, `cos(lon_t)`.
 
-output_dim = `8 * scale`
+`output_dim = 8 * scale`
 
 Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
 
@@ -616,15 +613,15 @@ Following Mai et al. 2023 (https://arxiv.org/abs/2306.17624).
 SphericalHarmonicsEmbedding(legendre_polys: int = 10)
 ```
 
-Real spherical harmonic basis functions as positional encoding. Unlike DFS and Sphere2Vec variants, spherical harmonics are natively defined on the sphere and produce no pole artifacts.
+Real spherical harmonic basis functions as positional encoding. Evaluates `Y_l^m(lat, lon)` for degrees `0` to `legendre_polys - 1`. Unlike DFS and Sphere2Vec variants, spherical harmonics are natively defined on the sphere and produce no pole artifacts.
 
-Evaluates `Y_l^m(lat, lon)` for degrees `0` to `legendre_polys - 1`. For each degree `l` there are `2l + 1` basis functions, giving `legendre_polys^2` total features.
+For each degree `l` there are `2l + 1` basis functions, giving `legendre_polys^2` total features.
 
-Normalisation constants are precomputed in `setup()` using plain Python `math.factorial` and stored as a static array -- never traced by JAX. No parameters or constants in the Flax variable system -- `variables == {}`.
+Normalisation constants are precomputed in `setup()` using `math.factorial` and stored as a static array -- never traced by JAX. No parameters or constants in the Flax variable system -- `variables == {}`.
 
-output_dim = `legendre_polys^2`
+`output_dim = legendre_polys^2`
 
-Following Rußwurm et al. 2024 (https://arxiv.org/abs/2310.06743).
+Following Russwurm et al. 2024 (https://arxiv.org/abs/2310.06743).
 
 **Parameters:**
 
@@ -640,7 +637,7 @@ Following Rußwurm et al. 2024 (https://arxiv.org/abs/2310.06743).
 
 **Notes:**
 
-Input `lat` must be in radians in `[-pi/2, pi/2]`. Input `lon` must be in radians in `[-pi, pi]`.
+`lat` must be in radians in `[-pi/2, pi/2]`. `lon` must be in radians in `[-pi, pi]`. Internally converts to colatitude and longitude in SH convention.
 
 ---
 
@@ -653,3 +650,313 @@ _make_beta(scale: int, r_min: float, r_max: float) -> jax.Array
 ```
 
 Geometric frequency schedule from `r_min` to `r_max` over `scale` steps. Shared by all Sphere2Vec embeddings. Returns shape `(scale,)`.
+
+---
+
+## Module: `initializations.py`
+
+Weight initializers are plain callable classes with signature `(key: jax.Array, shape: tuple, dtype) -> jax.Array`. They can be passed directly to `nn.Dense` as `kernel_init` or `bias_init`.
+
+---
+
+### Registry Functions
+
+---
+
+#### `register_initializer`
+
+```
+register_initializer(name: str, description: str = "") -> callable
+```
+
+Class decorator that registers an initializer under a given name. Names are stored uppercase and must be unique.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `name` | `str` | Name used for lookup. Stored uppercase | required |
+| `description` | `str` | Short description shown in `list_initializers()` | `""` |
+
+**Returns:**
+
+| Type | Description |
+|------|-------------|
+| `callable` | Class decorator |
+
+**Raises:**
+
+| Type | Condition |
+|------|-----------|
+| `ValueError` | If an initializer with the same name is already registered |
+
+---
+
+#### `get_initializer`
+
+```
+get_initializer(name: str, **kwargs) -> callable
+```
+
+Retrieve and instantiate a registered initializer by name. Unknown kwargs are warned about and dropped.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `name` | `str` | Name of the registered initializer (case-insensitive) | required |
+| `**kwargs` | any | Arguments forwarded to the initializer constructor. Unknown kwargs trigger a `UserWarning` and are dropped | |
+
+**Returns:**
+
+| Type | Description |
+|------|-------------|
+| `callable` | An instantiated initializer with signature `(key: jax.Array, shape: tuple, dtype) -> jax.Array` |
+
+**Raises:**
+
+| Type | Condition |
+|------|-----------|
+| `ValueError` | If no initializer with the given name exists. Error message lists all available names |
+
+---
+
+#### `list_initializers`
+
+```
+list_initializers() -> dict[str, str]
+```
+
+Return a sorted dictionary of all registered initializer names and their descriptions.
+
+**Returns:**
+
+| Type | Description |
+|------|-------------|
+| `dict[str, str]` | Mapping of uppercase name to description string |
+
+---
+
+### SIREN Initializers
+
+---
+
+#### `SIREN`
+
+```
+SirenInit(fan_in: int, is_first: bool = False, omega: float = 30.0)
+```
+
+SIREN weight initializer (Sitzmann et al. 2020).
+
+First layer: `U(-1/fan_in, 1/fan_in)`
+Hidden layers: `U(-sqrt(6/fan_in)/omega, sqrt(6/fan_in)/omega)`
+
+Note: the first-layer bound is only wider than the hidden-layer bound when `fan_in > omega^2 / 6` (150 for the default `omega=30`). For smaller `fan_in` the hidden-layer bound is wider.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `fan_in` | `int` | Number of input features to the layer | required |
+| `is_first` | `bool` | If `True`, use first-layer bounds | `False` |
+| `omega` | `float` | Frequency parameter | `30.0` |
+
+---
+
+### FINER Initializers
+
+---
+
+#### `FINER`
+
+```
+FinerInit(fan_in: int, is_first: bool = False, omega: float = 30.0)
+```
+
+FINER kernel initializer (Liu et al. 2024). Uses the same weight bounds as `SIREN`. Pair with `FINER_BIAS` for the full FINER init scheme.
+
+First layer: `U(-1/fan_in, 1/fan_in)`
+Hidden layers: `U(-sqrt(6/fan_in)/omega, sqrt(6/fan_in)/omega)`
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `fan_in` | `int` | Number of input features to the layer | required |
+| `is_first` | `bool` | If `True`, use first-layer bounds | `False` |
+| `omega` | `float` | Frequency parameter | `30.0` |
+
+---
+
+#### `FINER_BIAS`
+
+```
+FinerBiasInit(k: float = 1.0)
+```
+
+FINER bias initializer. Draws from `U(-k, k)`. In Flax, kernel and bias inits are passed separately to `nn.Dense`; this provides the bias component of the FINER init scheme.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `k` | `float` | Half-range of the uniform distribution | `1.0` |
+
+---
+
+### Xavier Initializers
+
+Both variants are implemented directly from the standard formulas rather than delegating to Flax, to avoid version-dependent behaviour.
+
+---
+
+#### `XAVIER_UNIFORM`
+
+```
+XavierUniformInit(gain: float = 1.0)
+```
+
+Draws from `U(-bound, bound)` where `bound = gain * sqrt(6 / (fan_in + fan_out))`.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `gain` | `float` | Scaling factor applied to the standard bound | `1.0` |
+
+---
+
+#### `XAVIER_NORMAL`
+
+```
+XavierNormalInit(gain: float = 1.0)
+```
+
+Draws from `N(0, std^2)` where `std = gain * sqrt(2 / (fan_in + fan_out))`.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `gain` | `float` | Scaling factor applied to the standard deviation | `1.0` |
+
+---
+
+### Standard Initializers
+
+---
+
+#### `LECUN_NORMAL`
+
+```
+LeCunNormalInit(scale: float = 1.0)
+```
+
+Draws from `N(0, std^2)` where `std = scale / sqrt(fan_in)`. Default for most JAX/Flax MLPs.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `scale` | `float` | Scaling factor applied to std | `1.0` |
+
+---
+
+#### `NORMAL`
+
+```
+NormalInit(mean: float = 0.0, std: float = 0.1)
+```
+
+Draws from `N(mean, std^2)`.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `mean` | `float` | Mean of the distribution | `0.0` |
+| `std` | `float` | Standard deviation | `0.1` |
+
+---
+
+#### `UNIFORM`
+
+```
+UniformInit(a: float = -0.1, b: float = 0.1)
+```
+
+Draws from `U(a, b)`.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `a` | `float` | Lower bound | `-0.1` |
+| `b` | `float` | Upper bound | `0.1` |
+
+---
+
+#### `IDENTITY`
+
+```
+IdentityInit()
+```
+
+Initialises a square weight matrix as the identity. Raises `ValueError` for non-square shapes.
+
+---
+
+#### `ORTHOGONAL`
+
+```
+OrthogonalInit(gain: float = 1.0)
+```
+
+Orthogonal matrix initialization via Flax. Output is scaled by `gain`.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `gain` | `float` | Scaling factor applied to the orthogonal matrix | `1.0` |
+
+---
+
+### MFN / WIRE Initializers
+
+---
+
+#### `GABOR`
+
+```
+GaborInit(std_scale: float = 1.0)
+```
+
+Gabor filter weight initializer for Multiplicative Filter Networks (Fathony et al. 2021). Draws from `N(0, std^2)` where `std = std_scale / sqrt(fan_in)`.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `std_scale` | `float` | Scales the standard deviation relative to `1/sqrt(fan_in)` | `1.0` |
+
+---
+
+#### `WIRE`
+
+```
+WireInit(gain: float = 1.0)
+```
+
+Complex weight initializer for WIRE networks. Draws real and imaginary parts independently from `N(0, std^2)` where `std = gain * sqrt(2 / (fan_in + fan_out))`. The default output dtype is `complex64`. Passing `dtype=jnp.complex128` is supported but requires `jax_enable_x64=True`.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `gain` | `float` | Scaling factor applied to std | `1.0` |
+
+**Notes:**
+
+Default `dtype` is `complex64`. The float backing dtype (`float32` or `float64`) is inferred automatically from the requested complex dtype.
