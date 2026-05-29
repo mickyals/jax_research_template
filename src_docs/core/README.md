@@ -1,12 +1,18 @@
-# Core / Primitives
+# Core
 
-Reusable registry-based primitives for JAX/Flax models.
+Reusable registry-based building blocks for JAX/Flax models.
 
-- **`activations.py`**: Activation function registry with standard wrappers, SIREN, FINER, Gaussian, WIRE, HOSC, and Sinc variants
-- **`embeddings.py`**: Positional and spherical embedding registry with Gaussian Fourier features, deterministic frequency banks, Sphere2Vec variants, DFS, and spherical harmonics
-- **`initializations.py`**: Weight initializer registry with SIREN, FINER, Xavier, LeCun, WIRE, and Gabor variants
+| Module | Description |
+|--------|-------------|
+| [`activations.py`](#module-activationspy) | Activation function registry — standard wrappers, SIREN, FINER, Gaussian, WIRE, HOSC, Sinc |
+| [`embeddings.py`](#module-embeddingspy) | Positional and spherical embedding registry — Gaussian Fourier, Sphere2Vec, DFS, spherical harmonics, transformer positional encodings |
+| [`initializations.py`](#module-initializationspy) | Weight initializer registry — SIREN, FINER, Xavier, LeCun, WIRE, Gabor, standard schemes |
+| [`attention.py`](attention.md) | Attention modules — `MultiHeadAttention`, `CrossAttention`, `SwinWindowAttention` + mask utilities |
+| [`norms.py`](norms.md) | Normalisation registry — `BATCH_NORM`, `LAYER_NORM`, `GROUP_NORM`, `INSTANCE_NORM`, `RMS_NORM` |
+| [`pooling.py`](pooling.md) | Pooling registry — global reductions, spatial 2D pooling, global spatial pooling |
+| [`nets/`](nets/README.md) | Complete network registry — MLP variants (INR, WIRE, HOSC…), conv nets (ResNet, DenseNet, UNet blocks…), transformers (ViT, Swin, MAE…) |
 
-All three modules follow the same pattern: a `dict`-backed registry, a `@register_*` decorator, a `get_*` factory, and a `list_*` introspection function. The factory inspects constructor signatures and emits a `UserWarning` for unknown kwargs rather than raising, so hyperparameter sweeps that pass extra keys do not crash at instantiation.
+All registry modules follow the same pattern: a `dict`-backed registry, a `@register_*` decorator, a `get_*` factory, and a `list_*` introspection function. The factory inspects constructor signatures and emits a `UserWarning` for unknown kwargs rather than raising, so hyperparameter sweeps that pass extra keys do not crash at instantiation.
 
 ---
 
@@ -638,6 +644,75 @@ Following Russwurm et al. 2024 (https://arxiv.org/abs/2310.06743).
 **Notes:**
 
 `lat` must be in radians in `[-pi/2, pi/2]`. `lon` must be in radians in `[-pi, pi]`. Internally converts to colatitude and longitude in SH convention.
+
+---
+
+### Transformer Positional Encodings
+
+---
+
+#### `SINUSOIDAL_POS`
+
+```
+SinusoidalPosEncoding(d_model: int, max_len: int = 5000)
+```
+
+Fixed sine/cosine positional encoding for 1D sequences (Vaswani et al. 2017). Computes a `(1, max_len, d_model)` buffer at `setup()` time and adds a slice of it to the input. No learnable parameters.
+
+Input: `(B, T, d_model)` where `T <= max_len`.
+Output: `(B, T, d_model)`.
+
+Following Vaswani et al. 2017 (https://arxiv.org/abs/1706.03762).
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `d_model` | `int` | Hidden dimensionality. Must match the last dim of `x` | required |
+| `max_len` | `int` | Maximum sequence length | `5000` |
+
+---
+
+#### `LEARNED_POS`
+
+```
+LearnedPosEncoding(num_tokens: int, embed_dim: int, init_stddev: float = 0.02)
+```
+
+Learnable positional encoding for 1D token sequences. A single `(1, num_tokens, embed_dim)` parameter added to the input. Used in ViT where the sequence length is fixed. Slicing along `T` allows using fewer tokens than `num_tokens` at inference (e.g. masked ViT).
+
+Input: `(B, T, embed_dim)` where `T <= num_tokens`.
+Output: `(B, T, embed_dim)`.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `num_tokens` | `int` | Number of token positions (including CLS token if used) | required |
+| `embed_dim` | `int` | Embedding dimensionality | required |
+| `init_stddev` | `float` | Standard deviation for truncated normal initialisation | `0.02` |
+
+---
+
+#### `LEARNED_POS_2D`
+
+```
+LearnedPosEncoding2D(height: int, width: int, embed_dim: int, init_stddev: float = 0.02)
+```
+
+Learnable 2D positional encoding for spatial feature maps. A `(1, H, W, embed_dim)` parameter added to the input. Used in Swin Transformer stages where the spatial layout is preserved. Unlike the 1D case, spatial dimensions are not sliced — use a separate instance per stage if the feature map size changes (e.g. after `PatchMerging`).
+
+Input: `(B, H, W, embed_dim)`.
+Output: `(B, H, W, embed_dim)`.
+
+**Parameters:**
+
+| Name | Type | Description | Default |
+|------|------|-------------|---------|
+| `height` | `int` | Feature map height | required |
+| `width` | `int` | Feature map width | required |
+| `embed_dim` | `int` | Channel dimension | required |
+| `init_stddev` | `float` | Standard deviation for truncated normal initialisation | `0.02` |
 
 ---
 

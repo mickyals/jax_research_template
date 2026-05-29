@@ -879,3 +879,225 @@ class SphericalHarmonicsEmbedding(nn.Module):
                 idx += 1
 
         return jnp.stack(basis, axis=-1)
+
+
+
+# ---------------------------------------------------------------------------
+# Transformer positional encodings
+# ---------------------------------------------------------------------------
+
+@register_embedding(
+    "SINUSOIDAL_POS",
+    description="Fixed sinusoidal positional encoding (Vaswani et al. 2017)",
+)
+class SinusoidalPosEncoding(nn.Module):
+    """Fixed sine/cosine positional encoding for 1D sequences.
+
+    Computes a (1, max_len, d_model) buffer at setup time and adds a
+    slice of it to the input sequence. No learnable parameters.
+
+    Following Vaswani et al. 2017 (https://arxiv.org/abs/1706.03762).
+
+    Parameters
+    ----------
+    d_model : int
+        Hidden dimensionality. Must match the last dim of x.
+    max_len : int
+        Maximum sequence length supported. Default 5000.
+
+    Notes
+    -----
+    Input:  (B, T, d_model) where T <= max_len.
+    Output: (B, T, d_model).
+
+    The formula works for both even and odd d_model. For even d_model,
+    sin fills columns 0, 2, 4, ... and cos fills 1, 3, 5, ... exactly.
+    For odd d_model, the last column (d_model-1) is filled by sin with
+    no corresponding cos column -- NumPy slicing handles this silently.
+
+    For set/permutation-invariant tasks do not apply positional encoding.
+
+    Example
+    -------
+    >>> enc = SinusoidalPosEncoding(d_model=128, max_len=512)
+    >>> variables = enc.init(jax.random.PRNGKey(0), jnp.ones((2, 16, 128)))
+    >>> out = enc.apply(variables, jnp.ones((2, 16, 128)))
+    >>> out.shape
+    (2, 16, 128)
+    """
+    d_model: int
+    max_len: int = 5000
+
+    def setup(self):
+        position = jnp.arange(0, self.max_len, dtype=jnp.float32)[:, None]
+        div_term = jnp.exp(
+            jnp.arange(0, self.d_model, 2, dtype=jnp.float32)
+            * (-math.log(10000.0) / self.d_model)
+        )
+        pe_sin = jnp.sin(position * div_term)  # (max_len, ceil(d_model/2))
+        pe_cos = jnp.cos(position * div_term)  # (max_len, ceil(d_model/2))
+
+        pe = jnp.zeros((self.max_len, self.d_model), dtype=jnp.float32)
+        pe = pe.at[:, 0::2].set(pe_sin)
+        # 1::2 has floor(d_model/2) slots -- trim pe_cos for odd d_model
+        pe = pe.at[:, 1::2].set(pe_cos[:, :self.d_model // 2])
+        self.pe = pe[None]  # (1, max_len, d_model)
+    def __call__(self, x: jax.Array) -> jax.Array:
+        """
+        Parameters
+        ----------
+        x : jax.Array
+            Shape (B, T, d_model). T must be <= max_len.
+
+        Returns
+        -------
+        jax.Array
+            Shape (B, T, d_model).
+        """
+        assert x.shape[-1] == self.d_model, (
+            f"SinusoidalPosEncoding: input last dim {x.shape[-1]} "
+            f"does not match d_model={self.d_model}."
+        )
+        return x + self.pe[:, :x.shape[1]]
+
+
+@register_embedding(
+    "LEARNED_POS",
+    description="Learnable 1D positional encoding for fixed-length sequences",
+)
+class LearnedPosEncoding(nn.Module):
+    """Learnable positional encoding for 1D token sequences.
+
+    A single (1, num_tokens, embed_dim) parameter added to the input.
+    Used in ViT where the sequence length is fixed (num_patches + 1 for
+    the CLS token).
+
+    Parameters
+    ----------
+    num_tokens : int
+        Number of token positions, including CLS token if used.
+        For ViT with patch_size=P on (H, W) image:
+        num_tokens = H//P * W//P + 1.
+    embed_dim : int
+        Embedding dimensionality.
+    init_stddev : float
+        Standard deviation for truncated normal initialisation. Default 0.02.
+
+    Notes
+    -----
+    Input:  (B, T, embed_dim) where T <= num_tokens.
+    Output: (B, T, embed_dim).
+
+    Slicing along T allows using fewer tokens than num_tokens at inference,
+    e.g. for masked ViT where the visible token count varies per sample.
+
+    Example
+    -------
+    >>> enc = LearnedPosEncoding(num_tokens=197, embed_dim=768)
+    >>> variables = enc.init(jax.random.PRNGKey(0), jnp.ones((2, 197, 768)))
+    >>> out = enc.apply(variables, jnp.ones((2, 197, 768)))
+    >>> out.shape
+    (2, 197, 768)
+    """
+    num_tokens: int
+    embed_dim:  int
+    init_stddev: float = 0.02
+
+    def setup(self):
+        self.pos_embed = self.param(
+            'pos_embed',
+            nn.initializers.normal(stddev=self.init_stddev),
+            (1, self.num_tokens, self.embed_dim),
+        )
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        """
+        Parameters
+        ----------
+        x : jax.Array
+            Shape (B, T, embed_dim). T must be <= num_tokens.
+
+        Returns
+        -------
+        jax.Array
+            Shape (B, T, embed_dim).
+        """
+        assert x.shape[-1] == self.embed_dim, (
+            f"LearnedPosEncoding: input last dim {x.shape[-1]} "
+            f"does not match embed_dim={self.embed_dim}."
+        )
+        return x + self.pos_embed[:, :x.shape[1]]
+
+
+@register_embedding(
+    "LEARNED_POS_2D",
+    description="Learnable 2D spatial positional encoding for feature maps",
+)
+class LearnedPosEncoding2D(nn.Module):
+    """Learnable 2D positional encoding for spatial feature maps.
+
+    A (1, H, W, embed_dim) parameter added to the input feature map.
+    Used in Swin Transformer stages where the spatial layout is preserved.
+
+    Parameters
+    ----------
+    height : int
+        Feature map height H.
+    width : int
+        Feature map width W.
+    embed_dim : int
+        Channel dimension C.
+    init_stddev : float
+        Standard deviation for truncated normal initialisation. Default 0.02.
+
+    Notes
+    -----
+    Input:  (B, H, W, embed_dim).
+    Output: (B, H, W, embed_dim).
+
+    Unlike the 1D case, 2D positional encodings are not sliced -- the
+    spatial dimensions are fixed for a given Swin stage. If the feature
+    map size changes between stages (after PatchMerging), use a separate
+    LearnedPosEncoding2D instance per stage with the correct H, W.
+
+    Example
+    -------
+    >>> enc = LearnedPosEncoding2D(height=56, width=56, embed_dim=96)
+    >>> variables = enc.init(jax.random.PRNGKey(0), jnp.ones((2, 56, 56, 96)))
+    >>> out = enc.apply(variables, jnp.ones((2, 56, 56, 96)))
+    >>> out.shape
+    (2, 56, 56, 96)
+    """
+    height:      int
+    width:       int
+    embed_dim:   int
+    init_stddev: float = 0.02
+
+    def setup(self):
+        self.pos_embed = self.param(
+            'pos_embed',
+            nn.initializers.normal(stddev=self.init_stddev),
+            (1, self.height, self.width, self.embed_dim),
+        )
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        """
+        Parameters
+        ----------
+        x : jax.Array
+            Shape (B, H, W, embed_dim).
+
+        Returns
+        -------
+        jax.Array
+            Shape (B, H, W, embed_dim).
+        """
+        assert x.shape[1:3] == (self.height, self.width), (
+            f"LearnedPosEncoding2D: input spatial dims {x.shape[1:3]} "
+            f"do not match (height={self.height}, width={self.width})."
+        )
+        assert x.shape[-1] == self.embed_dim, (
+            f"LearnedPosEncoding2D: input last dim {x.shape[-1]} "
+            f"does not match embed_dim={self.embed_dim}."
+        )
+        return x + self.pos_embed

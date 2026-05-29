@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import math
 
-from core.primitives.initializations import (
+from core.initializations import (
     register_initializer,
     get_initializer,
     list_initializers,

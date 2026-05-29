@@ -483,7 +483,7 @@ class GaborInit:
 class WireInit:
     """Complex weight initializer for WIRE networks.
 
-    Initialises complex-dtype weight matrices by drawing real and
+    Initializes complex-dtype weight matrices by drawing real and
     imaginary parts independently from N(0, std^2) where
     std = gain * sqrt(2 / (fan_in + fan_out)).
 
@@ -516,3 +516,9 @@ class WireInit:
         real = jax.random.normal(key_r, shape, float_dtype) * std
         imag = jax.random.normal(key_i, shape, float_dtype) * std
         return (real + 1j * imag).astype(dtype)
+
+
+@register_initializer("ZEROS", description="Zero initialization")
+class ZerosInit:
+    def __call__(self, key, shape, dtype=jnp.float32) -> jnp.ndarray:
+        return jnp.zeros(shape, dtype=dtype)
