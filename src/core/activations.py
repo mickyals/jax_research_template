@@ -3,7 +3,7 @@ import warnings
 
 import jax
 import jax.numpy as jnp
-import flax.nnx as nnx
+import jax.nn as nn
 
 ACTIVATIONS: dict[str, dict] = {}
 
@@ -147,7 +147,7 @@ def _generate_alpha(x: jax.Array) -> jax.Array:
 @register_activation("RELU", description="ReLU activation")
 class ReLU:
     def __call__(self, x: jax.Array) -> jax.Array:
-        return nnx.relu(x)
+        return nn.relu(x)
 
 
 @register_activation("LEAKY_RELU", description="Leaky ReLU activation")
@@ -156,19 +156,19 @@ class LeakyReLU:
         self.negative_slope = negative_slope
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        return nnx.leaky_relu(x, self.negative_slope)
+        return nn.leaky_relu(x, self.negative_slope)
 
 
 @register_activation("SILU", description="SiLU (swish) activation")
 class SiLU:
     def __call__(self, x: jax.Array) -> jax.Array:
-        return nnx.silu(x)
+        return nn.silu(x)
 
 
 @register_activation("SIGMOID", description="Sigmoid activation")
 class Sigmoid:
     def __call__(self, x: jax.Array) -> jax.Array:
-        return nnx.sigmoid(x)
+        return nn.sigmoid(x)
 
 
 @register_activation("TANH", description="Tanh activation")
@@ -183,7 +183,7 @@ class GELU:
         self.approximate = approximate
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        return nnx.gelu(x, approximate=self.approximate)
+        return nn.gelu(x, approximate=self.approximate)
 
 
 @register_activation("ELU", description="Exponential linear unit activation")
@@ -192,19 +192,19 @@ class ELU:
         self.alpha = alpha
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        return nnx.elu(x, alpha=self.alpha)
+        return nn.elu(x, alpha=self.alpha)
 
 
 @register_activation("SELU", description="Scaled exponential linear unit activation")
 class SELU:
     def __call__(self, x: jax.Array) -> jax.Array:
-        return nnx.selu(x)
+        return nn.selu(x)
 
 
 @register_activation("SOFTPLUS", description="Softplus activation")
 class Softplus:
     def __call__(self, x: jax.Array) -> jax.Array:
-        return nnx.softplus(x)
+        return nn.softplus(x)
 
 
 @register_activation("IDENTITY", description="Identity (no-op) activation")
