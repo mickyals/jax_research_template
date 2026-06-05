@@ -324,15 +324,26 @@ class Tuner:
             # Deep-copy so suggest_fn cannot mutate shared base_config
             config = suggest_fn(trial, copy.deepcopy(base_config))
 
-            # Each trial gets its own checkpoint subdirectory
-            base_ckpt = Path(config.get("checkpoint_dir", "checkpoints"))
-            config["checkpoint_dir"] = str(base_ckpt / f"trial_{trial.number}")
+            # Support both full-config dicts (with a 'trainer' key, as returned
+            # by experiment-level suggest_fns that also tune architecture HPs)
+            # and bare trainer dicts (simple training-only searches).
+            trainer_cfg = config.get("trainer", config)
+
+            # Give each trial an isolated artifact directory so checkpoints,
+            # logs, and WandB caches don't collide between concurrent or
+            # sequential trials.
+            run_dir = trainer_cfg.get("run_dir")
+            if run_dir is not None:
+                trainer_cfg["run_dir"] = str(Path(run_dir) / f"trial_{trial.number}")
+            else:
+                base_ckpt = Path(trainer_cfg.get("checkpoint_dir", "checkpoints"))
+                trainer_cfg["checkpoint_dir"] = str(base_ckpt / f"trial_{trial.number}")
 
             # Suppress inner tqdm bars during search
-            config["use_tqdm"] = False
+            trainer_cfg["use_tqdm"] = False
 
             model   = model_fn(config)
-            trainer = Trainer(model, metrics_fns, config)
+            trainer = Trainer(model, metrics_fns, trainer_cfg)
 
             try:
                 trainer.fit(

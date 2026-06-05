@@ -24,7 +24,7 @@ Usage
     # Resume interrupted training
     best_state = trainer.fit(dm.train_arrays(), dm.val_arrays(), resume=True)
 
-    # Evaluate on test split using the saved best checkpoint
+    # Evaluate on test split using the saved the best checkpoint
     test_metrics = trainer.test(dm.test_arrays())
 
 Config schema  (YAML  trainer:  block)
@@ -110,7 +110,7 @@ def _to_jax_batch(batch: dict) -> dict:
 def _batch_head(batch: dict, n: int = 4) -> dict:
     """Return the first n rows from each value in a batch dict.
 
-    Used to build a small example batch for model initialisation.
+    Used to build a small example batch for model initialization.
     Handles dict-valued X and list-valued metadata fields.
     """
     result = {}
@@ -197,7 +197,17 @@ class Trainer:
             config.get("patience_direction", "lower_is_better")
             == "lower_is_better"
         )
-        self._checkpoint_dir  = Path(config.get("checkpoint_dir", "checkpoints"))
+        # run_dir co-locates checkpoints and logs under one root.
+        # If set it takes precedence over checkpoint_dir.
+        run_dir = config.get("run_dir")
+        if run_dir is not None:
+            _run = Path(run_dir)
+            self._checkpoint_dir = _run / "checkpoints"
+            _log_dir             = str(_run / "logs")
+        else:
+            self._checkpoint_dir = Path(config.get("checkpoint_dir", "checkpoints"))
+            _log_dir             = str(self._checkpoint_dir / "logs")
+
         self._log_every       = config.get("log_every_n_steps", 50)
         self._seed            = config.get("seed", 42)
         self._use_tqdm        = config.get("use_tqdm", True)
@@ -223,7 +233,7 @@ class Trainer:
         # --- logger ---
         self._logger = create_logger(
             config.get("log_backend", "null"),
-            log_dir=str(self._checkpoint_dir / "logs"),
+            log_dir=_log_dir,
             **config.get("log_kwargs", {}),
         )
 
@@ -238,7 +248,7 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _init_state(self, exmp_batch: dict) -> TrainState:
-        """Initialise model parameters, optimiser state, and RNGs."""
+        """Initialize model parameters, optimizer state, and RNGs."""
         rngs        = create_rng_dict(self._seed, keys=["params", "dropout"])
         variables   = self.model.init(rngs, exmp_batch["X"], train=False)
         params      = variables["params"]
@@ -493,15 +503,37 @@ class Trainer:
         return state, meta
 
     # ------------------------------------------------------------------
+    # Public logging helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def logger(self):
+        """The experiment logger (read-only)."""
+        return self._logger
+
+    def log_hyperparams(self, params: dict) -> None:
+        """Log a hyperparameter dict to the experiment logger."""
+        self._logger.log_hyperparams(params)
+
+    def init_state(self, exmp_batch: dict) -> TrainState:
+        """Initialise model and optimizer state from one example batch.
+
+        Returns an abstract TrainState with the correct pytree structure,
+        suitable for passing to load_checkpoint() without running fit().
+        """
+        return self._init_state(exmp_batch)
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
     def fit(
         self,
-        train_loader: Any,
-        val_loader:   Any,
-        resume:       bool = False,
-        trial:        Any  = None,
+        train_loader:    Any,
+        val_loader:      Any,
+        resume:          bool = False,
+        trial:           Any  = None,
+        epoch_callbacks: Optional[list] = None,
     ) -> TrainState:
         """Train and return the best TrainState.
 
@@ -509,14 +541,19 @@ class Trainer:
         ----------
         train_loader : iterable
             Yields {'X': array, 'y': array} dicts for training.
-            Typically dm.train_loader(batch_size).  Any re-iterable object
+            Typically, dm.train_loader(batch_size).  Any re-iterable object
             works — ArrayLoader, a wrapped PyTorch DataLoader, etc.
         val_loader : iterable
-            Yields batches for validation.  Typically dm.val_loader(batch_size).
+            Yields batches for validation.  Typically, dm.val_loader(batch_size).
         resume : bool
             If True, load checkpoint_dir/latest/ and continue training from
             the last completed epoch.  The best checkpoint is preserved and
             only updated if a new improvement is found.
+        epoch_callbacks : list of callables, optional
+            Each callable is invoked after validation with signature
+            ``callback(state: TrainState, epoch: int, global_step: int) -> None``.
+            Useful for logging custom per-epoch diagnostics (e.g. attention
+            entropy) without modifying the training loop.
 
         Returns
         -------
@@ -529,7 +566,7 @@ class Trainer:
             "n_devices":   len(jax.devices()),
         })
 
-        # Peek one batch to get shapes for model initialisation.
+        # Peek one batch to get shapes for model initialization.
         # The loader is re-iterable so the epoch loop restarts from scratch.
         exmp_batch = next(iter(train_loader))
         exmp_small = _batch_head(exmp_batch, n=4)
@@ -578,6 +615,10 @@ class Trainer:
                 {**train_metrics, **val_metrics}, step=epoch
             )
 
+            if epoch_callbacks:
+                for cb in epoch_callbacks:
+                    cb(state, epoch, self._global_step)
+
             if self._patience_metric not in val_metrics:
                 raise KeyError(
                     f"patience_metric '{self._patience_metric}' not found in "
@@ -587,7 +628,7 @@ class Trainer:
             current  = val_metrics[self._patience_metric]
             improved = self.is_better(current, best_metric)
 
-            # Optuna pruning: report intermediate value and stop early if
+            # optuna pruning: report intermediate value and stop early if
             # the trial looks unpromising.  Lazy import keeps optuna optional.
             if trial is not None:
                 import optuna as _optuna
@@ -657,7 +698,7 @@ class Trainer:
         ----------
         test_loader : iterable
             Yields {'X': array, 'y': array} dicts.
-            Typically dm.test_loader(batch_size).
+            Typically, dm.test_loader(batch_size).
 
         Returns
         -------

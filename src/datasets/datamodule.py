@@ -247,13 +247,12 @@ def _build_dataset(ds_config: dict):
 
 
 def _split_dataset(dataset, which: str):
-    """Call dataset.split(which), falling back to season filter if multi-storm
-    data is not available.
+    """Call dataset.split(which).
 
     Parameters
     ----------
     dataset : NpzDataset subclass
-        A dataset instance that implements split() or filter_seasons().
+        A dataset instance that implements split().
     which : str
         'train', 'val', or 'test'.
 
@@ -262,31 +261,7 @@ def _split_dataset(dataset, which: str):
     NpzDataset
         The requested split.
     """
-    from datasets.schema import (
-        IBTRACS_TRAIN_SEASONS,
-        IBTRACS_VAL_SEASONS,
-        IBTRACS_TEST_SEASONS,
-    )
-
-    _SEASONS = {
-        "train": IBTRACS_TRAIN_SEASONS,
-        "val":   IBTRACS_VAL_SEASONS,
-        "test":  IBTRACS_TEST_SEASONS,
-    }
-
-    try:
-        return dataset.split(which)
-    except ValueError as exc:
-        if "multi_storm_path" in str(exc):
-            warnings.warn(
-                f"{dataset.__class__.__name__}: multi_storm_path not provided. "
-                f"Using season-only split for '{which}' — multi-storm timesteps "
-                f"are NOT excluded. Pass multi_storm_path for clean splits.",
-                UserWarning,
-                stacklevel=4,
-            )
-            return dataset.filter_seasons(_SEASONS[which])
-        raise
+    return dataset.split(which)
 
 
 def _apply_norm(
@@ -356,34 +331,23 @@ def _apply_position_encoding(
 ) -> np.ndarray:
     """Replace coordinate columns in X with their positional encoding.
 
-    Extracts the columns named in ``coord_cols`` (and ``storm_coord_cols``
-    for storm_relative_polar) from X by their index in feature_cols,
-    passes them to the appropriate encoder from position_encoding.py,
-    and concatenates the encoded output with the remaining columns.
+    Supported modes: 'unit_sphere', 'domain_normalised'.
+    Coordinate columns are extracted by index in feature_cols, encoded,
+    and concatenated with the remaining columns.
 
     Parameters
     ----------
     X : np.ndarray  shape (n, len(feature_cols))
     feature_cols : list[str]
-        Column names in the same order as the columns of X.
     config : dict
         Must contain 'position_encoding_mode' and 'coord_cols'.
-        See module docstring for mode-specific required keys.
+        domain_normalised also requires 'field_of_view' with lat/lon bounds.
 
     Returns
     -------
-    np.ndarray
-        shape (n, len(feature_cols) - n_dropped + enc_dim)
-        where enc_dim is 3 for storm_relative_polar / unit_sphere
-        and 2 for domain_normalised.
-
-    Raises
-    ------
-    KeyError
-        If any column in coord_cols / storm_coord_cols is absent from
-        feature_cols.
+    np.ndarray  shape (n, len(feature_cols) - n_dropped + enc_dim)
     """
-    from datasets.position_encoding import encode_positions
+    import numpy as _np
 
     mode       = config["position_encoding_mode"]
     coord_cols = config["coord_cols"]
@@ -391,42 +355,36 @@ def _apply_position_encoding(
     try:
         coord_idx = [feature_cols.index(c) for c in coord_cols]
     except ValueError as exc:
-        raise KeyError(
-            f"coord_cols column not found in feature_cols: {exc}"
-        ) from exc
+        raise KeyError(f"coord_cols column not found in feature_cols: {exc}") from exc
 
-    lat = X[:, coord_idx[0]]
-    lon = X[:, coord_idx[1]]
+    lat      = X[:, coord_idx[0]].astype(_np.float32)
+    lon      = X[:, coord_idx[1]].astype(_np.float32)
+    drop_idx = set(coord_idx)
 
-    kwargs:   dict     = {}
-    drop_idx: set[int] = set(coord_idx)
-
-    if mode == "storm_relative_polar":
-        storm_coord_cols = config.get("storm_coord_cols", coord_cols)
-        try:
-            storm_idx = [feature_cols.index(c) for c in storm_coord_cols]
-        except ValueError as exc:
-            raise KeyError(
-                f"storm_coord_cols column not found in feature_cols: {exc}"
-            ) from exc
-        kwargs["storm_lat"] = X[:, storm_idx[0]]
-        kwargs["storm_lon"] = X[:, storm_idx[1]]
-        kwargs["radius_km"] = config["radius_km"]
-        drop_idx.update(storm_idx)
+    if mode == "unit_sphere":
+        lat_r   = _np.radians(lat)
+        lon_r   = _np.radians(lon)
+        encoded = _np.stack([
+            _np.cos(lat_r) * _np.cos(lon_r),
+            _np.cos(lat_r) * _np.sin(lon_r),
+            _np.sin(lat_r),
+        ], axis=1)
 
     elif mode == "domain_normalised":
-        fov = config["field_of_view"]
-        kwargs.update({
-            "lat_min": fov["lat_min"],
-            "lat_max": fov["lat_max"],
-            "lon_min": fov["lon_min"],
-            "lon_max": fov["lon_max"],
-        })
+        fov      = config["field_of_view"]
+        lat_norm = 2.0 * (lat - fov["lat_min"]) / (fov["lat_max"] - fov["lat_min"]) - 1.0
+        lon_norm = 2.0 * (lon - fov["lon_min"]) / (fov["lon_max"] - fov["lon_min"]) - 1.0
+        encoded  = _np.stack([lat_norm, lon_norm], axis=1)
 
-    encoded  = encode_positions(lat, lon, mode, **kwargs)
+    else:
+        raise ValueError(
+            f"Unknown position_encoding_mode '{mode}'. "
+            "Choose from: 'unit_sphere', 'domain_normalised'."
+        )
+
     keep_idx = [i for i in range(X.shape[1]) if i not in drop_idx]
-    X_keep   = X[:, keep_idx] if keep_idx else np.empty((X.shape[0], 0), dtype=X.dtype)
-    return np.concatenate([X_keep, encoded], axis=1)
+    X_keep   = X[:, keep_idx] if keep_idx else _np.empty((X.shape[0], 0), dtype=X.dtype)
+    return _np.concatenate([X_keep, encoded], axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -702,24 +660,15 @@ class DataModule(BaseDataModule):
 
 
 # ---------------------------------------------------------------------------
-# Registered dataset factories
+# Built-in dataset factories
+# Additional factories can be registered with @register_dataset("NAME")
+# in experiment-specific modules and imported before DataModule.from_config().
 # ---------------------------------------------------------------------------
 
 @register_dataset("IBTRACS")
 def _ibtracs_factory(config: dict):
-    """Factory for IBTrACSDataset."""
-    from datasets.ibtracs.dataset import IBTrACSDataset
+    from experiments.sparse_obs_cross_attn.ibtracs import IBTrACSDataset
     return IBTrACSDataset(
         config["npz_path"],
         config.get("multi_storm_path"),
-    )
-
-
-@register_dataset("INSITU_LAND")
-def _insitu_land_factory(config: dict):
-    """Factory for InsituLandDataset."""
-    from datasets.insitu_land.dataset import InsituLandDataset
-    return InsituLandDataset(
-        config["obs_path"],
-        config["meta_path"],
     )

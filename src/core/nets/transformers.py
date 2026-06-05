@@ -39,6 +39,7 @@ from core.attention import (
 from core.nets.conv import PatchEmbed, ConvDecoder
 from core.nets.mlp import MLP
 from core.embeddings import SinusoidalPosEncoding, LearnedPosEncoding
+from core import get_activation, get_initializer
 
 
 # ---------------------------------------------------------------------------
@@ -153,13 +154,20 @@ def list_transformers() -> dict[str, str]:
 # FFN helper
 # ---------------------------------------------------------------------------
 
-def _make_ffn(embed_dim: int, mlp_ratio: float, dropout_rate: float) -> MLP:
+def _make_ffn(
+    embed_dim: int,
+    mlp_ratio: float,
+    dropout_rate: float,
+    activation: str = 'gelu',
+    initializer: str = 'xavier_uniform',
+) -> MLP:
     """Construct the feedforward network used inside transformer blocks.
 
-    Two-layer MLP: Linear(embed_dim -> mlp_ratio*embed_dim) -> GELU ->
+    Two-layer MLP: Linear(embed_dim -> mlp_ratio*embed_dim) -> activation ->
     Dropout -> Linear(mlp_ratio*embed_dim -> embed_dim).
 
     Uses MLP from mlp.py with n_layers=1 (one hidden layer + output layer).
+    Activation and initializer are resolved via their registries.
 
     Parameters
     ----------
@@ -167,17 +175,23 @@ def _make_ffn(embed_dim: int, mlp_ratio: float, dropout_rate: float) -> MLP:
     mlp_ratio : float
         Hidden dim multiplier. Typically 4.0.
     dropout_rate : float
+    activation : str
+        Registered activation name. Default 'gelu'.
+    initializer : str
+        Registered initializer name. Default 'xavier_uniform'.
 
     Returns
     -------
     MLP
     """
+    get_activation(activation)    # validate early -- raises ValueError if unknown
+    get_initializer(initializer)  # validate early -- raises ValueError if unknown
     return MLP(
         out_features=embed_dim,
         hidden_features=int(embed_dim * mlp_ratio),
         n_layers=1,
-        activation='gelu',
-        initializer='xavier_uniform',
+        activation=activation,
+        initializer=initializer,
         dropout_rate=dropout_rate,
     )
 
@@ -233,6 +247,8 @@ class TransformerBlock(nn.Module):
     attn_dropout_rate: float = 0.0
     causal:            bool  = False
     use_bias:          bool  = True
+    mlp_activation:    str   = 'gelu'
+    mlp_initializer:   str   = 'xavier_uniform'
 
     def setup(self):
         self.norm1 = nn.LayerNorm()
@@ -245,7 +261,8 @@ class TransformerBlock(nn.Module):
             causal=self.causal,
         )
         self.ffn  = _make_ffn(self.embed_dim, self.mlp_ratio,
-                               self.dropout_rate)
+                               self.dropout_rate, self.mlp_activation,
+                               self.mlp_initializer)
         self.drop = nn.Dropout(rate=self.dropout_rate)
 
     def __call__(
@@ -346,6 +363,8 @@ class CrossAttentionBlock(nn.Module):
     dropout_rate:      float = 0.0
     attn_dropout_rate: float = 0.0
     use_bias:          bool  = True
+    mlp_activation:    str   = 'gelu'
+    mlp_initializer:   str   = 'xavier_uniform'
 
     def setup(self):
         self.norm_q  = nn.LayerNorm()
@@ -358,7 +377,8 @@ class CrossAttentionBlock(nn.Module):
             use_bias=self.use_bias,
         )
         self.ffn  = _make_ffn(self.embed_dim, self.mlp_ratio,
-                               self.dropout_rate)
+                               self.dropout_rate, self.mlp_activation,
+                               self.mlp_initializer)
         self.drop = nn.Dropout(rate=self.dropout_rate)
 
     def __call__(
@@ -467,6 +487,8 @@ class SwinBlock(nn.Module):
     dropout_rate:      float = 0.0
     attn_dropout_rate: float = 0.0
     use_bias:          bool  = True
+    mlp_activation:    str   = 'gelu'
+    mlp_initializer:   str   = 'xavier_uniform'
 
     def setup(self):
         self.norm1 = nn.LayerNorm()
@@ -480,7 +502,8 @@ class SwinBlock(nn.Module):
             use_bias=self.use_bias,
         )
         self.ffn  = _make_ffn(self.embed_dim, self.mlp_ratio,
-                               self.dropout_rate)
+                               self.dropout_rate, self.mlp_activation,
+                               self.mlp_initializer)
         self.drop = nn.Dropout(rate=self.dropout_rate)
 
     def __call__(
@@ -575,6 +598,8 @@ class SwinBlockPair(nn.Module):
     dropout_rate:      float = 0.0
     attn_dropout_rate: float = 0.0
     use_bias:          bool  = True
+    mlp_activation:    str   = 'gelu'
+    mlp_initializer:   str   = 'xavier_uniform'
 
     def setup(self):
         self.block_w  = SwinBlock(
@@ -586,6 +611,8 @@ class SwinBlockPair(nn.Module):
             dropout_rate=self.dropout_rate,
             attn_dropout_rate=self.attn_dropout_rate,
             use_bias=self.use_bias,
+            mlp_activation=self.mlp_activation,
+            mlp_initializer=self.mlp_initializer,
         )
         self.block_sw = SwinBlock(
             embed_dim=self.embed_dim,
@@ -596,6 +623,8 @@ class SwinBlockPair(nn.Module):
             dropout_rate=self.dropout_rate,
             attn_dropout_rate=self.attn_dropout_rate,
             use_bias=self.use_bias,
+            mlp_activation=self.mlp_activation,
+            mlp_initializer=self.mlp_initializer,
         )
 
     def __call__(self, x: jax.Array, train: bool = True) -> jax.Array:
@@ -746,6 +775,8 @@ class TransformerEncoder(nn.Module):
     use_bias:          bool  = True
     add_pos_encoding:  bool  = True
     max_len:           int   = 5000
+    mlp_activation:    str   = 'gelu'
+    mlp_initializer:   str   = 'xavier_uniform'
 
     def setup(self):
         self.pos_enc = (
@@ -761,6 +792,8 @@ class TransformerEncoder(nn.Module):
                 attn_dropout_rate=self.attn_dropout_rate,
                 causal=self.causal,
                 use_bias=self.use_bias,
+                mlp_activation=self.mlp_activation,
+                mlp_initializer=self.mlp_initializer,
             )
             for _ in range(self.num_layers)
         ]
@@ -800,7 +833,7 @@ class TransformerEncoder(nn.Module):
         mask: Optional[jax.Array] = None,
         train: bool = False,
     ) -> list[jax.Array]:
-        """Return per-layer attention weight maps for visualisation.
+        """Return per-layer attention weight maps for visualization.
 
         Parameters
         ----------
@@ -832,7 +865,7 @@ class TransformerDecoder(nn.Module):
     """Transformer decoder: TransformerBlock + CrossAttentionBlock pairs.
 
     Supports both shared context (one tensor for all layers) and per-layer
-    context (one tensor per layer, for multi-scale encoder outputs such as
+    context (one tensor per layer, for multiscale encoder outputs such as
     hierarchical Swin encoder stages).
 
     Parameters
@@ -881,6 +914,8 @@ class TransformerDecoder(nn.Module):
     attn_dropout_rate: float = 0.0
     causal:            bool  = False
     use_bias:          bool  = True
+    mlp_activation:    str   = 'gelu'
+    mlp_initializer:   str   = 'xavier_uniform'
 
     def setup(self):
         self.self_attn_blocks = [
@@ -892,6 +927,8 @@ class TransformerDecoder(nn.Module):
                 attn_dropout_rate=self.attn_dropout_rate,
                 causal=self.causal,
                 use_bias=self.use_bias,
+                mlp_activation=self.mlp_activation,
+                mlp_initializer=self.mlp_initializer,
             )
             for _ in range(self.num_layers)
         ]
@@ -903,6 +940,8 @@ class TransformerDecoder(nn.Module):
                 dropout_rate=self.dropout_rate,
                 attn_dropout_rate=self.attn_dropout_rate,
                 use_bias=self.use_bias,
+                mlp_activation=self.mlp_activation,
+                mlp_initializer=self.mlp_initializer,
             )
             for _ in range(self.num_layers)
         ]
@@ -1016,6 +1055,8 @@ class ViT(nn.Module):
     dropout_rate:      float         = 0.0
     attn_dropout_rate: float         = 0.0
     use_bias:          bool          = True
+    mlp_activation:    str           = 'gelu'
+    mlp_initializer:   str           = 'xavier_uniform'
 
     def setup(self):
         self.patch_embed = PatchEmbed(
@@ -1038,6 +1079,8 @@ class ViT(nn.Module):
             attn_dropout_rate=self.attn_dropout_rate,
             use_bias=self.use_bias,
             add_pos_encoding=False,
+            mlp_activation=self.mlp_activation,
+            mlp_initializer=self.mlp_initializer,
         )
         self.norm = nn.LayerNorm()
         self.head = (
@@ -1200,6 +1243,8 @@ class MaskedViT(nn.Module):
     dropout_rate:      float = 0.0
     attn_dropout_rate: float = 0.0
     use_bias:          bool  = True
+    mlp_activation:    str   = 'gelu'
+    mlp_initializer:   str   = 'xavier_uniform'
 
     def setup(self):
         self.patch_embed = PatchEmbed(
@@ -1222,6 +1267,8 @@ class MaskedViT(nn.Module):
             attn_dropout_rate=self.attn_dropout_rate,
             use_bias=self.use_bias,
             add_pos_encoding=False,
+            mlp_activation=self.mlp_activation,
+            mlp_initializer=self.mlp_initializer,
         )
         self.norm = nn.LayerNorm()
         self.drop = nn.Dropout(rate=self.dropout_rate)
@@ -1357,14 +1404,16 @@ class MAEDecoder(nn.Module):
     >>> dec = MAEDecoder(num_patches=196, patch_dim=768,
     ...                  embed_dim=512, num_heads=8, num_layers=4)
     """
-    num_patches:  int
-    patch_dim:    int
-    embed_dim:    int
-    num_heads:    int
-    num_layers:   int
-    mlp_ratio:    float = 4.0
-    dropout_rate: float = 0.0
-    use_bias:     bool  = True
+    num_patches:     int
+    patch_dim:       int
+    embed_dim:       int
+    num_heads:       int
+    num_layers:      int
+    mlp_ratio:       float = 4.0
+    dropout_rate:    float = 0.0
+    use_bias:        bool  = True
+    mlp_activation:  str   = 'gelu'
+    mlp_initializer: str   = 'xavier_uniform'
 
     def setup(self):
         self.mask_token = self.param(
@@ -1381,6 +1430,8 @@ class MAEDecoder(nn.Module):
                 mlp_ratio=self.mlp_ratio,
                 dropout_rate=self.dropout_rate,
                 use_bias=self.use_bias,
+                mlp_activation=self.mlp_activation,
+                mlp_initializer=self.mlp_initializer,
             )
             for _ in range(self.num_layers)
         ]
@@ -1655,6 +1706,8 @@ class SwinEncoder(nn.Module):
     dropout_rate:      float        = 0.0
     attn_dropout_rate: float        = 0.0
     use_bias:          bool         = True
+    mlp_activation:    str          = 'gelu'
+    mlp_initializer:   str          = 'xavier_uniform'
 
     def __post_init__(self):
         super().__post_init__()
@@ -1690,6 +1743,8 @@ class SwinEncoder(nn.Module):
                     dropout_rate=self.dropout_rate,
                     attn_dropout_rate=self.attn_dropout_rate,
                     use_bias=self.use_bias,
+                    mlp_activation=self.mlp_activation,
+                    mlp_initializer=self.mlp_initializer,
                 )
                 for _ in range(depth)
             ])

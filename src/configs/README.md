@@ -1,3 +1,0 @@
-# Configs
-
-YAML experiment configurations.

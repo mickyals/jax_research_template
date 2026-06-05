@@ -7,6 +7,8 @@ Handles the loading pattern, row-mask filtering, and common access
 protocols shared by every data source (IBTrACS, ICOADS, IGRA, synoptic).
 Each source subclass adds its own domain columns, split logic, and
 source-specific filters on top.
+
+Will add for zarr, nc files and others as they are needed.
 """
 
 from __future__ import annotations

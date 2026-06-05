@@ -1,0 +1,96 @@
+# Tuning config for TCClassifier hyperparameter search.
+# Most model and trainer fields are overridden per trial by tune.py's suggest_fn.
+# Use tc_classifier.yaml for full training of the best-found configuration.
+seed: 42
+
+data:
+  ibtracs_path:           E:/sparse_obs/ibtracs/ibtracs_full.npz
+  multi_storm_path:       E:/sparse_obs/ibtracs/ibtracs_multi_storm_times.npz
+  insitu_obs_path:        E:/sparse_obs/insitu-land/insitu_land_clean.npz
+  insitu_meta_path:       E:/sparse_obs/insitu-land/insitu_land_station_meta.npz
+
+  reliability_levels:     [always_active, mostly_active]
+
+  obs_vars:
+    - air_pressure_at_sea_level
+    - air_temperature
+    - dew_point_temperature
+    - wind_speed
+    - wind_from_direction
+
+  radius_km:              500.0
+  time_window_hours:      0.1
+
+  max_stations:           64
+  min_stations:           1
+
+  batch_size:             64
+  tc_fraction:            0.5
+
+  fov_lat:                [0.0, 30.0]
+  fov_lon:                [-100.0, -45.0]
+
+  background_buffer_hours: 6.0
+
+  location_encoding:      unit_circle
+  obs_normalisation:      minmax_11
+
+  obs_bounds:
+    air_pressure_at_sea_level: [87000.0, 108400.0]
+    air_temperature:           [193.0,   333.0]
+    dew_point_temperature:     [193.0,   308.0]
+    wind_speed:                [0.0,     115.0]
+    wind_from_direction:       [0.0,     360.0]
+
+model:
+  # Base values — all overridden by suggest_fn each trial except the flags below.
+  use_self_attention:   true
+  location_encoding:    unit_circle   # must match data.location_encoding
+
+  embed_dim:            128
+  num_heads:            4
+  num_layers:           2
+  num_cross_layers:     1
+  mlp_ratio:            4.0
+  mlp_activation:       gelu
+  mlp_initializer:      xavier_uniform
+  dropout_rate:         0.0
+  attn_dropout_rate:    0.0
+  fourier_dim:          64
+  fourier_scale:        1.0
+  n_obs_features:       5
+  n_classes:            11
+  missing_value:        -1.0e9
+
+trainer:
+  batch_size:           64
+  optimizer:            adamw
+  optimizer_kwargs:
+    weight_decay:       1.0e-4        # overridden by search
+
+  scheduler:            warmup_cosine
+  scheduler_kwargs:
+    init_value:         0.0
+    peak_value:         1.0e-4        # overridden by search
+    warmup_steps:       200           # shorter warmup for tuning
+    decay_steps:        10000
+    end_value:          1.0e-6
+
+  # Short epochs so the pruner can cut bad trials quickly.
+  # After finding the best HP set, re-train at full length with tc_classifier.yaml.
+  num_epochs:           30
+  num_steps:            .inf
+
+  patience:             8
+  patience_metric:      val/cross_entropy
+  patience_direction:   lower_is_better
+
+  max_grad_norm:        1.0
+
+  # Each trial writes to a trial_N subdirectory under run_dir.
+  run_dir:              runs/tc_classifier/hp_search
+
+  # No per-trial remote logging — NullLogger writes figures to disk only.
+  log_backend:          null
+  log_every_n_steps:    50
+  log_kwargs:           {}

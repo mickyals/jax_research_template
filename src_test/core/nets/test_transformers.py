@@ -1096,6 +1096,177 @@ class TestSwinEncoder:
                               num_heads=(SWIN_HEADS,))
         assert isinstance(enc, SwinEncoder)
 # ---------------------------------------------------------------------------
+# mlp_activation / mlp_initializer threading
+# ---------------------------------------------------------------------------
+
+class TestMlpActivationInitializer:
+    """Verify that mlp_activation and mlp_initializer are threaded through
+    every block and registered net, resolve via the registries, and reject
+    invalid names at construction time."""
+
+    # --- Blocks ---
+
+    def test_transformer_block_custom_activation(self):
+        x     = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+        block = TransformerBlock(embed_dim=EMBED, num_heads=NUM_HEADS,
+                                 mlp_ratio=MLP_RATIO, mlp_activation='silu')
+        variables = block.init(KEY, x, train=False)
+        out = block.apply(variables, x, train=False)
+        check_shape(out, (BATCH, SEQ, EMBED))
+        check_finite(out)
+
+    def test_transformer_block_custom_initializer(self):
+        x     = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+        block = TransformerBlock(embed_dim=EMBED, num_heads=NUM_HEADS,
+                                 mlp_ratio=MLP_RATIO,
+                                 mlp_initializer='lecun_normal')
+        variables = block.init(KEY, x, train=False)
+        out = block.apply(variables, x, train=False)
+        check_shape(out, (BATCH, SEQ, EMBED))
+        check_finite(out)
+
+    def test_transformer_block_invalid_activation_raises(self):
+        with pytest.raises(ValueError, match="does not exist"):
+            x     = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+            block = TransformerBlock(embed_dim=EMBED, num_heads=NUM_HEADS,
+                                     mlp_activation='nonexistent_act')
+            block.init(KEY, x, train=False)
+
+    def test_transformer_block_invalid_initializer_raises(self):
+        with pytest.raises(ValueError, match="does not exist"):
+            x     = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+            block = TransformerBlock(embed_dim=EMBED, num_heads=NUM_HEADS,
+                                     mlp_initializer='nonexistent_init')
+            block.init(KEY, x, train=False)
+
+    def test_cross_attention_block_custom_activation(self):
+        x   = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+        ctx = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+        block = CrossAttentionBlock(embed_dim=EMBED, num_heads=NUM_HEADS,
+                                    mlp_ratio=MLP_RATIO, mlp_activation='relu')
+        variables = block.init(KEY, x, ctx, train=False)
+        out = block.apply(variables, x, ctx, train=False)
+        check_shape(out, (BATCH, SEQ, EMBED))
+        check_finite(out)
+
+    def test_swin_block_custom_activation(self):
+        x     = jax.random.normal(KEY, (BATCH, SWIN_H, SWIN_W, SWIN_C))
+        block = SwinBlock(embed_dim=SWIN_C, num_heads=SWIN_HEADS,
+                          window_size=WINDOW, mlp_activation='silu')
+        variables = block.init(KEY, x, train=False)
+        out = block.apply(variables, x, train=False)
+        check_shape(out, (BATCH, SWIN_H, SWIN_W, SWIN_C))
+        check_finite(out)
+
+    def test_swin_block_pair_threads_to_both_blocks(self):
+        x    = jax.random.normal(KEY, (BATCH, SWIN_H, SWIN_W, SWIN_C))
+        pair = SwinBlockPair(embed_dim=SWIN_C, num_heads=SWIN_HEADS,
+                             window_size=WINDOW, mlp_activation='silu',
+                             mlp_initializer='lecun_normal')
+        variables = pair.init(KEY, x, train=False)
+        bound = pair.bind(variables)
+        assert bound.block_w.mlp_activation  == 'silu'
+        assert bound.block_sw.mlp_activation == 'silu'
+        assert bound.block_w.mlp_initializer  == 'lecun_normal'
+        assert bound.block_sw.mlp_initializer == 'lecun_normal'
+
+    # --- Registered nets ---
+
+    def test_transformer_encoder_custom_activation(self):
+        x   = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+        enc = TransformerEncoder(num_layers=2, embed_dim=EMBED,
+                                 num_heads=NUM_HEADS, mlp_ratio=MLP_RATIO,
+                                 mlp_activation='silu')
+        variables = enc.init(KEY, x, train=False)
+        out = enc.apply(variables, x, train=False)
+        check_shape(out, (BATCH, SEQ, EMBED))
+        check_finite(out)
+
+    def test_transformer_decoder_custom_activation(self):
+        x   = jax.random.normal(KEY, (BATCH, SEQ,      EMBED))
+        ctx = jax.random.normal(KEY, (BATCH, SEQ * 2,  EMBED))
+        dec = TransformerDecoder(num_layers=2, embed_dim=EMBED,
+                                 num_heads=NUM_HEADS, mlp_ratio=MLP_RATIO,
+                                 mlp_activation='relu')
+        variables = dec.init(KEY, x, ctx, train=False)
+        out = dec.apply(variables, x, ctx, train=False)
+        check_shape(out, (BATCH, SEQ, EMBED))
+        check_finite(out)
+
+    def test_vit_custom_activation(self):
+        x   = jax.random.normal(KEY, (BATCH, IMG_H, IMG_W, IMG_C))
+        vit = ViT(patch_size=PATCH, embed_dim=VIT_EMBED, num_heads=VIT_HEADS,
+                  num_layers=VIT_LAYERS, mlp_ratio=MLP_RATIO,
+                  mlp_activation='silu', mlp_initializer='lecun_normal')
+        variables = vit.init(KEY, x, train=False)
+        out = vit.apply(variables, x, train=False)
+        check_shape(out, (BATCH, VIT_EMBED))
+        check_finite(out)
+
+    def test_masked_vit_custom_activation(self):
+        x    = jax.random.normal(KEY, (BATCH, IMG_H, IMG_W, IMG_C))
+        mvit = MaskedViT(patch_size=PATCH, embed_dim=VIT_EMBED,
+                         num_heads=VIT_HEADS, num_layers=VIT_LAYERS,
+                         mlp_ratio=MLP_RATIO, mlp_activation='silu')
+        variables = mvit.init({'params': KEY, 'mask': MASK_KEY},
+                              x, train=False)
+        visible, _, _ = mvit.apply(variables, x, train=False)
+        check_shape(visible, (BATCH, NUM_PATCHES, VIT_EMBED))
+        check_finite(visible)
+
+    def test_mae_decoder_custom_activation(self):
+        x    = jax.random.normal(KEY, (BATCH, IMG_H, IMG_W, IMG_C))
+        mvit = MaskedViT(patch_size=PATCH, embed_dim=VIT_EMBED,
+                         num_heads=VIT_HEADS, num_layers=VIT_LAYERS,
+                         mlp_ratio=MLP_RATIO, mask_ratio=0.75)
+        mv   = mvit.init({'params': KEY, 'mask': MASK_KEY}, x, train=True)
+        visible, mask, ids_restore = mvit.apply(
+            mv, x, train=True, rngs={'mask': MASK_KEY}
+        )
+        dec = MAEDecoder(num_patches=NUM_PATCHES,
+                         patch_dim=PATCH ** 2 * IMG_C,
+                         embed_dim=VIT_EMBED, num_heads=VIT_HEADS,
+                         num_layers=2, mlp_ratio=MLP_RATIO,
+                         mlp_activation='silu')
+        variables = dec.init(KEY, visible, mask, ids_restore, train=False)
+        out = dec.apply(variables, visible, mask, ids_restore, train=False)
+        check_shape(out, (BATCH, NUM_PATCHES, PATCH ** 2 * IMG_C))
+        check_finite(out)
+
+    def test_swin_encoder_custom_activation(self):
+        x   = jax.random.normal(KEY, (BATCH, SWIN_H, SWIN_W, IMG_C))
+        enc = SwinEncoder(
+            patch_size=4, embed_dim=SWIN_C,
+            depths=(1,), num_heads=(SWIN_HEADS,),
+            window_size=WINDOW, mlp_activation='silu',
+        )
+        variables = enc.init(KEY, x, train=False)
+        out = enc.apply(variables, x, train=False)
+        check_shape(out, (BATCH, SWIN_C))
+        check_finite(out)
+
+    def test_default_activation_unchanged(self):
+        """Omitting mlp_activation should behave identically to gelu."""
+        x      = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+        block1 = TransformerBlock(embed_dim=EMBED, num_heads=NUM_HEADS,
+                                  mlp_ratio=MLP_RATIO)
+        block2 = TransformerBlock(embed_dim=EMBED, num_heads=NUM_HEADS,
+                                  mlp_ratio=MLP_RATIO, mlp_activation='gelu')
+        v1 = block1.init(KEY, x, train=False)
+        v2 = block2.init(KEY, x, train=False)
+        out1 = block1.apply(v1, x, train=False)
+        out2 = block2.apply(v2, x, train=False)
+        assert jnp.allclose(out1, out2, atol=1e-6)
+
+    def test_get_transformer_accepts_mlp_activation(self):
+        enc = get_transformer('TRANSFORMER_ENCODER', num_layers=1,
+                              embed_dim=EMBED, num_heads=NUM_HEADS,
+                              mlp_activation='silu')
+        assert isinstance(enc, TransformerEncoder)
+        assert enc.mlp_activation == 'silu'
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 

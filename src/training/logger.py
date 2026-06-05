@@ -202,7 +202,7 @@ class WandbLogger(BaseLogger):
         tags:         list[str] | None = None,
         notes:        str | None = None,
         offline:      bool = False,
-        api_key:      str | None = None,
+        api_key:      str | None = None, # for the love of god do not push your api keys to GitHub!!!!!!
         **wandb_kwargs,
     ) -> None:
         try:
@@ -501,6 +501,11 @@ def create_logger(
     """
     backend = backend.lower().strip()
     if backend == "wandb":
+        # Honour log_dir as base_log_dir so WandB writes under the run directory
+        # when run_dir is set in the trainer config.  Explicit base_log_dir in
+        # log_kwargs always wins.
+        if log_dir is not None and "base_log_dir" not in kwargs:
+            kwargs = {"base_log_dir": log_dir, **kwargs}
         return WandbLogger(config=config, **kwargs)
     elif backend == "tensorboard":
         if log_dir is None:

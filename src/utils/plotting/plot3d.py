@@ -16,12 +16,14 @@ def plot_volume_slice(
     extent: Optional[list[float]] = None,
     cmap: str = "RdBu_r",
     title: str = "",
+    xlabel: str = "",
+    ylabel: str = "",
     colorbar_label: str = "",
     symmetric_cmap: bool = True,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     figsize: tuple[int, int] = (8, 5),
-) -> np.ndarray:
+) -> tuple[plt.Figure, np.ndarray]:
     """Plot a single 2D slice of a 3D volume.
 
     Extracts one slice along the specified axis at the given index
@@ -48,6 +50,10 @@ def plot_volume_slice(
         Matplotlib colormap.
     title : str
         Plot title. If empty, defaults to "axis=index" e.g. "z = 16".
+    xlabel : str
+        X-axis label.
+    ylabel : str
+        Y-axis label.
     colorbar_label : str
         Colorbar label.
     symmetric_cmap : bool
@@ -62,17 +68,16 @@ def plot_volume_slice(
 
     Returns
     -------
-    np.ndarray
-        The extracted 2D slice. Shape depends on which axis is sliced:
-        axis=0 -> (ny, nz), axis=1 -> (nx, nz), axis=2 -> (nx, ny).
+    tuple[plt.Figure, np.ndarray]
+        (figure, extracted 2D slice).
 
     Example
     -------
     >>> vol = np.random.randn(64, 64, 32)
-    >>> plot_volume_slice(vol, slice_index=16)
-    >>> plot_volume_slice(vol, slice_index=32, axis=0)
+    >>> fig, slc = plot_volume_slice(vol, slice_index=16)
     >>> for i in [8, 16, 24]:
-    ...     plot_volume_slice(vol, slice_index=i, title=f"z={i}")
+    ...     fig, slc = plot_volume_slice(vol, slice_index=i, title=f"z={i}")
+    ...     fig.savefig(f"slice_{i}.png")
     """
     volume = np.asarray(volume)
     slc = np.take(volume, slice_index, axis=axis)
@@ -88,11 +93,11 @@ def plot_volume_slice(
         vmin=lo, vmax=hi, aspect="auto", extent=extent,
     )
     ax.set_title(title)
-    plt.colorbar(im, ax=ax, label=colorbar_label)
-    plt.tight_layout()
-    plt.show()
-
-    return slc
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    fig.colorbar(im, ax=ax, label=colorbar_label)
+    fig.tight_layout()
+    return fig, slc
 
 
 def plot_volume_comparison(
@@ -103,19 +108,18 @@ def plot_volume_comparison(
     extent: Optional[list[float]] = None,
     cmap: str = "RdBu_r",
     title_prefix: str = "",
+    xlabel: str = "",
+    ylabel: str = "",
     figsize: tuple[int, int] = (16, 4),
     verbose: bool = True,
-) -> tuple[np.ndarray, float]:
+) -> tuple[plt.Figure, np.ndarray, float]:
     """Plot target, prediction, and residual slices side by side.
 
     Extracts the same slice from both volumes, computes the residual,
     and plots all three as a three-panel figure. The target and
     prediction panels share a symmetric colormap scaled to the maximum
     absolute value across both. The residual panel uses its own
-    symmetric scale. Residuals are always plotted symmetrically since
-    they are naturally centred around zero.
-
-    Input arrays should be NumPy arrays or convertible via ``np.array()``.
+    symmetric scale.
 
     Parameters
     ----------
@@ -133,23 +137,25 @@ def plot_volume_comparison(
         Matplotlib colormap.
     title_prefix : str
         String prepended to each panel title.
+    xlabel : str
+        X-axis label.
+    ylabel : str
+        Y-axis label.
     figsize : tuple[int, int]
         Figure size in inches.
     verbose : bool
-        If True (default), print the slice MSE after plotting.
+        If True (default), print the slice MSE.
 
     Returns
     -------
-    tuple[np.ndarray, float]
-        (residual 2D slice, MSE scalar for this slice).
+    tuple[plt.Figure, np.ndarray, float]
+        (figure, residual 2D slice, MSE scalar for this slice).
 
     Example
     -------
-    >>> resid, mse = plot_volume_comparison(true_vol, pred_vol,
-    ...                                      slice_index=16)
-    >>> resid, mse = plot_volume_comparison(true_vol, pred_vol,
-    ...                                      slice_index=32, axis=0,
-    ...                                      verbose=False)
+    >>> fig, resid, mse = plot_volume_comparison(true_vol, pred_vol,
+    ...                                           slice_index=16)
+    >>> fig.savefig("comparison.png", dpi=150)
     """
     true_volume = np.asarray(true_volume)
     pred_volume = np.asarray(pred_volume)
@@ -175,15 +181,16 @@ def plot_volume_comparison(
             cmap=cmap, vmin=-clim, vmax=clim, aspect="auto",
         )
         ax.set_title(f"{title} ({axis_name}={slice_index})")
-        plt.colorbar(im, ax=ax)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        fig.colorbar(im, ax=ax)
 
-    plt.tight_layout()
-    plt.show()
+    fig.tight_layout()
 
     if verbose:
         print(f"Slice MSE ({axis_name}={slice_index}): {mse:.5f}")
 
-    return resid, mse
+    return fig, resid, mse
 
 
 def plot_surface_3d(
@@ -201,20 +208,17 @@ def plot_surface_3d(
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     figsize: tuple[int, int] = (10, 7),
-) -> None:
+) -> plt.Figure:
     """Plot a 2D array as a 3D surface.
 
     Parameters
     ----------
     z : np.ndarray
         2D array of shape (rows, cols) representing surface heights.
-        Should be a NumPy array or convertible via ``np.array()``.
     x : np.ndarray, optional
-        1D array of x coordinates, shape (cols,).
-        If None, uses column indices.
+        1D array of x coordinates, shape (cols,). If None, uses column indices.
     y : np.ndarray, optional
-        1D array of y coordinates, shape (rows,).
-        If None, uses row indices.
+        1D array of y coordinates, shape (rows,). If None, uses row indices.
     cmap : str
         Matplotlib colormap. Default "viridis".
     title : str
@@ -229,13 +233,9 @@ def plot_surface_3d(
         Surface transparency. 1.0 is fully opaque.
     stride : int
         Subsampling stride for rendering. Default 1 (no subsampling).
-        Increase for large grids where rendering is slow -- e.g.
-        ``stride=2`` renders every other point in each dimension,
-        reducing the vertex count by 4x.
+        Increase for large grids — ``stride=2`` reduces vertex count by 4×.
     symmetric_cmap : bool
-        If True, scale colormap symmetrically around zero via
-        ``_resolve_clim``. Default False since surfaces like loss
-        landscapes are typically all-positive.
+        If True, scale colormap symmetrically around zero. Default False.
     vmin : float, optional
         Colormap minimum override.
     vmax : float, optional
@@ -243,19 +243,20 @@ def plot_surface_3d(
     figsize : tuple[int, int]
         Figure size in inches.
 
+    Returns
+    -------
+    plt.Figure
+
     Example
     -------
-    >>> z = np.random.randn(50, 50)
-    >>> plot_surface_3d(z, title="Random surface")
-
-    >>> x = np.linspace(-1., 1., 50)
-    >>> y = np.linspace(-1., 1., 50)
-    >>> plot_surface_3d(loss_grid, x=x, y=y,
-    ...                 title="Loss landscape",
-    ...                 xlabel="direction 1",
-    ...                 ylabel="direction 2",
-    ...                 zlabel="loss",
-    ...                 stride=2)
+    >>> fig = plot_surface_3d(z, title="Random surface")
+    >>> fig = plot_surface_3d(loss_grid, x=x, y=y,
+    ...                       title="Loss landscape",
+    ...                       xlabel="direction 1",
+    ...                       ylabel="direction 2",
+    ...                       zlabel="loss",
+    ...                       stride=2)
+    >>> fig.savefig("surface.png", dpi=150)
     """
     z = np.asarray(z)
     rows, cols = z.shape
@@ -266,10 +267,8 @@ def plot_surface_3d(
         y = np.arange(rows)
 
     X, Y = np.meshgrid(x, y)
-
     lo, hi = _resolve_clim(z, symmetric_cmap, vmin, vmax)
 
-    # subsampling via stride
     X_s = X[::stride, ::stride]
     Y_s = Y[::stride, ::stride]
     Z_s = z[::stride, ::stride]
@@ -286,5 +285,5 @@ def plot_surface_3d(
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_zlabel(zlabel)
-    plt.tight_layout()
-    plt.show()
+    fig.tight_layout()
+    return fig

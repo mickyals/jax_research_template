@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from unittest.mock import patch
 
 from utils.plotting.plot2d import (
@@ -156,8 +157,10 @@ class TestPlotField2d:
         plot_field_2d(field_2d, cmap="viridis")
 
     @patch("matplotlib.pyplot.show")
-    def test_returns_none(self, mock_show, field_2d):
-        assert plot_field_2d(field_2d) is None
+    def test_returns_figure(self, mock_show, field_2d):
+        result = plot_field_2d(field_2d)
+        assert isinstance(result, Figure)
+        plt.close(result)
 
 
 # ---------------------------------------------------------------------------
@@ -174,23 +177,27 @@ class TestPlotFieldComparison2d:
     @patch("matplotlib.pyplot.show")
     def test_returns_residual_and_mse(self, mock_show, field_pair):
         true, pred = field_pair
-        resid, mse = plot_field_comparison_2d(true, pred, verbose=False)
+        fig, resid, mse = plot_field_comparison_2d(true, pred, verbose=False)
+        assert isinstance(fig, Figure)
         assert isinstance(resid, np.ndarray)
         assert resid.shape == true.shape
         assert isinstance(mse, float)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_residual_correct(self, mock_show, field_pair):
         true, pred = field_pair
-        resid, _ = plot_field_comparison_2d(true, pred, verbose=False)
+        fig, resid, _ = plot_field_comparison_2d(true, pred, verbose=False)
         assert np.allclose(resid, pred - true)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_mse_correct(self, mock_show, field_pair):
         true, pred = field_pair
-        _, mse = plot_field_comparison_2d(true, pred, verbose=False)
+        fig, _, mse = plot_field_comparison_2d(true, pred, verbose=False)
         expected = float(((pred - true) ** 2).mean())
         assert abs(mse - expected) < 1e-6
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_verbose_false_no_print(self, mock_show, field_pair, capsys):
@@ -247,10 +254,12 @@ class TestPlotScatterOverlay:
         plot_scatter_overlay(positive_field, x, y, symmetric_cmap=False)
 
     @patch("matplotlib.pyplot.show")
-    def test_returns_none(self, mock_show, field_2d):
+    def test_returns_figure(self, mock_show, field_2d):
         x = np.zeros(5)
         y = np.zeros(5)
-        assert plot_scatter_overlay(field_2d, x, y) is None
+        result = plot_scatter_overlay(field_2d, x, y)
+        assert isinstance(result, Figure)
+        plt.close(result)
 
 
 # ---------------------------------------------------------------------------
@@ -306,8 +315,10 @@ class TestPlotHeatmap:
         plot_heatmap(matrix, vmin=-1., vmax=1.)
 
     @patch("matplotlib.pyplot.show")
-    def test_returns_none(self, mock_show):
-        assert plot_heatmap(np.eye(3)) is None
+    def test_returns_figure(self, mock_show):
+        result = plot_heatmap(np.eye(3))
+        assert isinstance(result, Figure)
+        plt.close(result)
 
 
 # ---------------------------------------------------------------------------
@@ -357,9 +368,11 @@ class TestPlotMollweide:
         plot_mollweide(pos_field, LON, LAT, symmetric_cmap=False)
 
     @patch("matplotlib.pyplot.show")
-    def test_returns_none(self, mock_show, mollweide_grids):
+    def test_returns_figure(self, mock_show, mollweide_grids):
         field, LON, LAT = mollweide_grids
-        assert plot_mollweide(field, LON, LAT) is None
+        result = plot_mollweide(field, LON, LAT)
+        assert isinstance(result, Figure)
+        plt.close(result)
 
 
 # ---------------------------------------------------------------------------
@@ -380,21 +393,24 @@ class TestPlotMollweideComparison:
     def test_returns_residual_and_mse(self, mock_show, mollweide_grids):
         field, LON, LAT = mollweide_grids
         pred = field * 0.9
-        resid, mse = plot_mollweide_comparison(
+        fig, resid, mse = plot_mollweide_comparison(
             field, pred, LON, LAT, verbose=False
         )
+        assert isinstance(fig, Figure)
         assert isinstance(resid, np.ndarray)
         assert resid.shape == field.shape
         assert isinstance(mse, float)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_residual_correct(self, mock_show, mollweide_grids):
         field, LON, LAT = mollweide_grids
         pred = field * 0.9
-        resid, _ = plot_mollweide_comparison(
+        fig, resid, _ = plot_mollweide_comparison(
             field, pred, LON, LAT, verbose=False
         )
         assert np.allclose(resid, pred - field)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_verbose_false_no_print(self, mock_show, mollweide_grids, capsys):

@@ -53,7 +53,7 @@ def plot_field_2d(
     vmax: Optional[float] = None,
     symmetric_cmap: bool = True,
     figsize: tuple[int, int] = (10, 5),
-) -> None:
+) -> plt.Figure:
     """Plot a 2D scalar field as an image.
 
     Parameters
@@ -84,11 +84,15 @@ def plot_field_2d(
     figsize : tuple[int, int]
         Figure size in inches.
 
+    Returns
+    -------
+    plt.Figure
+
     Example
     -------
     >>> field = np.random.randn(64, 64)
-    >>> plot_field_2d(field, extent=[-180, 180, -90, 90], title="Example")
-    >>> plot_field_2d(field ** 2, symmetric_cmap=False)
+    >>> fig = plot_field_2d(field, extent=[-180, 180, -90, 90], title="Example")
+    >>> fig = plot_field_2d(field ** 2, symmetric_cmap=False)
     """
     lo, hi = _resolve_clim(field, symmetric_cmap, vmin, vmax)
 
@@ -100,9 +104,9 @@ def plot_field_2d(
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    plt.colorbar(im, ax=ax, label=colorbar_label)
-    plt.tight_layout()
-    plt.show()
+    fig.colorbar(im, ax=ax, label=colorbar_label)
+    fig.tight_layout()
+    return fig
 
 
 def plot_field_comparison_2d(
@@ -115,7 +119,7 @@ def plot_field_comparison_2d(
     ylabel: str = "y",
     figsize: tuple[int, int] = (16, 4),
     verbose: bool = True,
-) -> tuple[np.ndarray, float]:
+) -> tuple[plt.Figure, np.ndarray, float]:
     """Plot target, prediction, and residual side by side.
 
     All three panels share a symmetric colormap scaled to the maximum
@@ -145,14 +149,13 @@ def plot_field_comparison_2d(
 
     Returns
     -------
-    tuple[np.ndarray, float]
-        (residual array of shape (rows, cols), grid MSE scalar).
+    tuple[plt.Figure, np.ndarray, float]
+        (figure, residual array of shape (rows, cols), grid MSE scalar).
 
     Example
     -------
-    >>> resid, mse = plot_field_comparison_2d(true, pred,
-    ...                                        extent=[-100, -40, 0, 30])
-    >>> print(f"MSE: {mse:.5f}")
+    >>> fig, resid, mse = plot_field_comparison_2d(true, pred,
+    ...                                             extent=[-100, -40, 0, 30])
     """
     resid = pred_field - true_field
     mse = float((resid ** 2).mean())
@@ -173,15 +176,14 @@ def plot_field_comparison_2d(
         ax.set_title(title)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        plt.colorbar(im, ax=ax)
+        fig.colorbar(im, ax=ax)
 
-    plt.tight_layout()
-    plt.show()
+    fig.tight_layout()
 
     if verbose:
         print(f"Grid MSE: {mse:.5f}")
 
-    return resid, mse
+    return fig, resid, mse
 
 
 def plot_scatter_overlay(
@@ -201,7 +203,7 @@ def plot_scatter_overlay(
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     figsize: tuple[int, int] = (10, 5),
-) -> None:
+) -> plt.Figure:
     """Plot a 2D field with a scatter overlay.
 
     Scatter points can use independent colour scaling from the field
@@ -246,13 +248,14 @@ def plot_scatter_overlay(
     figsize : tuple[int, int]
         Figure size in inches.
 
+    Returns
+    -------
+    plt.Figure
+
     Example
     -------
-    >>> plot_scatter_overlay(field, lons, lats, values,
-    ...                       extent=[-100, -40, 0, 30])
-    >>> plot_scatter_overlay(field, lons, lats, probs,
-    ...                       scatter_vmin=0., scatter_vmax=1.,
-    ...                       symmetric_cmap=False)
+    >>> fig = plot_scatter_overlay(field, lons, lats, values,
+    ...                            extent=[-100, -40, 0, 30])
     """
     field_vmin, field_vmax = _resolve_clim(field, symmetric_cmap, vmin, vmax)
 
@@ -278,15 +281,17 @@ def plot_scatter_overlay(
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    plt.colorbar(im, ax=ax)
-    plt.tight_layout()
-    plt.show()
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    return fig
 
 
 def plot_heatmap(
     matrix: np.ndarray,
     row_labels: Optional[list[str]] = None,
     col_labels: Optional[list[str]] = None,
+    xlabel: str = "",
+    ylabel: str = "",
     cmap: str = "RdBu_r",
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
@@ -297,7 +302,7 @@ def plot_heatmap(
     annotate_fontsize: int = 8,
     figsize: Optional[tuple[int, int]] = None,
     max_figsize: tuple[int, int] = (14, 14),
-) -> None:
+) -> plt.Figure:
     """Plot a 2D matrix as a heatmap with optional annotations.
 
     General purpose -- used for cosine similarity matrices, confusion
@@ -312,6 +317,10 @@ def plot_heatmap(
         Tick labels for the y-axis.
     col_labels : list[str], optional
         Tick labels for the x-axis.
+    xlabel : str
+        X-axis label. Default ``""``.
+    ylabel : str
+        Y-axis label. Default ``""``.
     cmap : str
         Matplotlib colormap.
     vmin : float, optional
@@ -334,12 +343,17 @@ def plot_heatmap(
     max_figsize : tuple[int, int]
         Upper bound on auto-computed figure size. Default (14, 14).
 
+    Returns
+    -------
+    plt.Figure
+
     Example
     -------
     >>> sim = enc_norm @ enc_norm.T
-    >>> plot_heatmap(sim, row_labels=labels, col_labels=labels,
-    ...              title="Cosine similarity", annotate=True)
-    >>> plot_heatmap(large_matrix, annotate=True, annotate_fontsize=5)
+    >>> fig = plot_heatmap(sim, row_labels=labels, col_labels=labels,
+    ...                    xlabel="Predicted", ylabel="True",
+    ...                    title="Cosine similarity", annotate=True)
+    >>> fig.savefig("sim.png", dpi=150)
     """
     n_rows, n_cols = matrix.shape
     if figsize is None:
@@ -365,9 +379,11 @@ def plot_heatmap(
                         fontsize=annotate_fontsize)
 
     ax.set_title(title)
-    plt.colorbar(im, ax=ax, label=colorbar_label)
-    plt.tight_layout()
-    plt.show()
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    fig.colorbar(im, ax=ax, label=colorbar_label)
+    fig.tight_layout()
+    return fig
 
 
 def plot_mollweide(
@@ -388,7 +404,7 @@ def plot_mollweide(
     scatter_vmax: Optional[float] = None,
     scatter_size: int = 8,
     figsize: tuple[int, int] = (12, 5),
-) -> None:
+) -> plt.Figure:
     """Plot a scalar field on a Mollweide projection.
 
     Scatter points can be coloured independently from the field via
@@ -434,14 +450,14 @@ def plot_mollweide(
     figsize : tuple[int, int]
         Figure size in inches.
 
+    Returns
+    -------
+    plt.Figure
+
     Example
     -------
-    >>> plot_mollweide(field, LON, LAT, title="Global field")
-    >>> plot_mollweide(field, LON, LAT,
-    ...                scatter_lon=obs_lon, scatter_lat=obs_lat,
-    ...                scatter_values=obs_prob,
-    ...                scatter_vmin=0., scatter_vmax=1.,
-    ...                scatter_cmap="viridis")
+    >>> fig = plot_mollweide(field, LON, LAT, title="Global field")
+    >>> fig.savefig("global.png", dpi=150)
     """
     field_vmin, field_vmax = _resolve_clim(field, symmetric_cmap, vmin, vmax)
 
@@ -468,10 +484,10 @@ def plot_mollweide(
 
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
-    plt.colorbar(im, ax=ax, orientation="horizontal",
+    fig.colorbar(im, ax=ax, orientation="horizontal",
                  pad=0.05, shrink=0.7, label=colorbar_label)
-    plt.tight_layout()
-    plt.show()
+    fig.tight_layout()
+    return fig
 
 
 def plot_mollweide_comparison(
@@ -489,14 +505,8 @@ def plot_mollweide_comparison(
     scatter_vmax: Optional[float] = None,
     figsize: tuple[int, int] = (18, 4),
     verbose: bool = True,
-) -> tuple[np.ndarray, float]:
+) -> tuple[plt.Figure, np.ndarray, float]:
     """Plot target, prediction, and residual on three Mollweide panels.
-
-    Scatter points can be coloured independently from the field via
-    ``scatter_vmin`` / ``scatter_vmax``. If not provided, scatter
-    inherits the field's symmetric colour limits. This is documented
-    explicitly to avoid confusion when scatter values have a different
-    range to the field (e.g. probabilities in [0, 1]).
 
     Parameters
     ----------
@@ -517,9 +527,7 @@ def plot_mollweide_comparison(
     scatter_lat : np.ndarray, optional
         Latitudes of scatter points in radians.
     scatter_values : np.ndarray, optional
-        Values used to colour scatter points. If None, points are black.
-        By default shares the field's symmetric colour limits -- pass
-        ``scatter_vmin`` / ``scatter_vmax`` to decouple.
+        Values used to colour scatter points.
     scatter_cmap : str, optional
         Colormap for scatter points. Defaults to field cmap.
     scatter_vmin : float, optional
@@ -529,23 +537,16 @@ def plot_mollweide_comparison(
     figsize : tuple[int, int]
         Figure size in inches.
     verbose : bool
-        If True (default), print the grid MSE after plotting.
+        If True (default), print the grid MSE.
 
     Returns
     -------
-    tuple[np.ndarray, float]
-        (residual array of shape (rows, cols), grid MSE scalar).
+    tuple[plt.Figure, np.ndarray, float]
+        (figure, residual array of shape (rows, cols), grid MSE scalar).
 
     Example
     -------
-    >>> resid, mse = plot_mollweide_comparison(true, pred, LON, LAT)
-    >>> resid, mse = plot_mollweide_comparison(
-    ...     true, pred, LON, LAT,
-    ...     scatter_lon=obs_lon, scatter_lat=obs_lat,
-    ...     scatter_values=obs_prob,
-    ...     scatter_vmin=0., scatter_vmax=1.,
-    ...     scatter_cmap="viridis",
-    ... )
+    >>> fig, resid, mse = plot_mollweide_comparison(true, pred, LON, LAT)
     """
     resid = pred_field - true_field
     mse = float((resid ** 2).mean())
@@ -580,13 +581,11 @@ def plot_mollweide_comparison(
                            color="black", s=4, alpha=0.4)
         ax.set_title(title)
         ax.grid(True, alpha=0.3)
-        plt.colorbar(im, ax=ax, orientation="horizontal",
-                     pad=0.05, shrink=0.7)
+        fig.colorbar(im, ax=ax, orientation="horizontal", pad=0.05, shrink=0.7)
 
-    plt.tight_layout()
-    plt.show()
+    fig.tight_layout()
 
     if verbose:
         print(f"Grid MSE: {mse:.5f}")
 
-    return resid, mse
+    return fig, resid, mse

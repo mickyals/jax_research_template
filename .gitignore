@@ -230,3 +230,10 @@ __pycache__/
 # windsurf
 .windsurf/
 
+# Claude
+.claude/
+
+# Experiment run artifacts (checkpoints, logs, tuning databases)
+runs/
+*.db
+wandb/

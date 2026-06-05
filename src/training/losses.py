@@ -268,3 +268,85 @@ def masked_log_cosh(
         mask = _mask_from_target(target)
     target_safe = _nan_to_zero(target)
     return _apply_mask(_optax.log_cosh(pred, target_safe), mask)
+
+
+# ---------------------------------------------------------------------------
+# Ordinal classification (CORAL)
+# ---------------------------------------------------------------------------
+
+def ordinal_loss(
+    logits:    jax.Array,
+    labels:    jax.Array,
+    n_classes: int,
+) -> jax.Array:
+    """CORAL ordinal loss over K-1 cumulative thresholds.
+
+    For K ordinal classes labelled {0, ..., K-1}, the model produces K-1
+    logits representing P(Y > k). Loss is mean sigmoid BCE across all
+    K-1 thresholds, built on sigmoid_binary_cross_entropy.
+
+    Parameters
+    ----------
+    logits : jax.Array  shape (B, n_classes - 1)
+    labels : jax.Array  shape (B,)  integer class labels in {0, ..., K-1}
+    n_classes : int
+
+    Returns
+    -------
+    jax.Array  scalar
+
+    Example
+    -------
+    >>> ordinal_loss(jnp.zeros((4, 9)), jnp.array([0, 3, 7, 9]), n_classes=10).shape
+    ()
+    """
+    thresholds = jnp.arange(n_classes - 1)
+    targets    = (labels[:, None] > thresholds[None, :]).astype(jnp.float32)
+    return jnp.mean(_optax.sigmoid_binary_cross_entropy(logits, targets))
+
+
+def ordinal_predict(logits: jax.Array) -> jax.Array:
+    """Convert ordinal logits to predicted class indices.
+
+    Returns k = sum(sigmoid(logit_j) > 0.5 for j in 0..K-2).
+
+    Parameters
+    ----------
+    logits : jax.Array  shape (B, K-1)
+
+    Returns
+    -------
+    jax.Array  shape (B,)  int32
+
+    Example
+    -------
+    >>> ordinal_predict(jnp.array([[10., 10., -10., -10., -10., -10., -10., -10., -10.]]))
+    Array([2], dtype=int32)
+    """
+    return jnp.sum(jax.nn.sigmoid(logits) > 0.5, axis=-1).astype(jnp.int32)
+
+
+def ordinal_probs(logits: jax.Array) -> jax.Array:
+    """Convert ordinal logits to a class probability distribution.
+
+    Derives P(Y = k) from cumulative probabilities P(Y > k) = sigmoid(logit_k).
+    Differences are clamped to [0, 1] to guard against non-monotone outputs.
+
+    Parameters
+    ----------
+    logits : jax.Array  shape (B, K-1)
+
+    Returns
+    -------
+    jax.Array  shape (B, K)
+
+    Example
+    -------
+    >>> p = ordinal_probs(jnp.zeros((2, 9))); p.shape
+    (2, 10)
+    """
+    cum       = jax.nn.sigmoid(logits)
+    ones      = jnp.ones((*logits.shape[:-1], 1))
+    zeros     = jnp.zeros((*logits.shape[:-1], 1))
+    augmented = jnp.concatenate([ones, cum, zeros], axis=-1)
+    return jnp.clip(augmented[..., :-1] - augmented[..., 1:], 0.0, 1.0)

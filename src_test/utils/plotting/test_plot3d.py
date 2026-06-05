@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from unittest.mock import patch
 
 from utils.plotting.plot3d import (
@@ -61,23 +62,27 @@ class TestPlotVolumeSlice:
 
     @patch("matplotlib.pyplot.show")
     def test_returns_correct_shape_axis2(self, mock_show, volume):
-        slc = plot_volume_slice(volume, slice_index=8, axis=2)
+        fig, slc = plot_volume_slice(volume, slice_index=8, axis=2)
         assert slc.shape == (32, 32)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_returns_correct_shape_axis0(self, mock_show, volume):
-        slc = plot_volume_slice(volume, slice_index=16, axis=0)
+        fig, slc = plot_volume_slice(volume, slice_index=16, axis=0)
         assert slc.shape == (32, 16)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_returns_correct_shape_axis1(self, mock_show, volume):
-        slc = plot_volume_slice(volume, slice_index=16, axis=1)
+        fig, slc = plot_volume_slice(volume, slice_index=16, axis=1)
         assert slc.shape == (32, 16)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_returned_slice_values_correct(self, mock_show, volume):
-        slc = plot_volume_slice(volume, slice_index=5, axis=2)
+        fig, slc = plot_volume_slice(volume, slice_index=5, axis=2)
         assert np.allclose(slc, volume[:, :, 5])
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_default_title_generated(self, mock_show, volume):
@@ -110,8 +115,9 @@ class TestPlotVolumeSlice:
         try:
             import jax.numpy as jnp
             vol = jnp.ones((16, 16, 8))
-            slc = plot_volume_slice(vol, slice_index=4)
+            fig, slc = plot_volume_slice(vol, slice_index=4)
             assert isinstance(slc, np.ndarray)
+            plt.close(fig)
         except ImportError:
             pytest.skip("JAX not available")
 
@@ -135,47 +141,54 @@ class TestPlotVolumeComparison:
     @patch("matplotlib.pyplot.show")
     def test_returns_residual_and_mse(self, mock_show, volume_pair):
         true, pred = volume_pair
-        resid, mse = plot_volume_comparison(true, pred, slice_index=8,
-                                             verbose=False)
+        fig, resid, mse = plot_volume_comparison(true, pred, slice_index=8,
+                                                  verbose=False)
+        assert isinstance(fig, Figure)
         assert isinstance(resid, np.ndarray)
         assert isinstance(mse, float)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_residual_shape_axis2(self, mock_show, volume_pair):
         true, pred = volume_pair
-        resid, _ = plot_volume_comparison(true, pred, slice_index=8,
-                                           axis=2, verbose=False)
+        fig, resid, _ = plot_volume_comparison(true, pred, slice_index=8,
+                                                axis=2, verbose=False)
         assert resid.shape == (32, 32)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_residual_shape_axis0(self, mock_show, volume_pair):
         true, pred = volume_pair
-        resid, _ = plot_volume_comparison(true, pred, slice_index=16,
-                                           axis=0, verbose=False)
+        fig, resid, _ = plot_volume_comparison(true, pred, slice_index=16,
+                                                axis=0, verbose=False)
         assert resid.shape == (32, 16)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_residual_values_correct(self, mock_show, volume_pair):
         true, pred = volume_pair
-        resid, _ = plot_volume_comparison(true, pred, slice_index=8,
-                                           verbose=False)
+        fig, resid, _ = plot_volume_comparison(true, pred, slice_index=8,
+                                                verbose=False)
         expected = pred[:, :, 8] - true[:, :, 8]
         assert np.allclose(resid, expected)
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_mse_correct(self, mock_show, volume_pair):
         true, pred = volume_pair
-        resid, mse = plot_volume_comparison(true, pred, slice_index=8,
-                                             verbose=False)
+        fig, resid, mse = plot_volume_comparison(true, pred, slice_index=8,
+                                                  verbose=False)
         expected_mse = float((resid ** 2).mean())
         assert abs(mse - expected_mse) < 1e-6
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_zero_residual_for_identical(self, mock_show, volume):
-        resid, mse = plot_volume_comparison(volume, volume, slice_index=8,
-                                             verbose=False)
+        fig, resid, mse = plot_volume_comparison(volume, volume, slice_index=8,
+                                                  verbose=False)
         assert np.allclose(resid, 0.)
         assert abs(mse) < 1e-10
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_verbose_false_no_print(self, mock_show, volume_pair, capsys):
@@ -213,9 +226,10 @@ class TestPlotVolumeComparison:
             import jax.numpy as jnp
             true = jnp.ones((16, 16, 8))
             pred = jnp.ones((16, 16, 8)) * 1.1
-            resid, mse = plot_volume_comparison(true, pred, slice_index=4,
-                                                 verbose=False)
+            fig, resid, mse = plot_volume_comparison(true, pred, slice_index=4,
+                                                      verbose=False)
             assert isinstance(resid, np.ndarray)
+            plt.close(fig)
         except ImportError:
             pytest.skip("JAX not available")
 
@@ -276,8 +290,10 @@ class TestPlotSurface3d:
             pytest.skip("JAX not available")
 
     @patch("matplotlib.pyplot.show")
-    def test_returns_none(self, mock_show, surface):
-        assert plot_surface_3d(surface) is None
+    def test_returns_figure(self, mock_show, surface):
+        result = plot_surface_3d(surface)
+        assert isinstance(result, Figure)
+        plt.close(result)
 
     @patch("matplotlib.pyplot.show")
     def test_colour_limits_from_full_array_not_strided(self, mock_show):

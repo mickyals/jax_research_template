@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from unittest.mock import patch
 
 from utils.plotting.plot1d import plot_losses
@@ -58,9 +59,10 @@ class TestPlotLosses:
         plot_losses({"train": long_losses["train"], "test": []})
 
     @patch("matplotlib.pyplot.show")
-    def test_returns_none(self, mock_show, long_losses):
+    def test_returns_figure(self, mock_show, long_losses):
         result = plot_losses(long_losses)
-        assert result is None
+        assert isinstance(result, Figure)
+        plt.close(result)
 
     @patch("matplotlib.pyplot.show")
     def test_produces_two_axes(self, mock_show, long_losses):

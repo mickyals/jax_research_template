@@ -1,157 +1,97 @@
 # Experiment: Sparse Observation Cross-Attention TC Classifier
 
-**Goal** — given sparse in-situ land surface observations within a radius of a query position at time *t*, predict the SSHS intensity class of any storm present.
+**Goal:** Given sparse in-situ land surface observations within a fixed radius of a query position at time *t*, predict the Saffir-Simpson Hurricane Wind Scale (SSHS) intensity class of any tropical cyclone present, or classify the sample as background (no storm).
 
-This is the pretraining stage of a two-phase pipeline. After convergence, the cross-attention encoder is frozen and a regression head is attached to estimate physical TC parameters (wind speed, central pressure, RMW).
+This is a binary + ordinal classification problem over 11 classes:
+
+| Class | Meaning | SSHS |
+|------:|---------|------|
+| 0 | No storm (background) | — |
+| 1–3 | Sub-tropical / pre-tropical disturbances | −4 to −2 |
+| 4 | Tropical Depression | −1 |
+| 5 | Tropical Storm | 0 |
+| 6–10 | Category 1–5 Hurricane | +1 to +5 |
+
+---
+
+## Data sources
+
+**IBTrACS** (`ibtracs_full.npz`) — storm centre position, timestamp, and SSHS class for every 6-hourly TC observation in the training domain. 10,191 rows across all cyclone types.
+
+**InsituLand** (`insitu_land_clean.npz` + `insitu_land_station_meta.npz`) — land surface hourly observations from Copernicus C3S for 552 stations in the Caribbean / Gulf domain (LAT 0–30°N, LON 100–45°W). 74.7M observation rows.
+
+**Observed variables** (per station per timestamp):
+- `air_pressure_at_sea_level` (Pa)
+- `air_temperature` (K)
+- `dew_point_temperature` (K)
+- `wind_speed` (m/s)
+- `wind_from_direction` (°)
+
+**Splits:**
+- Train: IBTrACS seasons 2005–2020
+- Val: 2021–2022
+- Test: 2023–2025
+- Hard test: multi-storm timestamps (870 times when ≥2 storms were active simultaneously) — held out entirely
+
+**Batching:** each batch is 1:1 balanced — half TC samples (storm centre as query), half background samples (random domain point during non-TC periods).
 
 ---
 
 ## Architecture
 
-```
-Query position (storm centre or background point)
-    → unit-sphere [x, y, z]
-    → GaussianFourierEmbedding(input_dim=3, mapping_dim=64)
-    → Dense(embed_dim)
-    → query token  (B, 1, embed_dim)
+`TCClassifier` supports two attention paths controlled by a single config flag.
 
-Station observations (≤ max_stations per sample)
-    [pressure, temperature, dew point, wind speed,          ← physical obs (NaN where missing)
-     bearing_sin, bearing_cos, log_dist_norm]               ← geometric features (always valid)
-    concat with obs validity mask (same shape, float)       ← tells model which obs are absent
-    → Dense(embed_dim)
-    → station tokens  (B, N, embed_dim)
-
-N × CrossAttentionBlock
-    Q = query token, K/V = station tokens
-    mask = station_mask  (True → real station, False → padding)
-    → context vector  (B, embed_dim)
-
-OrdinalHead  →  9 logits  →  CORAL ordinal loss
-```
-
-**Output** — 10 ordinal classes:
-
-| Class | Label          | USA_SSHS |
-|------:|----------------|----------|
-|     0 | No storm       | —        |
-|     1 | Disturbance    | −3       |
-|     2 | Subtropical    | −2       |
-|     3 | Tropical Depression | −1  |
-|     4 | Tropical Storm | 0        |
-|     5 | Category 1     | 1        |
-|     6 | Category 2     | 2        |
-|     7 | Category 3     | 3        |
-|     8 | Category 4     | 4        |
-|     9 | Category 5     | 5        |
-
----
-
-## Data
-
-Two sources are joined per sample:
-
-- **IBTrACS** (`ibtracs_tc_clean.npz`) — storm centre position, timestamp, SSHS class
-- **InsituLand** (`insitu_land_clean.npz` + `insitu_land_station_meta.npz`) — land surface observations from Copernicus C3S, Caribbean / Gulf domain (LAT 0–30 N, LON 100–45 W)
-
-Temporal split follows IBTrACS seasons: train 2005–2020, val 2021–2022, test 2023–2025. Multi-storm timesteps are held out as a hard test set.
-
-Each training batch is **1:1 balanced** — half TC samples, half background samples drawn from non-TC periods at random domain positions.
-
----
-
-## Quick start
-
-### 1. Set WandB credentials
-
-```bash
-export WANDB_API_KEY=your_key   # preferred
-# or: wandb login                # interactive, persists to ~/.netrc
-```
-
-### 2. Edit paths in the config
+### Path A — Self-attention then cross-attention (`use_self_attention: true`)
 
 ```
-src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+Station obs (B, N, F) + Station coords (B, N, 2)
+    → concat → Dense(embed_dim) → station tokens (B, N, E)
+    → TransformerEncoder (num_layers blocks of Pre-LN self-attention + FFN)
+    → contextualised station tokens (B, N, E)
+
+Query token (B, 1, E)  [learned CLS-style token for unit_circle encoding;
+                        Fourier-encoded position for domain encoding]
+    → CrossAttentionBlock × num_cross_layers
+        Q = query token, K = V = contextualised stations
+        mask = station_mask (B, 1, N)
+    → context vector (B, E)
+
+LayerNorm → Dense(n_classes) → logits (B, 11)
 ```
 
-Update the four data paths under the `data:` block.
+### Path B — Direct cross-attention (`use_self_attention: false`)
 
-### 3. Train
+```
+Station coords (B, N, 2) → GaussianFourierEmbedding → K (B, N, fourier_dim)
+Station obs    (B, N, F) → sentinel-replace missing  → V (B, N, F)
 
-```bash
-python src/experiments/sparse_obs_cross_attn/train.py
+Query token (B, 1, E)  [same as Path A]
+    → SeparateKVCrossAttentionBlock × num_cross_layers
+        Q = query token
+        K projected from coords (w_k: fourier_dim → embed_dim, per layer)
+        V projected from obs    (w_v: F → embed_dim, per layer)
+        mask = station_mask (B, N)
+    → context vector (B, E)
 
-# Resume interrupted run
-python src/experiments/sparse_obs_cross_attn/train.py --resume
-
-# Custom config
-python src/experiments/sparse_obs_cross_attn/train.py \
-    --config path/to/my_config.yaml
+LayerNorm → Dense(n_classes) → logits (B, 11)
 ```
 
-### 4. Evaluate
+Path B separates geometric context (K) from observation content (V), which is the key inductive bias of this experiment — can the model learn to attend to the right *locations* independently of what those locations are measuring?
 
-```bash
-# Attention maps + confusion matrix (val split, 8 examples)
-python src/experiments/sparse_obs_cross_attn/evaluate.py \
-    --config  src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
-    --ckpt    checkpoints/tc_classifier/best \
-    --split   val \
-    --n       8 \
-    --out_dir figures/
+### Location encoding modes
 
-# Confusion matrix only
-python src/experiments/sparse_obs_cross_attn/evaluate.py \
-    --config ... --ckpt ... --mode confusion
-```
+Two coordinate encoding modes, set in both `data.location_encoding` and `model.location_encoding` (must match):
 
----
+| Mode | `station_coords` | `query_coords` |
+|------|-----------------|----------------|
+| `unit_circle` | `[norm_distance, bearing_rad]` relative to query | `[0, 0]` sentinel → model uses a learned token |
+| `domain` | `[norm_lat_rad, norm_lon_rad]` absolute | `[norm_lat_rad, norm_lon_rad]` encoded same way |
 
-## Metrics
+`unit_circle` is rotation-equivariant (the storm is always "at the origin"); `domain` retains absolute geographic position.
 
-Logged to WandB automatically by the Trainer:
+### Missing observations
 
-| Metric | When | Description |
-|--------|------|-------------|
-| `train/ordinal_loss` | every `log_every_n_steps` steps | CORAL binary cross-entropy (training loss) |
-| `val/ordinal_loss` | every epoch | Same loss on validation set |
-| `val/accuracy` | every epoch | Exact SSHS class match fraction |
-| `val/mae_class` | every epoch | Mean \|predicted class − true class\| — primary ordinal metric |
-| `val/within_1_class` | every epoch | Fraction within 1 class step (e.g. Cat-1 vs Cat-2 counts as correct) |
-| `val/within_2_class` | every epoch | Fraction within 2 class steps |
-
-**Interpretation guide:**
-- Early training: `val/ordinal_loss` decreases, `val/accuracy` climbs slowly (class imbalance).
-- `val/mae_class` below 1.5 is a reasonable early target.
-- A model that always predicts No-Storm achieves accuracy ≈ 0.5 but `mae_class` ≈ 2.5 — use `mae_class` to detect this collapse.
-
----
-
-## Evaluation outputs
-
-`evaluate.py` produces two figure types:
-
-**Attention maps** (`figures/attn_val_NNN.png`) — geographic scatter plot centred on the storm, stations coloured by mean cross-attention weight from the final layer. Shows which land stations the model uses to infer TC intensity.
-
-**Confusion matrix** (`figures/confusion_val.png`) — 10×10 ordinal confusion matrix. Errors should cluster near the diagonal; large off-diagonal mass indicates calibration problems.
-
----
-
-## Config reference
-
-Full field documentation: [`configs/schema.py`](configs/schema.py)
-
-Key knobs:
-
-| Key | Default | Notes |
-|-----|---------|-------|
-| `data.radius_km` | 500 | Increase to pull in more distant stations |
-| `data.time_window_hours` | 3.0 | Set to 0.0 for same-minute observations only |
-| `data.max_stations` | 64 | Larger values slow training; smaller values lose context |
-| `model.n_layers` | 2 | More layers → richer query–context interaction |
-| `model.embed_dim` | 128 | Bottleneck of the attention representation |
-| `trainer.scheduler_kwargs.decay_steps` | 50000 | Set to ~`n_tc_train / 32 × num_epochs` |
+Stations within the radius may have missing values for some variables. Missing entries are zeroed in the datamodule (`obs_mask` tracks which are valid), then replaced with a large negative sentinel (`missing_value: -1e9`) inside the model so the network can distinguish "missing" from a genuine near-zero measurement. LayerNorm within each block normalises away the extreme magnitude.
 
 ---
 
@@ -159,25 +99,128 @@ Key knobs:
 
 ```
 sparse_obs_cross_attn/
-├── model.py        TCClassifier Flax module + forward_with_weights
-├── datamodule.py   JointDataModule → Trainer-compatible loaders
-├── metrics.py      Ordinal metrics (ordinal_loss, mae_class, within_k)
-├── train.py        Entry point — calls Trainer.fit()
-├── evaluate.py     Attention maps, confusion matrix
-├── configs/
-│   ├── tc_classifier.yaml   Default hyperparameter config
-│   └── schema.py            Typed schema + validate_config()
-└── README.md       This file
+├── ibtracs.py          IBTrACSDataset — NpzDataset subclass, season splits,
+│                           multi-storm filtering, SSHS label mapping
+├── insitu_land.py      InsituLandDataset — two-file (obs + station meta),
+│                           haversine spatial filter, reliability filtering,
+│                           binary-search O(log N) time queries
+├── dataset.py          TCDataset — joins IBTrACS + InsituLand per sample,
+│                           coordinate encoding, obs normalisation
+├── datamodule.py       TCDataModule + TCLoader — balanced TC/background batches,
+│                           re-iterable with per-epoch seed
+├── model.py            TCClassifier + SeparateKVCrossAttentionBlock
+├── metrics.py          cross_entropy, accuracy, binary_accuracy, mae_class
+│                           + build_metrics_fns() factory
+├── train.py            CLI entry point
+├── evaluate.py         Evaluation pipeline + geographic attention plots
+├── tune.py             Optuna hyperparameter search entry point
+├── baselines/          Baseline implementations for comparison
+└── configs/
+    ├── tc_classifier.yaml   Full training config
+    ├── tc_tune.yaml         Short-epoch config for HP search
+    └── schema.json          JSON schema
 ```
 
-Reusable components imported from the template:
+---
+
+## Quickstart
+
+### 1. Set data paths
+
+Edit the four `data:` paths in the config:
 
 ```
-core/attention.py           CrossAttention, CrossAttentionBlock
-core/embeddings.py          GaussianFourierEmbedding
-core/nets/heads.py          OrdinalHead
-datasets/joint/dataset.py   JointTCDataset
-training/ordinal_loss.py    ordinal_loss, ordinal_predict, ordinal_probs
-training/trainer.py         Trainer
-training/logger.py          WandbLogger / TensorBoardLogger / NullLogger
+src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
 ```
+
+### 2. Train
+
+```bash
+python -m experiments.sparse_obs_cross_attn.train \
+    src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+
+# Resume an interrupted run
+python -m experiments.sparse_obs_cross_attn.train \
+    src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+    --resume
+```
+
+### 3. Evaluate
+
+```bash
+python -m experiments.sparse_obs_cross_attn.evaluate \
+    --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
+    --config src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+    --split val \
+    --output_dir runs/tc_classifier/run_01/eval_figures
+```
+
+Outputs:
+- **Confusion matrix** — row-normalised 11×11 with raw counts
+- **Per-class P/R/F1 bar chart**
+- **Geographic attention maps** — polar scatter (unit_circle mode) or lat/lon scatter (domain mode), coloured by mean attention weight over the last cross-attention layer
+
+### 4. Hyperparameter search
+
+```bash
+python -m experiments.sparse_obs_cross_attn.tune \
+    src/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+    --n_trials 25 \
+    --storage sqlite:///runs/tc_classifier/hp_search/study.db \
+    --study_name tc_classifier_v1
+```
+
+After the study finishes, the best parameters are printed and written to `runs/tc_classifier/hp_search/best_params.json`. Copy those values into `tc_classifier.yaml` and re-train at full length.
+
+---
+
+## Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `train/cross_entropy` | Softmax CE over 11 classes — training loss |
+| `val/cross_entropy` | Validation CE — patience metric for early stopping |
+| `val/accuracy` | Top-1 accuracy over all 11 classes |
+| `val/binary_accuracy` | TC vs no-TC (class 0 vs class > 0); random chance = 0.5 |
+| `val/mae_class` | Mean \|predicted class − true class\| in class units |
+| `val/attn_entropy` | Entropy of cross-attention weights — logged per epoch via callback |
+
+**Interpretation:**
+- A model that always predicts class 0 achieves `binary_accuracy = 0.5` and `accuracy ≈ 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
+- Falling `val/attn_entropy` means the model is learning to concentrate on specific stations rather than attending uniformly — a sign the attention is doing useful work.
+
+---
+
+## Config reference
+
+Key knobs in `tc_classifier.yaml`:
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `data.radius_km` | 500 | Stations outside this radius are excluded |
+| `data.time_window_hours` | 0.1 | Temporal window for matching obs to TC timestamp |
+| `data.max_stations` | 64 | Padding/truncation limit; larger = richer context but slower |
+| `data.min_stations` | 1 | Samples with fewer stations are dropped |
+| `data.location_encoding` | `unit_circle` | `unit_circle` or `domain` |
+| `data.obs_normalisation` | `minmax_11` | `minmax_01` / `minmax_11` / `standardise` |
+| `model.use_self_attention` | `true` | Path A (true) or Path B (false) |
+| `model.embed_dim` | 128 | Token dimensionality |
+| `model.num_heads` | 4 | Attention heads (embed_dim must be divisible) |
+| `model.num_layers` | 2 | Self-attention depth (Path A only) |
+| `model.num_cross_layers` | 1 | Cross-attention depth (both paths) |
+| `model.fourier_dim` | 64 | GaussianFourierEmbedding output dim (must be even) |
+| `trainer.patience_metric` | `val/cross_entropy` | |
+| `trainer.run_dir` | `runs/tc_classifier/run_01` | Change per run to avoid overwriting |
+| `trainer.log_backend` | `null` | Switch to `wandb` for remote tracking |
+
+For WandB logging, set `log_backend: wandb` and `WANDB_API_KEY` as an environment variable, then add `project`, `name`, and optionally `tags` under `log_kwargs`.
+
+---
+
+## Implementation notes
+
+**`SeparateKVCrossAttentionBlock`** is defined in `model.py` rather than `core/nets/transformers.py` because it is experiment-specific: it projects K and V from different input tensors (coordinates vs observations) rather than a single context sequence. If this pattern proves reusable it can be promoted to `core/`.
+
+**Attention entropy callback** (`train.py`): a fixed validation probe batch is held in memory for the duration of training. After each validation epoch a JIT-compiled forward pass with `return_weights=True` computes the mean attention entropy over all heads and logs it as `val/attn_entropy`. Every 5 epochs an attention geographic figure is also logged.
+
+**Multi-storm exclusion:** IBTrACS timestamps with ≥2 active storms are not used during training or validation — the model sees only unambiguous single-storm or background samples. These timestamps form the `hard_test` split for post-training analysis.
