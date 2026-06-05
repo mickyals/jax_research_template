@@ -1,0 +1,352 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "sparse_obs_cross_attn / tc_classifier",
+  "description": "Config schema for the sparse-observation cross-attention TC intensity classifier experiment. Validated at training start by train.py using the jsonschema library.",
+  "type": "object",
+  "required": ["data", "trainer"],
+  "additionalProperties": false,
+  "properties": {
+
+    "data": {
+      "type": "object",
+      "description": "Data loading, splitting, and batch assembly.",
+      "required": ["ibtracs_path", "insitu_obs_path", "insitu_meta_path"],
+      "additionalProperties": false,
+      "properties": {
+
+        "ibtracs_path": {
+          "type": "string",
+          "description": "Path to ibtracs_tc_clean.npz — cleaned IBTrACS best-track observations.",
+          "examples": ["data/ibtracs_tc_clean.npz"]
+        },
+
+        "multi_storm_path": {
+          "type": ["string", "null"],
+          "description": "Path to ibtracs_multi_storm_times.npz. Required to use split() on IBTrACSDataset and to build the background timestamp pool. Set to null to skip multi-storm filtering (val/test splits fall back to season-only).",
+          "default": null,
+          "examples": ["data/ibtracs_multi_storm_times.npz"]
+        },
+
+        "insitu_obs_path": {
+          "type": "string",
+          "description": "Path to insitu_land_clean.npz — 74.7 M rows, one per station per timestamp.",
+          "examples": ["data/insitu_land_clean.npz"]
+        },
+
+        "insitu_meta_path": {
+          "type": "string",
+          "description": "Path to insitu_land_station_meta.npz — 552 rows, one per station.",
+          "examples": ["data/insitu_land_station_meta.npz"]
+        },
+
+        "reliability_levels": {
+          "type": "array",
+          "description": "Station quality filter. Only stations whose reliability falls in this list are included. More levels = more stations but noisier observations.",
+          "default": ["always_active", "mostly_active"],
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": ["always_active", "mostly_active", "sporadic", "sparse", "unusable"]
+          },
+          "examples": [
+            ["always_active", "mostly_active"],
+            ["always_active", "mostly_active", "sporadic"]
+          ]
+        },
+
+        "radius_km": {
+          "type": "number",
+          "description": "Spatial search radius in kilometres around the query position. Stations beyond this distance are excluded from the context set.",
+          "default": 500.0,
+          "exclusiveMinimum": 0,
+          "examples": [500.0, 300.0, 750.0]
+        },
+
+        "time_window_hours": {
+          "type": "number",
+          "description": "Half-width of the observation time window in hours (query_time ± this). A minimum of 1 minute is always enforced internally so that timestamps at the same clock-minute are never missed due to sub-second nanosecond differences between data sources. 0.0 = same clock-minute only. 3.0 matches IBTrACS 3-hourly cadence (recommended).",
+          "default": 3.0,
+          "minimum": 0.0,
+          "examples": [3.0, 1.5, 0.5, 0.0]
+        },
+
+        "max_stations": {
+          "type": "integer",
+          "description": "Context set size. All batches have exactly this many station slots. Real stations fill the first n_real slots; the rest are zero-padded (station_mask = False). During training, if more than max_stations stations are available they are randomly subsampled (augmentation). During evaluation the closest max_stations are used.",
+          "default": 64,
+          "minimum": 1,
+          "examples": [32, 64, 128]
+        },
+
+        "min_stations": {
+          "type": "integer",
+          "description": "Minimum number of real stations required to use a sample. Samples with fewer matching stations are silently skipped. Increase to ensure the model always sees meaningful context; decrease to maximise data coverage in sparse regions.",
+          "default": 1,
+          "minimum": 1,
+          "examples": [1, 2, 5]
+        },
+
+        "batch_size": {
+          "type": "integer",
+          "description": "Total samples per batch. Must be even.",
+          "default": 64,
+          "minimum": 2,
+          "multipleOf": 2,
+          "examples": [32, 64, 128]
+        },
+
+        "tc_fraction": {
+          "type": "number",
+          "description": "Fraction of each batch that is TC samples. The remainder is background (CLASS_NO_STORM=0) samples. Default 0.5 gives equal halves. Set below 0.5 (e.g. 0.4) to oversample background and reinforce the no-storm base rate — useful because the real-world prior is overwhelmingly storm-free.",
+          "default": 0.5,
+          "exclusiveMinimum": 0.0,
+          "exclusiveMaximum": 1.0,
+          "examples": [0.5, 0.4, 0.33]
+        },
+
+        "fov_lat": {
+          "type": "array",
+          "description": "Field-of-view latitude bounds [lat_min, lat_max] in decimal degrees. Background query positions are drawn uniformly within this box.",
+          "default": [0.0, 30.0],
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "number", "minimum": -90.0, "maximum": 90.0 },
+          "examples": [[0.0, 30.0]]
+        },
+
+        "fov_lon": {
+          "type": "array",
+          "description": "Field-of-view longitude bounds [lon_min, lon_max] in decimal degrees. Background query positions are drawn uniformly within this box.",
+          "default": [-100.0, -45.0],
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "number", "minimum": -180.0, "maximum": 180.0 },
+          "examples": [[-100.0, -45.0]]
+        },
+
+        "background_buffer_hours": {
+          "type": "number",
+          "description": "Exclusion buffer in hours around IBTrACS TC observations when building the background timestamp pool. InsituLand timestamps within ± this value of any IBTrACS timestamp are excluded from the pool to avoid accidentally labelling active-TC periods as background.",
+          "default": 6.0,
+          "minimum": 0.0,
+          "examples": [6.0, 3.0, 12.0]
+        }
+      }
+    },
+
+    "model": {
+      "type": "object",
+      "description": "TCClassifier architecture hyperparameters. All fields are optional — omit to use defaults.",
+      "additionalProperties": false,
+      "properties": {
+
+        "embed_dim": {
+          "type": "integer",
+          "description": "Token embedding dimensionality used throughout the cross-attention stack. Must be divisible by num_heads.",
+          "default": 128,
+          "minimum": 16,
+          "multipleOf": 1,
+          "examples": [64, 128, 256]
+        },
+
+        "num_heads": {
+          "type": "integer",
+          "description": "Number of attention heads per CrossAttentionBlock. Must divide embed_dim evenly.",
+          "default": 4,
+          "minimum": 1,
+          "examples": [2, 4, 8]
+        },
+
+        "n_layers": {
+          "type": "integer",
+          "description": "Number of stacked CrossAttentionBlock layers. Each layer lets the query attend over the full station context.",
+          "default": 2,
+          "minimum": 1,
+          "examples": [1, 2, 4]
+        },
+
+        "mlp_ratio": {
+          "type": "number",
+          "description": "FFN hidden dim multiplier inside each CrossAttentionBlock. FFN hidden dim = mlp_ratio × embed_dim.",
+          "default": 4.0,
+          "exclusiveMinimum": 0.0,
+          "examples": [2.0, 4.0]
+        },
+
+        "dropout_rate": {
+          "type": "number",
+          "description": "Dropout rate applied in the FFN and attention weights of each CrossAttentionBlock. Set to 0.0 to disable.",
+          "default": 0.1,
+          "minimum": 0.0,
+          "exclusiveMaximum": 1.0,
+          "examples": [0.0, 0.1, 0.2]
+        },
+
+        "n_classes": {
+          "type": "integer",
+          "description": "Number of ordinal classes. Must match SSHS_TO_CLASS in datasets/joint/dataset.py. Default 10 covers No Storm + 9 SSHS intensity levels.",
+          "default": 10,
+          "minimum": 2,
+          "examples": [10]
+        },
+
+        "pos_map_dim": {
+          "type": "integer",
+          "description": "Output dimensionality of the GaussianFourierEmbedding applied to the unit-sphere query position. Must be even (output is [cos, sin] pairs).",
+          "default": 64,
+          "minimum": 2,
+          "multipleOf": 2,
+          "examples": [32, 64, 128]
+        },
+
+        "pos_scale": {
+          "type": "number",
+          "description": "Standard deviation of the Gaussian used to sample the random frequency matrix in GaussianFourierEmbedding. Higher values encode finer spatial detail.",
+          "default": 10.0,
+          "exclusiveMinimum": 0.0,
+          "examples": [1.0, 5.0, 10.0]
+        },
+
+        "obs_dim": {
+          "type": "integer",
+          "description": "Station feature vector length. Must match OBS_DIM in datasets/joint/dataset.py (default 7: 4 physical obs + bearing_sin + bearing_cos + log_dist_norm). Change only if the feature construction in dataset.py changes.",
+          "default": 7,
+          "minimum": 1,
+          "examples": [7]
+        }
+      }
+    },
+
+    "trainer": {
+      "type": "object",
+      "description": "Training loop, optimiser, scheduler, logging, and checkpointing.",
+      "required": ["optimizer", "scheduler"],
+      "additionalProperties": false,
+      "properties": {
+
+        "loss_key": {
+          "type": "string",
+          "description": "Key in metrics_fns that is differentiated during training. Must match a key returned by build_metrics_fns() in metrics.py.",
+          "default": "ordinal_loss",
+          "enum": ["ordinal_loss"],
+          "examples": ["ordinal_loss"]
+        },
+
+        "optimizer": {
+          "type": "string",
+          "description": "Optimiser name from the training.optimizers registry.",
+          "default": "adamw",
+          "examples": ["adamw", "adam", "sgd"]
+        },
+
+        "optimizer_kwargs": {
+          "type": "object",
+          "description": "Extra keyword arguments forwarded to the optimiser constructor.",
+          "default": {},
+          "examples": [{"weight_decay": 0.01}, {}]
+        },
+
+        "scheduler": {
+          "type": "string",
+          "description": "Learning rate scheduler name from the training.optimizers registry.",
+          "default": "cosine_decay",
+          "examples": ["cosine_decay", "constant", "warmup_cosine"]
+        },
+
+        "scheduler_kwargs": {
+          "type": "object",
+          "description": "Extra keyword arguments forwarded to the scheduler constructor. For cosine_decay: init_value (peak LR) and decay_steps (steps to reach near-zero). Set decay_steps ≈ n_tc_train / (batch_size / 2) × num_epochs.",
+          "default": {},
+          "examples": [{"init_value": 3e-4, "decay_steps": 50000}]
+        },
+
+        "max_grad_norm": {
+          "type": ["number", "null"],
+          "description": "Global gradient clipping threshold. null disables clipping.",
+          "default": 1.0,
+          "exclusiveMinimum": 0.0,
+          "examples": [1.0, 0.5, null]
+        },
+
+        "num_epochs": {
+          "type": "integer",
+          "description": "Maximum number of training epochs. Training stops earlier if patience is exhausted.",
+          "default": 100,
+          "minimum": 1,
+          "examples": [50, 100, 200]
+        },
+
+        "patience": {
+          "type": "integer",
+          "description": "Early stopping patience in epochs. Training stops when patience_metric has not improved for this many consecutive epochs.",
+          "default": 15,
+          "minimum": 1,
+          "examples": [10, 15, 20]
+        },
+
+        "patience_metric": {
+          "type": "string",
+          "description": "Validation metric used for early stopping and best-checkpoint selection. Must be prefixed with 'val/'.",
+          "default": "val/ordinal_loss",
+          "enum": [
+            "val/ordinal_loss",
+            "val/accuracy",
+            "val/mae_class",
+            "val/within_1_class",
+            "val/within_2_class"
+          ],
+          "examples": ["val/ordinal_loss", "val/mae_class"]
+        },
+
+        "patience_direction": {
+          "type": "string",
+          "description": "Whether a lower or higher patience_metric value is considered an improvement.",
+          "default": "lower_is_better",
+          "enum": ["lower_is_better", "higher_is_better"],
+          "examples": ["lower_is_better", "higher_is_better"]
+        },
+
+        "checkpoint_dir": {
+          "type": "string",
+          "description": "Root directory for orbax checkpoints. Two subdirectories are written: best/ (best patience_metric) and latest/ (last completed epoch).",
+          "default": "checkpoints/tc_classifier",
+          "examples": ["checkpoints/tc_classifier", "runs/exp01"]
+        },
+
+        "log_every_n_steps": {
+          "type": "integer",
+          "description": "Number of gradient update steps between step-level training loss logs.",
+          "default": 100,
+          "minimum": 1,
+          "examples": [50, 100, 200]
+        },
+
+        "log_backend": {
+          "type": "string",
+          "description": "Logging backend. wandb — Weights & Biases (primary). tensorboard — local TensorBoard (cluster fallback). null / none — stdout + local PNG files, no external dependency.",
+          "default": "null",
+          "enum": ["wandb", "tensorboard", "null", "none"],
+          "examples": ["wandb", "tensorboard", "null"]
+        },
+
+        "log_kwargs": {
+          "type": "object",
+          "description": "Extra keyword arguments forwarded to the logger constructor. For wandb: project (required), name, tags, notes, offline, api_key. For tensorboard: flush_secs. For null: verbose.",
+          "default": {},
+          "examples": [
+            {"project": "tc-classifier", "name": "baseline-v1", "tags": ["ordinal", "cross-attention"]},
+            {"flush_secs": 30},
+            {"verbose": true}
+          ]
+        },
+
+        "seed": {
+          "type": "integer",
+          "description": "Global random seed for JAX RNG, data loader shuffling, and model initialisation.",
+          "default": 42,
+          "examples": [0, 42, 1234]
+        }
+      }
+    }
+  }
+}

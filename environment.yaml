@@ -39,6 +39,9 @@ dependencies:
       - rich>=13.0
       - tqdm>=4.0
 
+      # Hyperparameter optimisation
+      - optuna>=4.0
+
       # Optional -- install as needed
       # - wandb>=0.16
       # - torch>=2.0        # TensorBoardLogger only

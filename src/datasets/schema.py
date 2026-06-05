@@ -7,56 +7,61 @@ Keeping these here rather than inside dataset classes means the joint
 dataset, trainers, loss masks, and eval code can import column lists
 without importing the dataset classes themselves.
 
-Each schema is a plain class with class-level lists — no instances needed.
-New source schemas are added here when their data cleaning pipeline is
-complete.
+Each source uses a flat set of prefixed module-level variables so that
+imports are unambiguous when multiple schemas are in scope:
+
+    from datasets.schema import IBTRACS_PRIMARY_TARGET_COLS, IBTRACS_TRAIN_SEASONS
 """
 
 
 # ---------------------------------------------------------------------------
-# Season split definitions (shared across all source datasets)
+# IBTrACS — North Atlantic / Caribbean-Gulf best tracks
 # ---------------------------------------------------------------------------
 
-TRAIN_SEASONS: list[int] = list(range(2005, 2021))   # 2005-2020 inclusive
-VAL_SEASONS:   list[int] = [2021, 2022]
-TEST_SEASONS:  list[int] = list(range(2023, 2026))    # 2023-2025 inclusive
+IBTRACS_META_COLS: list[str] = [
+    "SID",           # str,             storm identifier e.g. 2017242N16333
+    "NAME",          # str,             storm name
+    "SEASON",        # float32,         season year
+    "BASIN",         # str,             ocean basin code e.g. NA
+    "SUBBASIN",      # str,             sub-basin code
+    "ISO_TIME",      # int64,            Unix nanoseconds, convert via pd.to_datetime
+    "LAT",           # float32,         storm center latitude degrees
+    "LON",           # float32,         storm center longitude degrees
+    "TRACK_TYPE",    # str,             track type
+    "IFLAG",         # str,             interpolation flag
+    "USA_AGENCY",    # str,             source agency
+    "USA_ATCF_ID",   # str,             ATCF storm identifier
+    "USA_RECORD",    # str,             record identifier
+    "USA_STATUS",    # str,             storm status e.g. HU TS TD EX
+    "USA_SSHS",      # float32,         Saffir-Simpson category -3 to 5
+]
 
+IBTRACS_PRIMARY_TARGET_COLS: list[str] = [
+    "USA_WIND",      # float32, m/s,    max sustained 1-min wind speed
+    "USA_PRES",      # float32, Pa,     minimum central pressure
+    "USA_POCI",      # float32, Pa,     pressure of outermost closed isobar
+    "USA_RMW",       # float32, m,      radius of maximum winds
+    "STORM_SPEED",   # float32, m/s,    storm translation speed
+    "STORM_DIR",     # float32, deg CW from north, storm translation direction
+]
 
-# ---------------------------------------------------------------------------
-# IBTrACS
-# ---------------------------------------------------------------------------
+IBTRACS_SECONDARY_TARGET_COLS: list[str] = [
+    "USA_R17MS_NE", "USA_R17MS_SE", "USA_R17MS_SW", "USA_R17MS_NW",  # float32, m, 34 kt wind radius per quadrant
+    "USA_R26MS_NE", "USA_R26MS_SE", "USA_R26MS_SW", "USA_R26MS_NW",  # float32, m, 50 kt wind radius per quadrant
+    "USA_R33MS_NE", "USA_R33MS_SE", "USA_R33MS_SW", "USA_R33MS_NW",  # float32, m, 64 kt wind radius per quadrant
+    "USA_ROCI",      # float32, m,      radius of outermost closed isobar
+    "USA_EYE",       # float32, m,      eye diameter
+    "USA_SEAHGT",    # float32, m,      sea height
+    "USA_SEARAD_NE", "USA_SEARAD_SE", "USA_SEARAD_SW", "USA_SEARAD_NW",  # float32, m, sea radii per quadrant
+]
 
-class IBTrACSSchema:
-    """Column registry for the cleaned IBTrACS North Atlantic npz files."""
+IBTRACS_ALL_TARGET_COLS: list[str] = (
+    IBTRACS_PRIMARY_TARGET_COLS + IBTRACS_SECONDARY_TARGET_COLS
+)
 
-    METADATA: list[str] = [
-        "SID", "NAME", "SEASON", "BASIN", "SUBBASIN",
-        "ISO_TIME", "LAT", "LON",
-        "TRACK_TYPE", "IFLAG", "USA_AGENCY", "USA_ATCF_ID",
-        "USA_RECORD", "USA_STATUS", "USA_SSHS",
-    ]
-
-    # Core intensity and structure parameters needed by parametric wind
-    # field models (Holland 2008, CLIMADA TropCyclone).
-    PRIMARY_TARGETS: list[str] = [
-        "USA_WIND",        # max sustained 1-min wind speed (m/s)
-        "USA_PRES",        # minimum central pressure (Pa)
-        "USA_POCI",        # pressure of outermost closed isobar (Pa)
-        "USA_RMW",         # radius of maximum winds (m)
-        "STORM_SPEED",     # storm translation speed (m/s)
-        "STORM_DIR",       # storm translation direction (degrees CW from N)
-    ]
-
-    # Quadrant wind radii and additional structural parameters.
-    # Zero-imputed where wind speed is below the threshold.
-    SECONDARY_TARGETS: list[str] = [
-        "USA_R17MS_NE", "USA_R17MS_SE", "USA_R17MS_SW", "USA_R17MS_NW",  # 34 kt radii (m)
-        "USA_R26MS_NE", "USA_R26MS_SE", "USA_R26MS_SW", "USA_R26MS_NW",  # 50 kt radii (m)
-        "USA_R33MS_NE", "USA_R33MS_SE", "USA_R33MS_SW", "USA_R33MS_NW",  # 64 kt radii (m)
-        "USA_ROCI",        # radius of outermost closed isobar (m)
-        "USA_EYE",         # eye diameter (m)
-        "USA_SEAHGT",      # sea height (m)
-        "USA_SEARAD_NE", "USA_SEARAD_SE", "USA_SEARAD_SW", "USA_SEARAD_NW",
-    ]
-
-    ALL_TARGETS: list[str] = PRIMARY_TARGETS + SECONDARY_TARGETS
+# Temporal splits — season-based, no row-level randomisation.
+# Hard test set (multi-storm timesteps) is loaded separately from
+# ibtracs_multi_storm_times.npz and withheld entirely from train and val.
+IBTRACS_TRAIN_SEASONS: list[int] = list(range(2005, 2021))   # 2005–2020 inclusive
+IBTRACS_VAL_SEASONS:   list[int] = [2021, 2022]
+IBTRACS_TEST_SEASONS:  list[int] = list(range(2023, 2026))    # 2023–2025 inclusive

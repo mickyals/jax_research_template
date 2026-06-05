@@ -20,10 +20,11 @@ import pandas as pd
 
 from datasets.base import NpzDataset
 from datasets.schema import (
-    IBTrACSSchema,
-    TRAIN_SEASONS,
-    VAL_SEASONS,
-    TEST_SEASONS,
+    IBTRACS_PRIMARY_TARGET_COLS,
+    IBTRACS_SECONDARY_TARGET_COLS,
+    IBTRACS_TRAIN_SEASONS,
+    IBTRACS_VAL_SEASONS,
+    IBTRACS_TEST_SEASONS,
 )
 
 
@@ -50,7 +51,7 @@ class IBTrACSDataset(NpzDataset):
     ...                        'data/ibtracs_multi_storm_times.npz')
     >>> train = ds.split('train')
     >>> X, y  = train.to_Xy(
-    ...     target_cols=IBTrACSSchema.PRIMARY_TARGETS,
+    ...     target_cols=IBTRACS_PRIMARY_TARGET_COLS,
     ...     feature_cols=['LAT', 'LON'],
     ... )
     """
@@ -190,9 +191,9 @@ class IBTrACSDataset(NpzDataset):
             multi_storm_path was not provided (required for all splits).
         """
         SPLITS = {
-            "train":     (True,  TRAIN_SEASONS),
-            "val":       (True,  VAL_SEASONS),
-            "test":      (True,  TEST_SEASONS),
+            "train":     (True,  IBTRACS_TRAIN_SEASONS),
+            "val":       (True,  IBTRACS_VAL_SEASONS),
+            "test":      (True,  IBTRACS_TEST_SEASONS),
             "hard_test": (False, None),
         }
         if which not in SPLITS:
@@ -228,8 +229,8 @@ class IBTrACSDataset(NpzDataset):
             )
 
         for label, cols in [
-            ("primary targets",   IBTrACSSchema.PRIMARY_TARGETS),
-            ("secondary targets", IBTrACSSchema.SECONDARY_TARGETS),
+            ("primary targets",   IBTRACS_PRIMARY_TARGET_COLS),
+            ("secondary targets", IBTRACS_SECONDARY_TARGET_COLS),
         ]:
             print(f"\n  {label}:")
             for c in cols:

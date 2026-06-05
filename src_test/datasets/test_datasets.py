@@ -12,10 +12,12 @@ import pytest
 
 from datasets.base import NpzDataset
 from datasets.schema import (
-    IBTrACSSchema,
-    TRAIN_SEASONS,
-    VAL_SEASONS,
-    TEST_SEASONS,
+    IBTRACS_ALL_TARGET_COLS,
+    IBTRACS_PRIMARY_TARGET_COLS,
+    IBTRACS_SECONDARY_TARGET_COLS,
+    IBTRACS_TRAIN_SEASONS,
+    IBTRACS_VAL_SEASONS,
+    IBTRACS_TEST_SEASONS,
 )
 from datasets.ibtracs.dataset import IBTrACSDataset
 
@@ -138,40 +140,40 @@ def ds_no_multi(ibtracs_paths):
 class TestSchema:
 
     def test_primary_targets_count(self):
-        assert len(IBTrACSSchema.PRIMARY_TARGETS) == 6
+        assert len(IBTRACS_PRIMARY_TARGET_COLS) == 6
 
     def test_secondary_targets_count(self):
-        assert len(IBTrACSSchema.SECONDARY_TARGETS) == 19
+        assert len(IBTRACS_SECONDARY_TARGET_COLS) == 19
 
     def test_all_targets_is_concatenation(self):
-        assert IBTrACSSchema.ALL_TARGETS == (
-            IBTrACSSchema.PRIMARY_TARGETS + IBTrACSSchema.SECONDARY_TARGETS
+        assert IBTRACS_ALL_TARGET_COLS == (
+            IBTRACS_PRIMARY_TARGET_COLS + IBTRACS_SECONDARY_TARGET_COLS
         )
 
     def test_no_duplicates_in_all_targets(self):
-        assert len(IBTrACSSchema.ALL_TARGETS) == len(set(IBTrACSSchema.ALL_TARGETS))
+        assert len(IBTRACS_ALL_TARGET_COLS) == len(set(IBTRACS_ALL_TARGET_COLS))
 
     def test_primary_targets_are_strings(self):
-        assert all(isinstance(c, str) for c in IBTrACSSchema.PRIMARY_TARGETS)
+        assert all(isinstance(c, str) for c in IBTRACS_PRIMARY_TARGET_COLS)
 
     def test_train_seasons_range(self):
-        assert TRAIN_SEASONS == list(range(2005, 2021))
+        assert IBTRACS_TRAIN_SEASONS == list(range(2005, 2021))
 
     def test_val_seasons(self):
-        assert VAL_SEASONS == [2021, 2022]
+        assert IBTRACS_VAL_SEASONS == [2021, 2022]
 
     def test_test_seasons_range(self):
-        assert TEST_SEASONS == list(range(2023, 2026))
+        assert IBTRACS_TEST_SEASONS == list(range(2023, 2026))
 
     def test_splits_are_disjoint(self):
-        all_splits = set(TRAIN_SEASONS) | set(VAL_SEASONS) | set(TEST_SEASONS)
+        all_splits = set(IBTRACS_TRAIN_SEASONS) | set(IBTRACS_VAL_SEASONS) | set(IBTRACS_TEST_SEASONS)
         assert len(all_splits) == (
-            len(TRAIN_SEASONS) + len(VAL_SEASONS) + len(TEST_SEASONS)
+            len(IBTRACS_TRAIN_SEASONS) + len(IBTRACS_VAL_SEASONS) + len(IBTRACS_TEST_SEASONS)
         )
 
     def test_train_before_val_before_test(self):
-        assert max(TRAIN_SEASONS) < min(VAL_SEASONS)
-        assert max(VAL_SEASONS) < min(TEST_SEASONS)
+        assert max(IBTRACS_TRAIN_SEASONS) < min(IBTRACS_VAL_SEASONS)
+        assert max(IBTRACS_VAL_SEASONS) < min(IBTRACS_TEST_SEASONS)
 
 
 # ===========================================================================
@@ -350,7 +352,7 @@ class TestIBTrACSSplits:
 
     def test_train_seasons(self, ds_full):
         train = ds_full.split("train")
-        assert set(train.seasons.tolist()).issubset(set(TRAIN_SEASONS))
+        assert set(train.seasons.tolist()).issubset(set(IBTRACS_TRAIN_SEASONS))
 
     def test_train_no_multi_storm(self, ds_full):
         train = ds_full.split("train")
@@ -358,14 +360,14 @@ class TestIBTrACSSplits:
 
     def test_val_seasons(self, ds_full):
         val = ds_full.split("val")
-        assert set(val.seasons.tolist()).issubset(set(VAL_SEASONS))
+        assert set(val.seasons.tolist()).issubset(set(IBTRACS_VAL_SEASONS))
 
     def test_val_no_multi_storm(self, ds_full):
         assert ds_full.split("val").is_multi_storm.sum() == 0
 
     def test_test_seasons(self, ds_full):
         tst = ds_full.split("test")
-        assert set(tst.seasons.tolist()).issubset(set(TEST_SEASONS))
+        assert set(tst.seasons.tolist()).issubset(set(IBTRACS_TEST_SEASONS))
 
     def test_test_no_multi_storm(self, ds_full):
         assert ds_full.split("test").is_multi_storm.sum() == 0
@@ -410,7 +412,7 @@ class TestIBTrACSExport:
 
     def test_to_Xy_shapes(self, ds_full):
         X, y = ds_full.to_Xy(
-            target_cols=IBTrACSSchema.PRIMARY_TARGETS[:2],
+            target_cols=IBTRACS_PRIMARY_TARGET_COLS[:2],
             feature_cols=["LAT", "LON"],
         )
         assert X.shape == (40, 2)

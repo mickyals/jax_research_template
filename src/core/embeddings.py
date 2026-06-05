@@ -6,6 +6,8 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
+from utils.jax_core.helpers import create_rng
+
 EMBEDDINGS: dict[str, dict] = {}
 
 
@@ -229,7 +231,7 @@ class GaussianFourierEmbedding(nn.Module):
         # stored as plain attribute -- never seen by optimizer
         # equivalent to eqx.static_field()
         self.B = jax.random.normal(
-            jax.random.PRNGKey(self.seed),
+            create_rng(self.seed),
             (self.input_dim, self.mapping_dim // 2),
         ) * self.scale
 

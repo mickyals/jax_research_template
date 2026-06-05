@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Callable, Sequence, Optional
 
+from utils.jax_core.helpers import create_rng
+
 
 # ---------------------------------------------------------------------------
 # Private plotting helper
@@ -443,7 +445,7 @@ def plot_loss_landscape(
 
     leaves, treedef = jax.tree_util.tree_flatten(params)
 
-    rng = jax.random.PRNGKey(seed)
+    rng = create_rng(seed)
     rng, key1, key2 = jax.random.split(rng, 3)
     keys1 = jax.random.split(key1, len(leaves))
     keys2 = jax.random.split(key2, len(leaves))
@@ -533,7 +535,7 @@ def model_tabulate(
     if mutable is None:
         mutable = ["params", "constants"]
     tabulate_fn = nn.tabulate(
-        model, jax.random.PRNGKey(seed), mutable=mutable
+        model, create_rng(seed), mutable=mutable
     )
     print(tabulate_fn(*init_inputs))
 
@@ -620,7 +622,7 @@ def plot_output_at_init(
             "in radians of shape `shape`."
         )
 
-    key = jax.random.PRNGKey(seed)
+    key = create_rng(seed)
     variables = model.init(key, *init_inputs)
     pred = np.array(model.apply(variables, *grid_inputs)).squeeze()
 

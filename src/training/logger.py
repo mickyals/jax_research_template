@@ -202,6 +202,7 @@ class WandbLogger(BaseLogger):
         tags:         list[str] | None = None,
         notes:        str | None = None,
         offline:      bool = False,
+        api_key:      str | None = None,
         **wandb_kwargs,
     ) -> None:
         try:
@@ -213,6 +214,13 @@ class WandbLogger(BaseLogger):
             ) from e
 
         self._wandb = _wandb
+
+        # api_key is an escape hatch for environments where the WANDB_API_KEY
+        # env var cannot be set.  Prefer the env var — never commit a key to a
+        # config file that lives in version control.
+        if api_key is not None:
+            _wandb.login(key=api_key)
+
         self._run = _wandb.init(
             project=project,
             name=name,
