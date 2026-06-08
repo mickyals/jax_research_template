@@ -31,8 +31,8 @@ data:
   background_buffer_hours: 6.0
 
   # --- Coordinate encoding ---
-  # 'unit_circle': station_coords = [norm_distance, bearing_rad], query = learned token
-  # 'domain':      station_coords = [norm_lat_rad, norm_lon_rad], query = same encoding
+  # 'unit_circle': station_coords = [norm_distance, bearing_rad], query = learned CLS token
+  # 'domain':      station_coords = [norm_lat_rad, norm_lon_rad], query = Fourier-encoded
   location_encoding:      unit_circle
 
   # --- Observation normalization ---
@@ -51,23 +51,16 @@ data:
     wind_from_direction:       [0.0,     360.0]         # degrees
 
 model:
-  # --- Architecture path ---
-  # True  = Path A: TransformerEncoder over stations then CrossAttentionBlock
-  # False = Path B: direct cross-attention, separate K (coords) and V (obs)
-  use_self_attention:   true
-
   # Must match data.location_encoding — controls query token construction
+  # 'unit_circle' → learned CLS token; 'domain' → Fourier-encoded query
   location_encoding:    unit_circle
 
   # --- Token dimensionality ---
   embed_dim:            128
   num_heads:            4
 
-  # Self-attention layers (Path A only; ignored when use_self_attention: false)
-  num_layers:           2
-
-  # Cross-attention layers (both paths)
-  num_cross_layers:     1
+  # Total encoder layers (unified self-attention over station + query tokens)
+  num_layers:           4
 
   # --- FFN ---
   mlp_ratio:            4.0
@@ -82,14 +75,19 @@ model:
   fourier_dim:          64      # GaussianFourierEmbedding output dim (must be even)
   fourier_scale:        1.0     # Gaussian frequency spread
 
+  # --- Missing observation handling ---
+  # True  = learned mask token (normal init, stddev 0.02) — recommended
+  # False = constant scalar sentinel (missing_value)
+  use_learned_mask:     true
+
   # --- Output ---
   # n_obs_features must match len(data.obs_vars)
   n_obs_features:       5
   n_classes:            11      # 0 = no storm, 1–10 = SSHS −4 to +5
 
-  # Sentinel replacing missing obs values (where obs_mask=False).
-  # Must be finite — avoids NaN in backprop.
-  missing_value:        -1.0e9
+  # Init value for learned mask token (use_learned_mask: true) and constant sentinel
+  # (use_learned_mask: false). Moderate negative — gives the model a clear "absent" prior.
+  missing_value:        -10.0
 
 trainer:
   # batch_size must match data.batch_size — Trainer stores it for reference
@@ -137,8 +135,8 @@ trainer:
   # WandB — uncomment and fill in when switching to remote logging:
   log_kwargs:
     project:  sparse_obs_encoding
-    name:     path-a-unit-circle-run1
+    name:     unified-transformer-unit-circle-run1
     offline:  false
-    tags:     [unit_circle, path_a]
+    tags:     [unit_circle, unified_transformer]
 
   # seed is injected from top-level seed by train.py — no need to set here

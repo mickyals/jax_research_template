@@ -76,10 +76,10 @@ def _make_attn_entropy_callback(
     def _attn(params):
         _, weights = model.apply({'params': params}, probe_X,
                                  train=False, return_weights=True)
-        return weights  # (B, H, N)
+        return weights  # (B, H, N+1)
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
-        weights = np.asarray(_attn(state.params))          # (B, H, N)
+        weights = np.asarray(_attn(state.params))          # (B, H, N+1)
         # Padding positions have w ≈ 0 after masked softmax;
         # their contribution to entropy is negligible.
         entropy = float(

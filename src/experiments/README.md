@@ -72,7 +72,7 @@ python -m experiments.my_experiment.tune configs/my_tune.yaml \
 
 | Directory | Description |
 |-----------|-------------|
-| [`sparse_obs_cross_attn/`](sparse_obs_cross_attn/README.md) | Tropical cyclone intensity classifier from sparse land surface observations using cross-attention |
+| [`sparse_obs_cross_attn/`](sparse_obs_cross_attn/README.md) | Tropical cyclone intensity classifier from sparse land surface observations using a unified Transformer with asymmetric attention mask |
 
 ---
 

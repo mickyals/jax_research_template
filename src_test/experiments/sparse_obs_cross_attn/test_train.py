@@ -154,19 +154,16 @@ class _FakeTCLoader:
 
 
 def _make_model(
-    use_self_attention: bool = True,
-    location_encoding:  str  = 'unit_circle',
-    embed_dim:          int  = 32,
+    location_encoding: str = 'unit_circle',
+    embed_dim:         int = 32,
 ) -> TCClassifier:
     return TCClassifier(
-        embed_dim          = embed_dim,
-        num_heads          = 2,
-        num_layers         = 2,
-        num_cross_layers   = 1,
-        fourier_dim        = 16,     # must be even
-        n_obs_features     = F,
-        use_self_attention = use_self_attention,
-        location_encoding  = location_encoding,
+        embed_dim         = embed_dim,
+        num_heads         = 2,
+        num_layers        = 2,
+        fourier_dim       = 16,     # must be even
+        n_obs_features    = F,
+        location_encoding = location_encoding,
     )
 
 
@@ -248,20 +245,6 @@ class TestOneForwardBackwardPass:
         trainer, state = trainer_state
         _, metrics = trainer._train_step(state, _fake_batch())
         assert float(metrics['cross_entropy']) > 0.0
-
-    # --- Path B ---
-
-    def test_path_b_forward_and_backward(self, tmp_path):
-        """Path B (use_self_attention=False) trains without error."""
-        model   = _make_model(use_self_attention=False)
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
-        batch   = _fake_batch()
-        state   = trainer._init_state(batch)
-        new_state, metrics = trainer._train_step(state, batch)
-        assert bool(jnp.isfinite(metrics['cross_entropy']))
-        old = jax.tree_util.tree_leaves(state.params)
-        new = jax.tree_util.tree_leaves(new_state.params)
-        assert any(not jnp.allclose(o, n) for o, n in zip(old, new))
 
     # --- Domain encoding ---
 

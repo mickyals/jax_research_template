@@ -66,10 +66,11 @@ python -m experiments.sparse_obs_cross_attn.train \
     src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
     --resume
 
-# Evaluate
+# Evaluate (config path is positional)
 python -m experiments.sparse_obs_cross_attn.evaluate \
+    src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
     --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
-    --config src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+    --output_dir runs/tc_classifier/run_01/eval
 
 # Hyperparameter search
 python -m experiments.sparse_obs_cross_attn.tune \

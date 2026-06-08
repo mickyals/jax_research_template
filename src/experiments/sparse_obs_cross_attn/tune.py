@@ -24,8 +24,7 @@ Search space
 ------------
 Training : peak_value, weight_decay
 Architecture : embed_dim (= num_heads × dim_per_head), num_layers,
-               num_cross_layers, dropout_rate, attn_dropout_rate,
-               fourier_dim, fourier_scale
+               dropout_rate, attn_dropout_rate, fourier_dim, fourier_scale
 
 embed_dim is constructed as num_heads × dim_per_head so it is always
 divisible by num_heads without any rejection sampling.
@@ -60,9 +59,8 @@ SEARCH_SPACE: dict = {
     # Token size — embed_dim = num_heads * dim_per_head (always divisible)
     "num_heads":         {"type": "categorical", "choices": [2, 4, 8]},
     "dim_per_head":      {"type": "categorical", "choices": [16, 32, 64]},
-    # Depth
-    "num_layers":        {"type": "int",         "low": 1,    "high": 4},
-    "num_cross_layers":  {"type": "int",         "low": 1,    "high": 3},
+    # Depth — total encoder layers (unified self-attention)
+    "num_layers":        {"type": "int",         "low": 1,    "high": 6},
     # Coordinate embedding
     "fourier_dim":       {"type": "categorical", "choices": [32, 64, 128]},
     "fourier_scale":     {"type": "float",       "low": 0.1,  "high": 10.0, "log": True},
@@ -80,7 +78,6 @@ def suggest_fn(trial, base_config: dict) -> dict:
     cfg["model"]["embed_dim"]         = hp["num_heads"] * hp["dim_per_head"]
     cfg["model"]["num_heads"]         = hp["num_heads"]
     cfg["model"]["num_layers"]        = hp["num_layers"]
-    cfg["model"]["num_cross_layers"]  = hp["num_cross_layers"]
     cfg["model"]["dropout_rate"]      = hp["dropout_rate"]
     cfg["model"]["attn_dropout_rate"] = hp["attn_dropout_rate"]
     cfg["model"]["fourier_dim"]       = hp["fourier_dim"]

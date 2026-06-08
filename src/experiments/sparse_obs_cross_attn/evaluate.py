@@ -311,9 +311,10 @@ def extract_attention_weights(
 
     Returns
     -------
-    np.ndarray float32 (B, num_heads, N)
-        Cross-attention weights from the last cross-attention block.
-        N = max_stations; padding positions have weight ≈ 0.
+    np.ndarray float32 (B, num_heads, N+1)
+        Self-attention weights (query row) from the last encoder layer.
+        N = max_stations; the N+1-th element is the query's self-attention
+        weight; padding positions have weight ≈ 0.
     """
     apply_fn = jax.jit(
         lambda X: model.apply(variables, X, train=False, return_weights=True)
@@ -362,9 +363,11 @@ def plot_attention_geographic(
     mask         = np.asarray(X['station_mask'][sample_idx])     # (N,) bool
     query_coords = np.asarray(X['query_coords'][sample_idx])     # (2,)
 
-    # Aggregate attention over heads: (H, N) → (N,)
-    w = weights[sample_idx]                                       # (H, N)
+    # Aggregate attention over heads: (H, N+1) → (N+1,) then drop query self-weight
+    w = weights[sample_idx]                                       # (H, N+1)
     w_station = w.mean(axis=0) if head_agg == 'mean' else w.max(axis=0)
+    N = mask.shape[0]
+    w_station = w_station[:N]                                     # (N,) drop query self-attn
     w_real = w_station[mask]                                      # (n_real,)
 
     # Normalise to [0, 1] for sizing/colouring
@@ -402,7 +405,7 @@ def plot_attention_geographic(
         ax.yaxis.set_tick_params(labelsize=7)
         tick_labels = [f'{r * radius_km:.0f} km' for r in [0.25, 0.5, 0.75, 1.0]]
         ax.set_yticklabels(tick_labels, fontsize=7)
-        ax.set_title('Cross-attention weights\n(polar: distance × bearing from storm)',
+        ax.set_title('Self-attention weights (query row)\n(polar: distance × bearing from storm)',
                      pad=15, fontsize=10)
         fig.colorbar(sc, ax=ax, label='Attention weight', shrink=0.7, pad=0.1)
 
@@ -444,7 +447,7 @@ def plot_attention_geographic(
 
         ax.set_xlabel('Longitude')
         ax.set_ylabel('Latitude')
-        ax.set_title('Cross-attention weights (domain encoding)', fontsize=10)
+        ax.set_title('Self-attention weights (query row) (domain encoding)', fontsize=10)
         ax.legend(fontsize=8)
         ax.set_xlim(lon_min, lon_max)
         ax.set_ylim(lat_min, lat_max)

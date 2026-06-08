@@ -4,15 +4,15 @@ experiments/sparse_obs_cross_attn/model.py
 TCClassifier: sparse station observation encoder for TC detection
 and intensity classification.
 
-Two attention paths (config flag use_self_attention):
-  Path A  TransformerEncoder over station tokens then CrossAttentionBlock.
-          Stations contextualise each other before the query reads them.
-  Path B  Direct cross-attention with separate K (coords) and V (obs).
-          Attention weights driven by geometry; aggregated content is obs.
+Single TransformerEncoder over N+1 tokens (N station tokens + 1 query/CLS
+token appended at position N). An asymmetric attention mask ensures stations
+never attend to the query; the query attends to all stations. The
+classification head reads the query token output.
 
-Two location encoding modes (config flag location_encoding):
-  unit_circle  Learned query token. station_coords = [norm_dist, bearing_rad].
-  domain       Fourier-encoded query_coords. station_coords = [norm_lat, norm_lon].
+Two location encoding modes (config field location_encoding):
+  unit_circle  Learned query content only (no position). station_coords = [norm_dist, bearing_rad].
+  domain       Learned query content + pos_proj(Fourier(query_coords)). station_coords = [norm_lat, norm_lon].
+               pos_proj is shared between station and query positional encoding.
 """
 
 from __future__ import annotations
@@ -23,144 +23,10 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
-from core.nets.transformers import CrossAttentionBlock, TransformerEncoder
-from core.nets.mlp import MLP
+from core.nets.transformers import TransformerEncoder
 from core.embeddings import GaussianFourierEmbedding
 
 N_CLASSES = 11
-
-
-# ---------------------------------------------------------------------------
-# SeparateKVCrossAttentionBlock
-# ---------------------------------------------------------------------------
-
-class SeparateKVCrossAttentionBlock(nn.Module):
-    """Cross-attention block where keys and values come from separate sources.
-
-    Queries attend to keys for routing and aggregate from values.
-    Useful when the feature that determines where to attend (keys) and
-    the content to aggregate (values) come from different projections.
-
-    Pre-LN ordering:
-        x = x + Dropout(Attn(LN_q(x), LN_k(keys), LN_v(values)))
-        x = x + Dropout(FFN(LN(x)))
-
-    Parameters
-    ----------
-    embed_dim : int
-    num_heads : int
-    mlp_ratio : float
-    dropout_rate : float
-    attn_dropout_rate : float
-    mlp_activation : str
-    mlp_initializer : str
-
-    Notes
-    -----
-    x:      (B, T_q, embed_dim)
-    keys:   (B, N, key_dim)   — any input dimensionality; w_k projects to embed_dim
-    values: (B, N, val_dim)   — any input dimensionality; w_v projects to embed_dim
-    Output: (B, T_q, embed_dim)
-
-    Callers do not need to pre-project keys/values to embed_dim; w_k and w_v
-    handle the projection per layer, so raw features (e.g. Fourier-encoded
-    coordinates, raw obs) can be passed directly.
-
-    mask: (B, N) bool True=attend. Applied as an additive bias to attention
-    logits before softmax.
-    """
-
-    embed_dim:         int
-    num_heads:         int
-    mlp_ratio:         float = 4.0
-    dropout_rate:      float = 0.0
-    attn_dropout_rate: float = 0.0
-    mlp_activation:    str   = 'gelu'
-    mlp_initializer:   str   = 'xavier_uniform'
-
-    def setup(self):
-        self.norm_q  = nn.LayerNorm()
-        self.norm_k  = nn.LayerNorm()
-        self.norm_v  = nn.LayerNorm()
-        self.norm_ff = nn.LayerNorm()
-        self.w_q     = nn.Dense(self.embed_dim)
-        self.w_k     = nn.Dense(self.embed_dim)
-        self.w_v     = nn.Dense(self.embed_dim)
-        self.w_o     = nn.Dense(self.embed_dim)
-        self.ffn     = MLP(
-            out_features=self.embed_dim,
-            hidden_features=int(self.embed_dim * self.mlp_ratio),
-            n_layers=1,
-            activation=self.mlp_activation,
-            initializer=self.mlp_initializer,
-            dropout_rate=self.dropout_rate,
-        )
-        self.drop      = nn.Dropout(rate=self.dropout_rate)
-        self.attn_drop = nn.Dropout(rate=self.attn_dropout_rate)
-
-    def __call__(
-        self,
-        x:      jax.Array,
-        keys:   jax.Array,
-        values: jax.Array,
-        mask:   Optional[jax.Array] = None,
-        train:  bool = True,
-        return_weights: bool = False,
-    ):
-        """
-        Parameters
-        ----------
-        x : jax.Array
-            Shape (B, T_q, embed_dim).
-        keys : jax.Array
-            Shape (B, N, key_dim). Any feature dimensionality; w_k projects to embed_dim.
-        values : jax.Array
-            Shape (B, N, val_dim). Any feature dimensionality; w_v projects to embed_dim.
-        mask : jax.Array, optional
-            Shape (B, N) bool. True = attend, False = block (padding).
-        train : bool
-        return_weights : bool
-            If True returns (output, weights) where weights is
-            (B, num_heads, T_q, N).
-
-        Returns
-        -------
-        jax.Array or tuple[jax.Array, jax.Array]
-        """
-        B, T_q, D = x.shape
-        N  = keys.shape[1]
-        H  = self.num_heads
-        hd = D // H
-
-        q = self.w_q(self.norm_q(x))      # (B, T_q, D)
-        k = self.w_k(self.norm_k(keys))   # (B, N, D)
-        v = self.w_v(self.norm_v(values)) # (B, N, D)
-
-        # reshape to (B, H, T, hd)
-        q = q.reshape(B, T_q, H, hd).transpose(0, 2, 1, 3)
-        k = k.reshape(B, N,   H, hd).transpose(0, 2, 1, 3)
-        v = v.reshape(B, N,   H, hd).transpose(0, 2, 1, 3)
-
-        scores = (q @ k.transpose(0, 1, 3, 2)) * (hd ** -0.5)  # (B, H, T_q, N)
-
-        if mask is not None:
-            # (B, N) → (B, 1, 1, N) additive bias
-            scores = scores + jnp.where(mask[:, None, None, :], 0.0, -1e9)
-
-        weights  = jax.nn.softmax(scores, axis=-1)
-        attn_out = self.attn_drop(weights, deterministic=not train) @ v  # (B, H, T_q, hd)
-        attn_out = attn_out.transpose(0, 2, 1, 3).reshape(B, T_q, D)
-        attn_out = self.w_o(attn_out)
-
-        x = x + self.drop(attn_out, deterministic=not train)
-        x = x + self.drop(
-            self.ffn(self.norm_ff(x), train=train),
-            deterministic=not train,
-        )
-
-        if return_weights:
-            return x, weights
-        return x
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +36,10 @@ class SeparateKVCrossAttentionBlock(nn.Module):
 class TCClassifier(nn.Module):
     """Sparse-observation TC classifier.
 
-    Encodes N padded station observations and a query position, then
-    classifies the query into one of n_classes intensity bins.
+    Unified Transformer over N+1 tokens: N station tokens then one
+    query/CLS token. Asymmetric attention mask separates "contextualise
+    the observation network" (station self-attention) from "classify"
+    (query reads all stations). Classification head reads the query token.
 
     Parameters
     ----------
@@ -180,50 +48,46 @@ class TCClassifier(nn.Module):
     num_heads : int
         Attention heads. Must divide embed_dim.
     num_layers : int
-        Self-attention layers in Path A. Ignored when use_self_attention=False.
-    num_cross_layers : int
-        Cross-attention layers. Default 1.
+        Total encoder layers.
     mlp_ratio : float
         FFN hidden dim = mlp_ratio * embed_dim. Default 4.0.
     mlp_activation : str
-        Registered activation name. Default 'gelu'.
     mlp_initializer : str
-        Registered initializer name. Default 'xavier_uniform'.
     dropout_rate : float
     attn_dropout_rate : float
     fourier_dim : int
         Gaussian Fourier embedding output dim. Must be even. Default 64.
     fourier_scale : float
-        Frequency spread for Gaussian Fourier embedding. Default 1.0.
-    use_self_attention : bool
-        True  = Path A: TransformerEncoder over station tokens then cross-attn.
-        False = Path B: direct cross-attn, separate K (coords) and V (obs).
     location_encoding : str
-        'unit_circle' — learned query token; station_coords = [norm_dist, bearing_rad].
-        'domain'      — Fourier-encoded query_coords; same encoding for stations.
+        'unit_circle' — learned query content only; station_coords = [norm_dist, bearing_rad].
+        'domain'      — learned query content + shared pos_proj(Fourier(query_coords));
+                        station_coords = [norm_lat, norm_lon].
+    use_learned_mask : bool
+        True  = learned mask token, initialised with normal(stddev=0.02). The token
+                is a trainable (F,) parameter updated by the optimizer; missing_value
+                is ignored.
+        False = fixed scalar sentinel: missing obs are replaced with missing_value
+                at every forward pass and the value never changes.
     n_obs_features : int
         F, number of observation variables. Default 5.
     n_classes : int
         Output classes. Default 11.
-        Label semantics: 0 = no storm; 1–10 = Saffir-Simpson intensity bins
-        mapped as label k → SSHS category (k − 5), covering tropical
-        depressions (−4, −3) through Category 5 (+5). Ensure the loss
-        function and evaluation metrics use the same mapping.
     missing_value : float
-        Sentinel substituted for missing obs (where obs_mask=False).
-        Use a finite large-negative value to distinguish missing from
-        genuine zero without causing NaN in backprop. Default -1e9.
+        Used only when use_learned_mask=False. Substituted for every missing
+        observation. Should be clearly outside the normalised obs range (e.g. -10.0
+        for minmax_11 data in [-1, 1]) but not extreme enough to cause gradient
+        pathology. Default -10.0.
 
     Notes
     -----
-    Input dict X must contain:
+    Batch dict X must contain:
         station_obs    (B, N, F)  normalised obs, missing → 0 from datamodule
         station_coords (B, N, 2)  encoded station positions
         station_mask   (B, N)     bool True=real station, False=padding
         obs_mask       (B, N, F)  bool True=measurement present
         query_coords   (B, 2)     [0,0] sentinel for unit_circle; encoded pos for domain
 
-    Output: (B, n_classes) raw logits. Apply softmax cross-entropy loss externally.
+    Output: (B, n_classes) raw logits.
 
     Example
     -------
@@ -234,84 +98,60 @@ class TCClassifier(nn.Module):
     (B, 11)
     """
 
-    embed_dim:          int
-    num_heads:          int
-    num_layers:         int
-    num_cross_layers:   int   = 1
-    mlp_ratio:          float = 4.0
-    mlp_activation:     str   = 'gelu'
-    mlp_initializer:    str   = 'xavier_uniform'
-    dropout_rate:       float = 0.0
-    attn_dropout_rate:  float = 0.0
-    fourier_dim:        int   = 64
-    fourier_scale:      float = 1.0
-    use_self_attention: bool  = True
-    location_encoding:  str   = 'unit_circle'
-    n_obs_features:     int   = 5
-    n_classes:          int   = N_CLASSES
-    missing_value:      float = -1e9
+    embed_dim:         int
+    num_heads:         int
+    num_layers:        int
+    mlp_ratio:         float = 4.0
+    mlp_activation:    str   = 'gelu'
+    mlp_initializer:   str   = 'xavier_uniform'
+    dropout_rate:      float = 0.0
+    attn_dropout_rate: float = 0.0
+    fourier_dim:       int   = 64
+    fourier_scale:     float = 1.0
+    location_encoding: str   = 'unit_circle'
+    use_learned_mask:  bool  = True
+    n_obs_features:    int   = 5
+    n_classes:         int   = N_CLASSES
+    missing_value:     float = -10.0
 
     def setup(self):
-        # Fourier coordinate embedding — shared for station coords and (domain) query
         self.coord_embedding = GaussianFourierEmbedding(
             input_dim=2,
             mapping_dim=self.fourier_dim,
             scale=self.fourier_scale,
         )
 
-        # Query token — mode-specific
-        if self.location_encoding == 'unit_circle':
-            self.query_token = self.param(
-                'query_token',
+        # obs content projection (F → D) and additive position projection (fourier_dim → D)
+        # pos_proj is shared: used for station positions and (domain mode) query position
+        self.station_proj = nn.Dense(self.embed_dim)
+        self.pos_proj     = nn.Dense(self.embed_dim)
+
+        if self.use_learned_mask:
+            self.mask_token = self.param(
+                'mask_token',
                 nn.initializers.normal(stddev=0.02),
-                (self.embed_dim,),
+                (self.n_obs_features,),
             )
-        else:  # domain
-            self.query_proj = nn.Dense(self.embed_dim)
 
-        # Path A: fused station tokens → self-attention → cross-attention
-        if self.use_self_attention:
-            # projects concat(obs_fixed, coord_feats) → embed_dim
-            self.station_proj = nn.Dense(self.embed_dim)
-            self.encoder = TransformerEncoder(
-                num_layers=self.num_layers,
-                embed_dim=self.embed_dim,
-                num_heads=self.num_heads,
-                mlp_ratio=self.mlp_ratio,
-                dropout_rate=self.dropout_rate,
-                attn_dropout_rate=self.attn_dropout_rate,
-                add_pos_encoding=False,
-                mlp_activation=self.mlp_activation,
-                mlp_initializer=self.mlp_initializer,
-            )
-            self.cross_attn_blocks = [
-                CrossAttentionBlock(
-                    embed_dim=self.embed_dim,
-                    num_heads=self.num_heads,
-                    mlp_ratio=self.mlp_ratio,
-                    dropout_rate=self.dropout_rate,
-                    attn_dropout_rate=self.attn_dropout_rate,
-                    mlp_activation=self.mlp_activation,
-                    mlp_initializer=self.mlp_initializer,
-                )
-                for _ in range(self.num_cross_layers)
-            ]
+        # Learned query content — present in both modes; captures "what it means to be the query"
+        # domain mode adds pos_proj(Fourier(query_coords)) on top (shared pos_proj, no extra layer)
+        self.learned_query = self.param(
+            'learned_query',
+            nn.initializers.normal(stddev=0.02),
+            (self.embed_dim,),
+        )
 
-        else:
-            # Path B: raw coord/obs features fed directly; w_k/w_v inside each
-            # block project to embed_dim, avoiding a redundant shared projection.
-            self.cross_attn_blocks = [
-                SeparateKVCrossAttentionBlock(
-                    embed_dim=self.embed_dim,
-                    num_heads=self.num_heads,
-                    mlp_ratio=self.mlp_ratio,
-                    dropout_rate=self.dropout_rate,
-                    attn_dropout_rate=self.attn_dropout_rate,
-                    mlp_activation=self.mlp_activation,
-                    mlp_initializer=self.mlp_initializer,
-                )
-                for _ in range(self.num_cross_layers)
-            ]
+        self.encoder = TransformerEncoder(
+            num_layers=self.num_layers,
+            embed_dim=self.embed_dim,
+            num_heads=self.num_heads,
+            mlp_ratio=self.mlp_ratio,
+            dropout_rate=self.dropout_rate,
+            attn_dropout_rate=self.attn_dropout_rate,
+            add_pos_encoding=False,
+            mlp_activation=self.mlp_activation,
+            mlp_initializer=self.mlp_initializer,
+        )
 
         self.head_norm = nn.LayerNorm()
         self.head      = nn.Dense(self.n_classes)
@@ -329,13 +169,15 @@ class TCClassifier(nn.Module):
             Batch dict from TCDataModule.
         train : bool
         return_weights : bool
-            If True, also return cross-attention weights from the last
-            cross-attention block, shape (B, num_heads, N).
+            If True, also return attention weights from the last encoder layer,
+            query row only: shape (B, num_heads, N+1).
+            The last element is the query's self-attention weight — a useful
+            diagnostic (high = model relies on CLS prior; low = trusts stations).
 
         Returns
         -------
         jax.Array or tuple[jax.Array, jax.Array]
-            Logits (B, n_classes), and optionally weights (B, num_heads, N).
+            Logits (B, n_classes), and optionally weights (B, num_heads, N+1).
         """
         station_obs    = X['station_obs']     # (B, N, F)
         station_coords = X['station_coords']  # (B, N, 2)
@@ -345,64 +187,92 @@ class TCClassifier(nn.Module):
 
         B, N, _ = station_obs.shape
 
-        # Replace missing obs with sentinel so model distinguishes missing from zero
-        obs_fixed = jnp.where(obs_mask, station_obs, self.missing_value)  # (B, N, F)
+        # 1. Missing obs handling
+        if self.use_learned_mask:
+            sentinel = jnp.broadcast_to(self.mask_token, station_obs.shape)
+        else:
+            sentinel = jnp.full_like(station_obs, self.missing_value)
+        obs_fixed = jnp.where(obs_mask, station_obs, sentinel)          # (B, N, F)
 
-        # Fourier-encode station coordinates: (B, N, 2) → (B, N, fourier_dim)
+        # 2. Station tokens — obs content + additive positional encoding
+        station_tokens = self.station_proj(obs_fixed)                   # (B, N, D)
+
+        # GaussianFourierEmbedding expects a flat (..., input_dim) input,
+        # so merge batch and station dims before the call, then split them back.
+        # Before: (B=batch, N=stations,   2=[coord_0, coord_1])
+        # After:  (B=batch, N=stations,   fourier_dim=Fourier features)
         coord_feats = self.coord_embedding(
-            station_coords.reshape(B * N, 2)
-        ).reshape(B, N, self.fourier_dim)                                  # (B, N, fourier_dim)
+            station_coords.reshape(B * N, 2)          # (B*N, 2) — flat over batch × station
+        ).reshape(B, N, self.fourier_dim)              # (B, N, fourier_dim) — restore batch+station
+        pos_embed      = self.pos_proj(coord_feats)                     # (B, N, D)
+        station_tokens = station_tokens + pos_embed                     # (B, N, D)
 
-        # Build query token: (B, 1, embed_dim)
+        # 3. Query token — always learned content; domain mode adds shared pos_proj on top
+        #
+        # learned_query shape: (D,) — a single vector with no batch or token dims.
+        # [None, None, :] inserts a batch dim and a token-sequence dim so it can be
+        # broadcast to (B=batch, 1=one_query_token, D=embed_dim).
+        content = jnp.broadcast_to(
+            self.learned_query[None, None, :], (B, 1, self.embed_dim)
+        )                                                                # (B, 1, D)
         if self.location_encoding == 'unit_circle':
-            query = jnp.broadcast_to(
-                self.query_token[None, None, :], (B, 1, self.embed_dim)
-            )
-        else:
-            query_feats = self.coord_embedding(query_coords)               # (B, fourier_dim)
-            query = self.query_proj(query_feats)[:, None, :]               # (B, 1, embed_dim)
+            query_token = content                                        # (B, 1, D)
+        else:  # domain: content + position via shared pos_proj
+            query_feats = self.coord_embedding(query_coords)            # (B, fourier_dim)
+            # [:, None, :] inserts a token-sequence dim so the (B, D) position
+            # vector becomes (B=batch, 1=one_query_token, D=embed_dim) for addition.
+            query_pos   = self.pos_proj(query_feats)[:, None, :]        # (B, 1, D)
+            query_token = content + query_pos                           # (B, 1, D)
 
-        n_blocks = len(self.cross_attn_blocks)
-        weights  = None
+        # 4. Concatenate: station tokens then query token
+        tokens = jnp.concatenate([station_tokens, query_token], axis=1) # (B, N+1, D)
 
-        if self.use_self_attention:
-            # Path A: fuse obs + coords into one token per station, run SA, then cross-attn
-            station_input  = jnp.concatenate([obs_fixed, coord_feats], axis=-1)
-            station_tokens = self.station_proj(station_input)              # (B, N, embed_dim)
+        # 5. Asymmetric attention mask
+        #
+        # Shape: (B=batch, 1=head_broadcast, N+1=from_tokens, N+1=to_tokens)
+        # Convention: True  = this (from, to) pair is allowed to attend.
+        #             False = blocked (treated as -inf before softmax).
+        #
+        # Desired pattern:
+        #   stations → stations: True   (stations contextualise each other)
+        #   query    → stations: True   (query reads the station network)
+        #   query    → self:     True   (query self-attention)
+        #   stations → query:    False  (stations never peek at the query)
+        #
+        # The head dim is 1 so it broadcasts across all attention heads.
+        attn_mask = jnp.zeros((B, 1, N + 1, N + 1), dtype=bool)
+        #                           [batch, head, from_token,  to_token ]
+        attn_mask = attn_mask.at[:, :,  :N, :N ].set(True)  # station_rows  → station_cols
+        attn_mask = attn_mask.at[:, :,   N, :N ].set(True)  # query_row     → station_cols
+        attn_mask = attn_mask.at[:, :,   N,  N ].set(True)  # query_row     → query_col (self)
 
-            # (B, 1, N) — required by MultiHeadAttention._build_bias which interprets
-            # 3-D masks as (B, T_q, T_kv) and broadcasts across heads.
-            attn_mask = station_mask[:, None, :]
-            station_tokens = self.encoder(station_tokens, mask=attn_mask, train=train)
+        # Padding override: block any column j where station_mask[b, j] == False.
+        # No token — station or query — should attend to a padding station.
+        # station_mask: (B, N) bool, True = real station.
+        # Reshape to (B=batch, 1=head, 1=from_broadcast, N=station_cols) for masking.
+        pad_col   = station_mask[:, None, None, :]           # (B, 1, 1, N)
+        attn_mask = attn_mask.at[:, :, :, :N].set(
+            attn_mask[:, :, :, :N] & pad_col
+        )
 
-            x = query
-            for i, block in enumerate(self.cross_attn_blocks):
-                if return_weights and i == n_blocks - 1:
-                    x, weights = block(x, context=station_tokens,
-                                       mask=attn_mask, train=train,
-                                       return_weights=True)
-                else:
-                    x = block(x, context=station_tokens,
-                              mask=attn_mask, train=train)
-
-        else:
-            # Path B: separate K (geometry) and V (observations), direct cross-attn.
-            # Pass raw features; w_k/w_v inside each block project to embed_dim.
-            # SeparateKVCrossAttentionBlock expects (B, N) mask and handles broadcasting.
-            x = query
-            for i, block in enumerate(self.cross_attn_blocks):
-                if return_weights and i == n_blocks - 1:
-                    x, weights = block(x, keys=coord_feats, values=obs_fixed,
-                                       mask=station_mask, train=train,
-                                       return_weights=True)
-                else:
-                    x = block(x, keys=coord_feats, values=obs_fixed,
-                              mask=station_mask, train=train)
-
-        out    = x[:, 0, :]                           # (B, embed_dim)
-        logits = self.head(self.head_norm(out))        # (B, n_classes)
-
+        # 6. Encoder
+        encoder_out = self.encoder(
+            tokens, mask=attn_mask, train=train, return_weights=return_weights,
+        )
         if return_weights:
-            # Squeeze T_q=1 dim: (B, H, 1, N) → (B, H, N)
-            return logits, weights[:, :, 0, :]
+            encoded, attn_weights = encoder_out  # (B, N+1, D), (B, H, N+1, N+1)
+        else:
+            encoded = encoder_out                # (B, N+1, D)
+
+        # 7. Classification head reads query token at position N
+        # encoded[:, N, :] — index axes: [batch, token_position=N (query slot), embed_dim]
+        query_out = encoded[:, N, :]                                    # (B, D)
+        logits    = self.head(self.head_norm(query_out))                 # (B, n_classes)
+
+        # 8. Return
+        if return_weights:
+            # attn_weights[:, :, N, :] slices:
+            #   [batch, head, from_token=N (query row), to_token=0..N (all tokens)]
+            # This is the query's attention distribution over the N stations + itself.
+            return logits, attn_weights[:, :, N, :]                     # (B, H, N+1)
         return logits

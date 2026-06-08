@@ -59,12 +59,12 @@ EMBED = 32
 def _init_model() -> tuple[TCClassifier, dict]:
     """Return a tiny TCClassifier and its initialized variables."""
     model = TCClassifier(
-        embed_dim        = EMBED,
-        num_heads        = HEADS,
-        num_layers       = 1,
-        num_cross_layers = 1,
-        fourier_dim      = 16,
-        n_obs_features   = F,
+        embed_dim       = EMBED,
+        num_heads       = HEADS,
+        num_layers      = 1,
+        fourier_dim     = 16,
+        n_obs_features  = F,
+        use_learned_mask= True,
     )
     rng  = np.random.default_rng(0)
     obs  = jnp.array(rng.standard_normal((B, N, F)).astype(np.float32))
@@ -349,8 +349,8 @@ class TestExtractAttentionWeights:
     def test_output_shape(self, model_vars):
         model, variables = model_vars
         weights = extract_attention_weights(model, variables, _fake_batch())
-        # (B, num_heads, N)
-        assert weights.shape == (B, HEADS, N)
+        # (B, num_heads, N+1) — includes query self-attention weight at index N
+        assert weights.shape == (B, HEADS, N + 1)
 
     def test_values_are_finite(self, model_vars):
         model, variables = model_vars

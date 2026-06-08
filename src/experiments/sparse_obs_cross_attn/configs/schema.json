@@ -71,18 +71,20 @@
       "additionalProperties": false,
       "properties": {
 
-        "use_self_attention": { "type": "boolean" },
-
         "location_encoding": {
           "type": "string",
           "enum": ["unit_circle", "domain"],
           "description": "Must match data.location_encoding."
         },
 
-        "embed_dim":        { "type": "integer", "minimum": 1 },
-        "num_heads":        { "type": "integer", "minimum": 1 },
-        "num_layers":       { "type": "integer", "minimum": 0 },
-        "num_cross_layers": { "type": "integer", "minimum": 1 },
+        "use_learned_mask": {
+          "type": "boolean",
+          "description": "True = learned mask token for missing obs; False = constant sentinel."
+        },
+
+        "embed_dim":  { "type": "integer", "minimum": 1 },
+        "num_heads":  { "type": "integer", "minimum": 1 },
+        "num_layers": { "type": "integer", "minimum": 1, "description": "Total encoder layers (unified self-attention)." },
 
         "mlp_ratio":        { "type": "number",  "exclusiveMinimum": 0 },
         "mlp_activation":   { "type": "string" },

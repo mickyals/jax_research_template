@@ -160,7 +160,7 @@ All blocks accept `mlp_activation` and `mlp_initializer` string args that are re
 
 | Name | Description |
 |------|-------------|
-| `TRANSFORMER_ENCODER` | Sinusoidal/no positional encoding + TransformerBlock stack |
+| `TRANSFORMER_ENCODER` | Sinusoidal/no positional encoding + TransformerBlock stack; `__call__` accepts `return_weights=True` to return `(output, last_layer_attn_weights)` |
 | `TRANSFORMER_DECODER` | TransformerBlock + CrossAttentionBlock pairs; optional causal self-attention; shared or per-layer context |
 | `VIT` | PatchEmbed + learned pos encoding + CLS token + TransformerBlock stack + optional head |
 | `MASKED_VIT` | ViT encoder with MAE-style random patch masking; returns `(visible_tokens, mask, ids_restore)` |

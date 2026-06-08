@@ -538,12 +538,18 @@ class SwinBlock(nn.Module):
 
         x = x + self.drop(attn_out, deterministic=not train)
 
-        # --- FFN path -- flatten to sequence, apply FFN, reshape back ---
+        # --- FFN path ---
+        # MLP from mlp.py expects a sequence (B, T, C), not a spatial grid.
+        # Flatten height × width into a single token sequence, apply FFN, then
+        # fold the token sequence back to the original spatial grid shape.
+        # Before: (B=batch, H=height_patches, W=width_patches, C=channels)
+        # After flatten:  (B=batch, T=H*W=all_patch_tokens, C=channels)
         x_flat = x.reshape(B, H * W, C)
         x_flat = x_flat + self.drop(
             self.ffn(self.norm2(x_flat), train=train),
             deterministic=not train,
         )
+        # Restore spatial grid: (B, T=H*W, C) -> (B, H, W, C)
         x = x_flat.reshape(B, H, W, C)
 
         if return_weights:
@@ -804,7 +810,8 @@ class TransformerEncoder(nn.Module):
         x: jax.Array,
         mask: Optional[jax.Array] = None,
         train: bool = True,
-    ) -> jax.Array:
+        return_weights: bool = False,
+    ) -> Union[jax.Array, tuple[jax.Array, jax.Array]]:
         """
         Parameters
         ----------
@@ -813,14 +820,22 @@ class TransformerEncoder(nn.Module):
         mask : jax.Array, optional
             Attention mask threaded to all blocks.
         train : bool
+        return_weights : bool
+            If True returns (output, attn_weights) where attn_weights are
+            from the last block only, shape (B, num_heads, T, T).
 
         Returns
         -------
-        jax.Array
-            Shape (B, T, embed_dim).
+        jax.Array or tuple[jax.Array, jax.Array]
         """
         if self.pos_enc is not None:
             x = self.pos_enc(x)
+
+        if return_weights:
+            for block in self.blocks[:-1]:
+                x = block(x, mask=mask, train=train)
+            x, weights = self.blocks[-1](x, mask=mask, train=train, return_weights=True)
+            return self.norm(x), weights
 
         for block in self.blocks:
             x = block(x, mask=mask, train=train)
@@ -1622,9 +1637,12 @@ class ConvMAEDecoder(nn.Module):
             axis=1,
         )  # (B, T, encoder_embed_dim) -- original spatial order
 
-        # project and reshape to spatial grid
-        x = self.proj_in(x)                           # (B, T, decoder_embed_dim)
-        x = x.reshape(B, nH, nW, self.decoder_embed_dim)  # (B, nH, nW, D)
+        # Project then fold the flat token sequence into a 2-D spatial grid.
+        # Before: (B=batch, T=nH*nW=all_patch_tokens, decoder_embed_dim)
+        # After:  (B=batch, nH=patch_rows, nW=patch_cols, decoder_embed_dim)
+        # ConvDecoder expects a spatial (B, H, W, C) input, not a flat sequence.
+        x = self.proj_in(x)                                # (B, T, decoder_embed_dim)
+        x = x.reshape(B, nH, nW, self.decoder_embed_dim)  # (B, nH, nW, decoder_embed_dim)
 
         return self.decoder(x, train=train)           # (B, H_orig, W_orig, C)
 

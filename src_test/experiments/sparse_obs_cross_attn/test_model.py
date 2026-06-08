@@ -14,7 +14,6 @@ import numpy as np
 
 from experiments.sparse_obs_cross_attn.model import (
     TCClassifier,
-    SeparateKVCrossAttentionBlock,
     N_CLASSES,
 )
 
@@ -22,12 +21,12 @@ from experiments.sparse_obs_cross_attn.model import (
 # Shared constants
 # ---------------------------------------------------------------------------
 
-KEY   = jax.random.PRNGKey(0)
-B     = 4       # batch size
-N     = 8       # max stations (small for speed)
-F     = 5       # obs features
-EMBED = 32      # keep small for fast tests
-HEADS = 2
+KEY    = jax.random.PRNGKey(0)
+B      = 4       # batch size
+N      = 8       # max stations (small for speed)
+F      = 5       # obs features
+EMBED  = 32      # keep small for fast tests
+HEADS  = 2
 LAYERS = 1
 
 
@@ -44,19 +43,7 @@ def _fake_batch(
     location_encoding: str = 'unit_circle',
     rng: np.random.Generator | None = None,
 ) -> dict:
-    """Build a synthetic batch dict matching TCDataModule collate output.
-
-    Parameters
-    ----------
-    all_present : bool
-        If True all obs_mask entries are True (no missing values).
-        If False, randomly mask ~30% of obs to False.
-    n_real : int or None
-        Number of real (non-padded) stations per sample. If None, all N are real.
-    location_encoding : str
-        'unit_circle' — query_coords = [0, 0] sentinel.
-        'domain'      — query_coords = random encoded position.
-    """
+    """Build a synthetic batch dict matching TCDataModule collate output."""
     if rng is None:
         rng = np.random.default_rng(42)
 
@@ -92,86 +79,27 @@ def _make_model(**kwargs) -> TCClassifier:
         embed_dim=EMBED,
         num_heads=HEADS,
         num_layers=LAYERS,
-        num_cross_layers=1,
         fourier_dim=16,
         n_obs_features=F,
+        use_learned_mask=True,
     )
     defaults.update(kwargs)
     return TCClassifier(**defaults)
 
 
 # ---------------------------------------------------------------------------
-# SeparateKVCrossAttentionBlock
-# ---------------------------------------------------------------------------
-
-class TestSeparateKVCrossAttentionBlock:
-
-    def _make_block(self, **kw):
-        defaults = dict(embed_dim=EMBED, num_heads=HEADS)
-        defaults.update(kw)
-        return SeparateKVCrossAttentionBlock(**defaults)
-
-    def test_output_shape(self):
-        block = self._make_block()
-        x      = jnp.ones((B, 1, EMBED))
-        keys   = jnp.ones((B, N, EMBED))
-        values = jnp.ones((B, N, EMBED))
-        vs     = block.init(KEY, x, keys, values, train=False)
-        out    = block.apply(vs, x, keys, values, train=False)
-        assert out.shape == (B, 1, EMBED)
-
-    def test_output_finite(self):
-        block = self._make_block()
-        rng   = np.random.default_rng(0)
-        x      = jnp.array(rng.standard_normal((B, 1, EMBED)).astype(np.float32))
-        keys   = jnp.array(rng.standard_normal((B, N, EMBED)).astype(np.float32))
-        values = jnp.array(rng.standard_normal((B, N, EMBED)).astype(np.float32))
-        vs     = block.init(KEY, x, keys, values, train=False)
-        out    = block.apply(vs, x, keys, values, train=False)
-        assert jnp.all(jnp.isfinite(out))
-
-    def test_padding_mask_changes_output(self):
-        block = self._make_block()
-        rng   = np.random.default_rng(1)
-        x      = jnp.array(rng.standard_normal((B, 1, EMBED)).astype(np.float32))
-        keys   = jnp.array(rng.standard_normal((B, N, EMBED)).astype(np.float32))
-        values = jnp.array(rng.standard_normal((B, N, EMBED)).astype(np.float32))
-        full_mask = jnp.ones((B, N), dtype=bool)
-        half_mask = full_mask.at[:, N // 2:].set(False)
-        vs   = block.init(KEY, x, keys, values, mask=full_mask, train=False)
-        out_full = block.apply(vs, x, keys, values, mask=full_mask, train=False)
-        out_half = block.apply(vs, x, keys, values, mask=half_mask, train=False)
-        assert not jnp.allclose(out_full, out_half)
-
-    def test_return_weights(self):
-        block  = self._make_block()
-        x      = jnp.ones((B, 1, EMBED))
-        keys   = jnp.ones((B, N, EMBED))
-        values = jnp.ones((B, N, EMBED))
-        vs     = block.init(KEY, x, keys, values, return_weights=True, train=False)
-        out, w = block.apply(vs, x, keys, values, return_weights=True, train=False)
-        assert out.shape == (B, 1, EMBED)
-        assert w.shape   == (B, HEADS, 1, N)
-        assert jnp.allclose(w.sum(axis=-1), jnp.ones((B, HEADS, 1)), atol=1e-5)
-
-
-# ---------------------------------------------------------------------------
 # TCClassifier — fake data
 # ---------------------------------------------------------------------------
 
-# All four path × encoding combinations
+# Two encoding modes — the single unified architecture handles both
 _CONFIGS = [
-    dict(use_self_attention=True,  location_encoding='unit_circle'),
-    dict(use_self_attention=True,  location_encoding='domain'),
-    dict(use_self_attention=False, location_encoding='unit_circle'),
-    dict(use_self_attention=False, location_encoding='domain'),
+    dict(location_encoding='unit_circle'),
+    dict(location_encoding='domain'),
 ]
 
 _CONFIG_IDS = [
-    'pathA-unitcircle',
-    'pathA-domain',
-    'pathB-unitcircle',
-    'pathB-domain',
+    'unit_circle',
+    'domain',
 ]
 
 
@@ -220,13 +148,20 @@ class TestTCClassifierFakeData:
         assert logits.shape == (B, N_CLASSES)
         assert jnp.all(jnp.isfinite(logits))
 
-    def test_multi_cross_layers(self, cfg):
-        model = _make_model(**cfg, num_cross_layers=3)
+    def test_multi_layers(self, cfg):
+        model = _make_model(**cfg, num_layers=3)
         X     = _fake_batch(location_encoding=cfg['location_encoding'])
         vs    = model.init(KEY, X, train=False)
         logits = model.apply(vs, X, train=False)
         assert logits.shape == (B, N_CLASSES)
         assert jnp.all(jnp.isfinite(logits))
+
+    def test_return_weights_shape(self, cfg):
+        model, vs, X = self._init(cfg)
+        logits, weights = model.apply(vs, X, train=False, return_weights=True)
+        assert logits.shape  == (B, N_CLASSES)
+        assert weights.shape == (B, HEADS, N + 1)
+        assert jnp.allclose(weights.sum(axis=-1), jnp.ones((B, HEADS)), atol=1e-5)
 
     def test_gradient_flows(self, cfg):
         """Loss gradient w.r.t. all parameters must be non-None and finite."""
@@ -259,6 +194,58 @@ class TestTCClassifierFakeData:
             rngs={'dropout': jax.random.PRNGKey(99)},
         )
         assert not jnp.allclose(out_eval, out_train)
+
+
+# ---------------------------------------------------------------------------
+# Standalone tests
+# ---------------------------------------------------------------------------
+
+def test_use_learned_mask_false():
+    """Constant sentinel path (use_learned_mask=False) produces finite output."""
+    model  = _make_model(use_learned_mask=False)
+    X      = _fake_batch(all_present=False)   # some missing obs
+    vs     = model.init(KEY, X, train=False)
+    logits = model.apply(vs, X, train=False)
+    assert logits.shape == (B, N_CLASSES)
+    assert jnp.all(jnp.isfinite(logits))
+
+
+def test_asymmetric_mask_station_independent_of_query():
+    """Swapping the query token must not change station token outputs.
+
+    Tests the asymmetric mask directly on TransformerEncoder: with the
+    mask set so stations cannot attend to query, changing the query token
+    in position N must leave positions 0..N-1 unchanged.
+    """
+    from core.nets.transformers import TransformerEncoder
+
+    B_t, N_t, D, H_t = 2, 4, 32, 2
+    encoder = TransformerEncoder(
+        num_layers=2, embed_dim=D, num_heads=H_t, add_pos_encoding=False,
+    )
+
+    rng      = np.random.default_rng(0)
+    stations = jnp.array(rng.standard_normal((B_t, N_t, D)).astype(np.float32))
+    query_a  = jnp.array(rng.standard_normal((B_t, 1, D)).astype(np.float32))
+    query_b  = jnp.array(rng.standard_normal((B_t, 1, D)).astype(np.float32))
+
+    tokens_a = jnp.concatenate([stations, query_a], axis=1)  # (B, N+1, D)
+    tokens_b = jnp.concatenate([stations, query_b], axis=1)
+
+    # Asymmetric mask: same construction as TCClassifier
+    mask = jnp.zeros((B_t, 1, N_t + 1, N_t + 1), dtype=bool)
+    mask = mask.at[:, :, :N_t, :N_t].set(True)
+    mask = mask.at[:, :,  N_t, :N_t].set(True)
+    mask = mask.at[:, :,  N_t,  N_t].set(True)
+
+    vs    = encoder.init(KEY, tokens_a, mask=mask, train=False)
+    out_a = encoder.apply(vs, tokens_a, mask=mask, train=False)
+    out_b = encoder.apply(vs, tokens_b, mask=mask, train=False)
+
+    assert jnp.allclose(out_a[:, :N_t, :], out_b[:, :N_t, :], atol=1e-5), \
+        "station representations changed when query token changed — mask is broken"
+    assert not jnp.allclose(out_a[:, N_t, :], out_b[:, N_t, :]), \
+        "query representations should differ for different query tokens"
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +313,7 @@ class TestTCClassifierRealData:
         batch = next(iter(loader))
         X, y  = batch['X'], batch['y']
 
-        model  = _make_model(use_self_attention=True, location_encoding='unit_circle')
+        model  = _make_model(location_encoding='unit_circle')
         vs     = model.init(KEY, X, train=False)
         logits = model.apply(vs, X, train=False)
 

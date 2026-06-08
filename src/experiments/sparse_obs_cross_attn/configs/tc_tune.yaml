@@ -44,13 +44,12 @@ data:
 
 model:
   # Base values — all overridden by suggest_fn each trial except the flags below.
-  use_self_attention:   true
   location_encoding:    unit_circle   # must match data.location_encoding
+  use_learned_mask:     true
 
   embed_dim:            128
   num_heads:            4
-  num_layers:           2
-  num_cross_layers:     1
+  num_layers:           4
   mlp_ratio:            4.0
   mlp_activation:       gelu
   mlp_initializer:      xavier_uniform
@@ -60,7 +59,7 @@ model:
   fourier_scale:        1.0
   n_obs_features:       5
   n_classes:            11
-  missing_value:        -1.0e9
+  missing_value:        -10.0
 
 trainer:
   batch_size:           64
