@@ -253,7 +253,7 @@ python -m experiments.sparse_obs_cross_attn.train.evaluate \
 Outputs:
 - Confusion matrix — row-normalised 11×11 and raw counts
 - Per-class precision / recall / F1 bar chart
-- Geographic attention maps — polar scatter (unit_circle) or lat/lon scatter (domain), coloured by mean attention weight
+- Geographic attention maps — polar scatter (unit_circle) or lat/lon scatter (domain), coloured by mean attention weight. In domain mode, `plot_attention_geographic(..., geo=True)` draws the scatter on a PlateCarree map with coastlines/borders (requires cartopy, optional dependency; default stays cartopy-free)
 
 ### Hyperparameter search (CLI)
 

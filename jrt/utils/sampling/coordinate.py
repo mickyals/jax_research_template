@@ -304,7 +304,7 @@ def lhs_sample_volume(
     scramble : bool
         Randomly place samples within strata. Default True.
     optimization : {"random-cd", "lloyd"}, optional
-        Post-processing optimisation. See ``lhs_sample``.
+        Post-processing optimization. See ``lhs_sample``.
 
     Returns
     -------

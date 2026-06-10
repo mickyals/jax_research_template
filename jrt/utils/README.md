@@ -73,6 +73,12 @@ Array preparation for plotting — masked reductions, point binning, smoothing, 
 
 Private rendering helpers shared by `curves.py`, `fields.py`, and `volumes.py` — not part of the public API. `DEFAULT_CMAP`, `_symmetric_clim`/`_resolve_clim` (colormap limit resolution), `_imshow_with_colorbar` (image+colorbar core), `_comparison_stats` (residual + shared clims + MSE for target/prediction/residual panels), `_contrast_color` (white/black text colour for annotation contrast against a heatmap cell), `_value_scatter` (scatter points optionally coloured/sized by a value array).
 
+### `_geo.py`
+
+Private cartopy canvas factory behind the `geo=` argument — not part of the public API; there are no public geo functions. `_make_geoaxes(figsize, extent, scale, color, lw, gridlines)` returns `(fig, GeoAxes, transform)` for a PlateCarree map with coastline/border/state linework (`_add_map_features`) and labeled dashed gridlines; geo-capable renderers thread the returned `transform` through their artist calls so cartopy never leaks to call sites.
+
+cartopy is an **optional dependency**, imported lazily inside `_geo.py` only — the template installs and runs without it; calling a geo path without cartopy raises an ImportError with the install command (`pip install cartopy`). Natural Earth shapefiles download on first *render* at the chosen `scale` ('50m' default; pass `geo={"scale": "10m"}` for publication-quality linework).
+
 ### `curves.py`
 
 Charts with a value axis — loss curves and grouped bar charts.
@@ -84,13 +90,13 @@ Charts with a value axis — loss curves and grouped bar charts.
 
 ### `fields.py`
 
-2D images in index/abstract coordinates. Mollweide stays here (generic matplotlib projection, any sphere) — Earth-specific maps with coastlines/borders live in `geographic.py` (not yet implemented).
+2D images in index/abstract coordinates. Mollweide stays here (generic matplotlib projection, any sphere). Earth maps are not a separate module: `plot_scatter_overlay` takes `geo=True` (or an options dict, e.g. `geo={"scale": "10m"}`) to draw on a PlateCarree map with coastlines/borders/states via the internal `_geo.py` — coordinates must then be lon/lat degrees, and `grid`/`xlabel`/`ylabel` are replaced by labeled map gridlines. Requires cartopy (optional dependency).
 
 | Function | Description |
 |----------|-------------|
 | `plot_field_2d(field, ...)` | 2D scalar field (imshow) |
 | `plot_field_comparison_2d(pred, target, ...)` | Side-by-side prediction vs target + residual; returns `(fig, resid, mse)` |
-| `plot_scatter_overlay(field, scatter_x, scatter_y, scatter_values, ...)` | Scattered points, optionally over a 2D field background. `field=None` gives a standalone scatter plot with its own colorbar (driven by `scatter_values`). Optional `marker_x`/`marker_y`/`marker_label` draws a single highlighted reference point (e.g. a query location); `scatter_size_range` scales marker size by value; `grid` adds gridlines when there's no field |
+| `plot_scatter_overlay(field, scatter_x, scatter_y, scatter_values, ...)` | Scattered points, optionally over a 2D field background. `field=None` gives a standalone scatter plot with its own colorbar (driven by `scatter_values`). Optional `marker_x`/`marker_y`/`marker_label` draws a single highlighted reference point (e.g. a query location); `scatter_size_range` scales marker size by value; `grid` adds gridlines when there's no field; `geo` draws on a PlateCarree map (see `_geo.py`) |
 | `plot_heatmap(matrix, row_labels, col_labels, ..., annotate=True)` | Annotated heatmap (confusion matrices, correlation matrices); annotation text colour auto-contrasts against each cell via `_contrast_color` |
 | `plot_mollweide(field, lats, lons, ...)` | Global Mollweide projection |
 | `plot_mollweide_comparison(pred, target, ...)` | Side-by-side Mollweide; returns `(fig, resid, mse)` |

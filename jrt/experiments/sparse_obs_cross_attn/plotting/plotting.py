@@ -161,6 +161,7 @@ def plot_attention_geographic(
     radius_km:         float = 500.0,
     sample_idx:        int   = 0,
     head_agg:          str   = 'mean',
+    geo:               bool | dict = False,
 ) -> plt.Figure:
     """Plot per-station attention weight for one sample.
 
@@ -188,6 +189,11 @@ def plot_attention_geographic(
         Which sample in the batch to visualise.
     head_agg : {'mean', 'max'}
         How to collapse the head dimension before plotting.
+    geo : bool or dict
+        Domain mode only (ignored for unit_circle): forwarded to
+        ``plot_scatter_overlay`` to draw on a PlateCarree map with
+        coastlines/borders. Requires cartopy (optional dependency);
+        default False keeps the cartopy-free plain-axes plot.
     """
     X            = batch['X']
     coords       = np.asarray(X['station_coords'][sample_idx])   # (N, 2)
@@ -246,7 +252,7 @@ def plot_attention_geographic(
         title='Self-attention weights (query row) (domain encoding)',
         xlabel='Longitude', ylabel='Latitude',
         colorbar_label='Attention weight',
-        scatter_size_range=(30, 280), grid=True,
+        scatter_size_range=(30, 280), grid=True, geo=geo,
         marker_x=q_lon, marker_y=q_lat, marker_label='Query (storm centre)',
         marker_kwargs={'s': 250}, figsize=(9, 7),
     )

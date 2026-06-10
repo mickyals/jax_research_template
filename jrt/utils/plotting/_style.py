@@ -65,20 +65,24 @@ def _imshow_with_colorbar(
     aspect: str = "auto",
     origin: str = "lower",
     colorbar_label: str = "",
+    transform=None,
     **colorbar_kwargs,
 ):
     """Draw ``data`` as an image on ``ax`` with a colorbar.
 
     The shared core of every 2D image panel in fields.py/volumes.py --
-    callers set titles and axis labels themselves.
+    callers set titles and axis labels themselves. ``transform`` is the
+    data CRS when drawing on a cartopy GeoAxes (omitted otherwise --
+    passing transform=None to imshow would override the default).
 
     Returns
     -------
     matplotlib.image.AxesImage
     """
+    tkw = {} if transform is None else {"transform": transform}
     im = ax.imshow(
         data, origin=origin, cmap=cmap,
-        vmin=vmin, vmax=vmax, aspect=aspect, extent=extent,
+        vmin=vmin, vmax=vmax, aspect=aspect, extent=extent, **tkw,
     )
     fig.colorbar(im, ax=ax, label=colorbar_label, **colorbar_kwargs)
     return im

@@ -849,14 +849,19 @@ class TestStartupSummary:
 
     # --- Orbax absolute path resolution ---
 
-    def test_checkpoint_dir_absolute_from_relative_checkpoint_dir(self, tmp_path):
+    def test_checkpoint_dir_absolute_from_relative_checkpoint_dir(
+            self, tmp_path, monkeypatch):
         # A relative checkpoint_dir must be resolved to an absolute path
-        # so Orbax never receives a relative path.
+        # so Orbax never receives a relative path. chdir into tmp_path:
+        # resolution is CWD-relative and the logger mkdirs under it.
+        monkeypatch.chdir(tmp_path)
         cfg = _base_config(tmp_path, checkpoint_dir="relative/ckpts")
         t   = Trainer(_TinyMLP(), _METRICS, cfg)
         assert t._checkpoint_dir.is_absolute()
 
-    def test_checkpoint_dir_absolute_from_relative_run_dir(self, tmp_path):
+    def test_checkpoint_dir_absolute_from_relative_run_dir(
+            self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         cfg = _base_config(tmp_path)
         cfg.pop("checkpoint_dir", None)
         cfg["run_dir"] = "relative/run_01"

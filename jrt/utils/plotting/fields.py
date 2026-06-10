@@ -176,6 +176,7 @@ def plot_scatter_overlay(
     marker_label: Optional[str] = None,
     marker_kwargs: Optional[dict] = None,
     grid: bool = False,
+    geo: bool | dict = False,
     figsize: tuple[int, int] = (10, 5),
 ) -> plt.Figure:
     """Plot scattered points, optionally over a 2D field background.
@@ -185,6 +186,10 @@ def plot_scatter_overlay(
     and ``scatter_values`` is given, the scatter inherits the field's
     colormap limits. If ``field`` is None, the scatter values get their
     own colorbar (resolved the same way the field's would be).
+
+    With ``geo`` set, x/y are longitude/latitude in degrees and the plot
+    is drawn on a PlateCarree map with coastlines, borders, and
+    state/province lines (requires cartopy, an optional dependency).
 
     Parameters
     ----------
@@ -239,6 +244,13 @@ def plot_scatter_overlay(
     grid : bool
         If True, draw a dashed grid. Only applied when ``field`` is None
         (a grid over an image is usually unwanted). Default False.
+    geo : bool or dict
+        If truthy, draw on a PlateCarree map instead of plain axes
+        (coordinates must be lon/lat degrees). ``True`` uses the default
+        map styling; a dict is forwarded to the canvas factory as
+        overrides (``scale`` ('110m'/'50m'/'10m'), ``color``, ``lw``,
+        ``gridlines``). Labeled map gridlines replace ``grid``,
+        ``xlabel``, and ``ylabel``, which are ignored. Requires cartopy.
     figsize : tuple[int, int]
         Figure size in inches.
 
@@ -253,14 +265,28 @@ def plot_scatter_overlay(
     >>> fig = plot_scatter_overlay(None, lons, lats, values,
     ...                            extent=[-100, -40, 0, 30],
     ...                            marker_x=q_lon, marker_y=q_lat)
+    >>> fig = plot_scatter_overlay(None, lons, lats, values,
+    ...                            extent=[-100, -40, 0, 30],
+    ...                            geo={"scale": "10m"})
     """
-    fig, ax = plt.subplots(figsize=figsize)
+    geo_opts = {} if geo is True else dict(geo) if isinstance(geo, dict) else None
+
+    if geo_opts is not None:
+        from utils.plotting._geo import _make_geoaxes
+        fig, ax, transform = _make_geoaxes(
+            figsize=figsize, extent=extent, **geo_opts,
+        )
+        tkw = {"transform": transform}
+    else:
+        fig, ax = plt.subplots(figsize=figsize)
+        transform = None
+        tkw = {}
 
     if field is not None:
         field_vmin, field_vmax = _resolve_clim(field, symmetric_cmap, vmin, vmax)
         _imshow_with_colorbar(
             ax, fig, field, extent=extent, cmap=cmap,
-            vmin=field_vmin, vmax=field_vmax,
+            vmin=field_vmin, vmax=field_vmax, transform=transform,
         )
         s_vmin = scatter_vmin if scatter_vmin is not None else field_vmin
         s_vmax = scatter_vmax if scatter_vmax is not None else field_vmax
@@ -275,31 +301,32 @@ def plot_scatter_overlay(
             ax, scatter_x, scatter_y, values=scatter_values,
             cmap=cmap, vmin=s_vmin, vmax=s_vmax,
             size=scatter_size, size_range=scatter_size_range,
-            edgecolor="black", linewidth=0.3,
+            edgecolor="black", linewidth=0.3, **tkw,
         )
         if field is None:
             fig.colorbar(sc, ax=ax, label=colorbar_label)
     else:
         _value_scatter(ax, scatter_x, scatter_y, values=None,
-                       size=scatter_size, alpha=0.6)
+                       size=scatter_size, alpha=0.6, **tkw)
 
     if marker_x is not None and marker_y is not None:
         mk = {"marker": "*", "s": 200, "color": "royalblue", "zorder": 5}
         if marker_kwargs:
             mk.update(marker_kwargs)
-        ax.scatter([marker_x], [marker_y], label=marker_label, **mk)
+        ax.scatter([marker_x], [marker_y], label=marker_label, **mk, **tkw)
         if marker_label:
             ax.legend()
 
     ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    if field is None:
-        if extent is not None:
-            ax.set_xlim(extent[0], extent[1])
-            ax.set_ylim(extent[2], extent[3])
-        if grid:
-            ax.grid(True, linestyle="--", alpha=0.4)
+    if geo_opts is None:
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        if field is None:
+            if extent is not None:
+                ax.set_xlim(extent[0], extent[1])
+                ax.set_ylim(extent[2], extent[3])
+            if grid:
+                ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
     return fig
 

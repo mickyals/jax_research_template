@@ -10,7 +10,8 @@ TestPlotConfusionMatrix      returns Figure; normalized values in [0,1];
 TestPlotClassMetrics         returns Figure
 TestExtractAttentionWeights  shape (B, H, N); values finite; non-negative
 TestPlotAttentionGeographic  unit_circle returns Figure; domain returns Figure;
-                              domain raises without fov
+                              domain geo=True draws on a PlateCarree map
+                              (skipped without cartopy); domain raises without fov
 """
 
 from __future__ import annotations
@@ -182,6 +183,26 @@ class TestPlotAttentionGeographic:
             fov_lon=(-100.0, -45.0),
         )
         assert isinstance(fig, plt.Figure)
+        plt.close('all')
+
+    def test_domain_geo_returns_map_figure(self):
+        # No canvas.draw()/savefig here: Natural Earth shapefiles download
+        # at render time and this test must stay network-free.
+        pytest.importorskip("cartopy")
+        import cartopy.crs as ccrs
+
+        model, variables = _init_model()
+        batch   = _fake_batch(location_encoding='domain')
+        weights = extract_attention_weights(model, variables, batch)
+        fig = plot_attention_geographic(
+            weights, batch,
+            location_encoding='domain',
+            fov_lat=(0.0, 30.0),
+            fov_lon=(-100.0, -45.0),
+            geo=True,
+        )
+        assert isinstance(fig, plt.Figure)
+        assert isinstance(fig.axes[0].projection, ccrs.PlateCarree)
         plt.close('all')
 
     def test_domain_raises_without_fov(self, weights_and_batch):
