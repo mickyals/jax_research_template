@@ -10,11 +10,11 @@ A research template for building JAX/Flax deep learning experiments in geoscienc
 
 | Layer | What it gives you |
 |-------|-------------------|
-| `src/core/` | Registry-based attention, embeddings, norms, activations, initializers, pooling, and assembled nets (MLP, CNN, Transformer, ViT, Swin) |
-| `src/datasets/` | Generic `.npz` dataset loader, batching utilities, and a `DataModule` ABC that any experiment can subclass |
-| `src/training/` | Single-device `Trainer` with early stopping, checkpointing, and logging; loss library; optimizer/scheduler registry; Optuna `Tuner` |
-| `src/utils/` | Geoscience helpers (Haversine, Vincenty, met conversions), JAX utilities, coordinate sampling, and plotting |
-| `src/experiments/` | Self-contained experiment directories that wire together the above components |
+| `jrt/core/` | Registry-based attention, embeddings, norms, activations, initializers, pooling, and assembled nets (MLP, CNN, Transformer, ViT, Swin) |
+| `jrt/datasets/` | Generic `.npz` dataset loader, batching utilities, and a `DataModule` ABC that any experiment can subclass |
+| `jrt/training/` | Single-device `Trainer` with early stopping, checkpointing, and logging; loss library; optimizer/scheduler registry; Optuna `Tuner` |
+| `jrt/utils/` | Geoscience helpers (Haversine, Vincenty, met conversions), JAX utilities, coordinate sampling, and plotting |
+| `jrt/experiments/` | Self-contained experiment directories that wire together the above components |
 
 ---
 
@@ -22,14 +22,14 @@ A research template for building JAX/Flax deep learning experiments in geoscienc
 
 ```
 jax_research_template/
-├── src/
+├── jrt/
 │   ├── core/               Model building blocks and registered nets
 │   ├── datasets/           Generic data loading and batching
 │   ├── training/           Trainer, losses, optimizers, logger, tuner
 │   ├── utils/              Geoscience, JAX helpers, plotting, sampling
 │   └── experiments/        One directory per experiment
 │       └── sparse_obs_cross_attn/   Tropical cyclone classifier (reference impl)
-├── src_test/               Pytest suite mirroring src/ structure
+├── tests/                  Pytest suite mirroring jrt/ structure
 ├── environment.yaml        Conda environment (name: jrt)
 └── pytest.ini
 ```
@@ -55,26 +55,26 @@ pip install --upgrade "jax[cuda12]"   # CUDA 12.x
 
 ```bash
 # Edit data paths in the config
-src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
 
 # Train
-python -m experiments.sparse_obs_cross_attn.train \
-    src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+python -m experiments.sparse_obs_cross_attn.train.train \
+    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
 
 # Resume interrupted training
-python -m experiments.sparse_obs_cross_attn.train \
-    src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_cross_attn.train.train \
+    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
     --resume
 
 # Evaluate (config path is positional)
-python -m experiments.sparse_obs_cross_attn.evaluate \
-    src/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_cross_attn.train.evaluate \
+    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
     --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
     --output_dir runs/tc_classifier/run_01/eval
 
 # Hyperparameter search
-python -m experiments.sparse_obs_cross_attn.tune \
-    src/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+python -m experiments.sparse_obs_cross_attn.train.tune \
+    jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
     --n_trials 25 \
     --storage sqlite:///runs/tc_classifier/hp_search/study.db
 ```
@@ -83,19 +83,19 @@ python -m experiments.sparse_obs_cross_attn.tune \
 
 ```bash
 conda activate jrt
-pytest src_test/
+pytest tests/
 ```
 
 ---
 
 ## Starting a new experiment
 
-Each experiment lives in its own directory under `src/experiments/`. The reference experiment `sparse_obs_cross_attn/` is the canonical example of how to structure one.
+Each experiment lives in its own directory under `jrt/experiments/`. The reference experiment `sparse_obs_cross_attn/` is the canonical example of how to structure one.
 
 **Minimum files:**
 
 ```
-src/experiments/my_experiment/
+jrt/experiments/my_experiment/
 ├── dataset.py       Subclass NpzDataset or write a custom loader
 ├── datamodule.py    Subclass BaseDataModule; expose train/val/test loaders
 ├── model.py         Flax nn.Module; __call__(X, train: bool) -> predictions
@@ -151,7 +151,7 @@ norm  = get_norm("layernorm")
 model = get_transformer("VIT", patch_size=16, embed_dim=256, num_heads=8, num_layers=6)
 ```
 
-See [`src/core/README.md`](src/core/README.md) for the full registry listing.
+See [`jrt/core/README.md`](jrt/core/README.md) for the full registry listing.
 
 ---
 
@@ -171,7 +171,7 @@ All three backends expose the same interface: `log_metrics`, `log_hyperparams`, 
 
 ## Hyperparameter tuning
 
-The `Tuner` in `src/training/tuner.py` wraps Optuna around the existing `Trainer`. Experiments provide a `tune.py` entry point with a `SEARCH_SPACE` dict and a `suggest_fn` that maps trial samples into the config.
+The `Tuner` in `jrt/training/tuner.py` wraps Optuna around the existing `Trainer`. Experiments provide a `tune.py` entry point with a `SEARCH_SPACE` dict and a `suggest_fn` that maps trial samples into the config.
 
 ```bash
 python -m experiments.my_experiment.tune configs/my_tune.yaml \
@@ -180,7 +180,7 @@ python -m experiments.my_experiment.tune configs/my_tune.yaml \
     --study_name my_experiment_v1
 ```
 
-See [`src/training/README.md`](src/training/README.md) for the full Tuner API.
+See [`jrt/training/README.md`](jrt/training/README.md) for the full Tuner API.
 
 ---
 

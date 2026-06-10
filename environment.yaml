@@ -39,7 +39,7 @@ dependencies:
       - rich>=13.0
       - tqdm>=4.0
 
-      # Hyperparameter optimisation
+      # Hyperparameter optimization
       - optuna>=4.0
 
       # Optional -- install as needed

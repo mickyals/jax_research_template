@@ -1,0 +1,206 @@
+# =============================================================================
+# TC Classifier — training configuration
+# =============================================================================
+
+# Experiment-wide shared values — propagated to data: and model: by train.py.
+seed: 3678
+
+# Coordinate encoding used for station positions and query token construction.
+# Changing this affects both the data preprocessing pipeline and the model, so
+# it lives here rather than being duplicated in data: and model:.
+#
+# unit_circle  station_coords = [norm_distance, bearing_rad] relative to query
+#              query_coords   = [0, 0] sentinel; query = purely learned content
+# domain       station_coords = [norm_lat_rad, norm_lon_rad] absolute position
+#              query_coords   = same encoding; pos_proj adds a positional term
+location_encoding:      unit_circle
+
+
+# -----------------------------------------------------------------------------
+# Data
+# -----------------------------------------------------------------------------
+data:
+
+  # --- Source files ---
+  ibtracs_path:           E:/sparse_obs/ibtracs/ibtracs_full.npz
+  multi_storm_path:       E:/sparse_obs/ibtracs/ibtracs_multi_storm_times.npz
+  insitu_obs_path:        E:/sparse_obs/insitu-land/insitu_land_clean.npz
+  insitu_meta_path:       E:/sparse_obs/insitu-land/insitu_land_station_meta.npz
+
+  # --- Station filtering ---
+  reliability_levels:     [always_active, mostly_active]
+  radius_km:              500.0       # exclude stations outside this radius of the query point
+  time_window_hours:      0.1         # temporal tolerance when matching obs to a TC timestamp
+
+  # --- Observed variables ---
+  # Order matters — must match model.n_obs_features.
+  obs_vars:
+    - air_pressure_at_sea_level
+    - air_temperature
+    - dew_point_temperature
+    - wind_speed
+    - wind_from_direction
+
+  # --- Observation normalisation ---
+  # minmax_01   → [0, 1]    using per-variable [min, max]
+  # minmax_11   → [-1, 1]   using per-variable [min, max]   ← recommended
+  # standardise → z-score   using per-variable [mean, std]
+  obs_normalisation:      minmax_11
+
+  # Physical bounds [min, max] for minmax_* or [mean, std] for standardise.
+  # Units must match the raw obs (Pa, K, m/s, degrees).
+  obs_bounds:
+    air_pressure_at_sea_level: [87000.0, 108400.0]   # Pa  (870–1084 hPa)
+    air_temperature:           [193.0,   333.0]        # K   (-80 °C to +60 °C)
+    dew_point_temperature:     [193.0,   308.0]        # K   (-80 °C to +35 °C)
+    wind_speed:                [0.0,     115.0]         # m/s (max observed ~224 kt)
+    wind_from_direction:       [0.0,     360.0]         # degrees
+
+  # --- Token padding / truncation ---
+  max_stations:           64          # pad or truncate every sample to this many station tokens
+  min_stations:           8           # samples with fewer real stations are discarded
+
+  # --- Batch construction ---
+  # batch_size is NOT set here — it flows down from trainer.batch_size automatically.
+  # See trainer.batch_size below.
+  tc_fraction:            0.5         # fraction of each batch drawn as TC samples (rest = background)
+
+  # --- Domain / field of view ---
+  fov_lat:                [0.0,  30.0]
+  fov_lon:                [-100.0, -45.0]
+  background_buffer_hours: 6.0        # timestamps within this window of any TC obs are excluded
+                                      # from the background pool
+
+  # --- Coordinate encoding ---
+  # Set at top level — propagated here by train.py. Do not set in this block.
+
+
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
+model:
+
+  # location_encoding is set at top level — propagated here by train.py.
+
+  # --- Transformer ---
+  embed_dim:            128           # token width (must be divisible by num_heads)
+  num_heads:            4
+  num_layers:           4             # encoder depth; all N+1 tokens share every layer
+
+  # --- FFN ---
+  mlp_ratio:            4.0           # FFN hidden dim = mlp_ratio × embed_dim
+  mlp_activation:       gelu
+  mlp_initializer:      xavier_uniform
+
+  # --- Regularisation ---
+  dropout_rate:         0.0
+  attn_dropout_rate:    0.0
+
+  # --- Coordinate embedding ---
+  fourier_dim:          64            # GaussianFourierEmbedding output dim — must be even
+  fourier_scale:        1.0           # frequency spread; HP-tuned over log-uniform [0.1, 10.0]
+
+  # --- Missing observation handling ---
+  # true  (recommended)
+  #   A trainable (F, ) vector — one value per obs feature — initialised N(0, 0.02).
+  #   The optimiser learns what "absent" looks like for each variable.
+  #   missing_value is ignored in this mode.
+  #
+  # false
+  #   Every missing entry is replaced at inference time by the fixed scalar
+  #   missing_value.  Nothing is learned; the sentinel never changes.
+  use_learned_mask:     true
+
+  # Only active when use_learned_mask: false.
+  # Should sit clearly outside the normalized obs range ([-1, 1] for minmax_11)
+  # without being extreme enough to cause gradient issues.
+  missing_value:        -10.0
+
+  # --- Output ---
+  n_obs_features:       5             # must equal len(data.obs_vars)
+  n_classes:            11            # 0 = no storm, 1–10 = SSHS −4 to +5
+
+
+# -----------------------------------------------------------------------------
+# Trainer
+# -----------------------------------------------------------------------------
+trainer:
+
+  # Single source of truth for batch size.
+  # train.py propagates this value to the data loader — do not set it in data:.
+  batch_size:           8
+
+  # --- Optimiser ---
+  optimizer:            adamw
+  optimizer_kwargs:
+    weight_decay:       1.0e-4
+
+  # --- Learning rate schedule ---
+  # Linear warmup from init_value to peak_value over warmup_steps,
+  # then cosine decay to end_value over decay_steps.
+  scheduler:            warmup_cosine
+  scheduler_kwargs:
+    init_value:         0.0
+    peak_value:         1.0e-4
+    warmup_steps:       25
+    decay_steps:        200
+    end_value:          1.0e-6
+
+  # --- Training loop ---
+  num_epochs:           1
+  num_steps:            .inf          # no step-count cap; epoch limit governs stopping
+
+  # Steps per training epoch (random TC sampling mode).
+  # TC samples are drawn with replacement; background is always fresh.
+  # For a smoke test keep this small (200-500).
+  # For a full run use 2000-5000 depending on desired training time per epoch.
+  # Remove or set to null to fall back to sequential mode (one pass through TC data).
+  steps_per_epoch:      500
+
+  # --- Early stopping ---
+  patience:             15            # epochs without improvement before halting
+  patience_metric:      val/cross_entropy
+  patience_direction:   lower_is_better
+
+  # --- Gradient clipping ---
+  max_grad_norm:        1.0
+
+  # --- Run directory ---
+  # Relative paths are resolved against the experiment directory
+  # (sparse_obs_cross_attn/, two levels above train/train.py), so
+  # runs/tc_classifier/run_01 always expands to
+  #   jrt/experiments/sparse_obs_cross_attn/runs/tc_classifier/run_01
+  # regardless of where the CLI is invoked from.  Absolute paths are used as-is.
+  run_dir:              runs/tc_classifier/run_02
+
+  # --- Logging ---
+  log_backend:          wandb
+
+  # How often to write train/<loss> to WandB during the step loop.
+  # Validation metrics are always logged once per epoch regardless of this value.
+  log_every_n_steps:        10
+
+  # How often to log attention entropy during the step loop.
+  # Uses global_step as the x-axis so it aligns with train/<loss> in WandB.
+  # Defaults to log_every_n_steps if not set.
+  attn_log_every_n_steps:   10
+
+  # How often to render and log a geographic attention map (epoch-level).
+  # Expensive (matplotlib render + WandB upload) — keep infrequent.
+  # 0 = disabled.  Appears in WandB under Media → Images.
+  attn_fig_every_n_epochs:  5
+
+  # How often to run full val inference and log confusion matrix + per-class F1.
+  # Each call iterates the entire val loader — keep infrequent for long runs.
+  # Set to 1 to log every epoch (good for short smoke-test runs).
+  # 0 = disabled.  Appears in WandB under Media → Images.
+  eval_plots_every_n_epochs: 1
+
+  # WandB project / run metadata.
+  log_kwargs:
+    project:  sparse_obs_encoding
+    name:     unified-transformer-unit-circle-run3
+    offline:  false
+    tags:     [unit_circle, unified_transformer]
+
+  # seed is injected from the top-level seed by train.py — do not set here.
