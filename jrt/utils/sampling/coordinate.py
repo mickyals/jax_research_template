@@ -209,10 +209,10 @@ def lhs_sample(
         If True (default), randomly place samples within strata.
         If False, center samples within strata (deterministic layout).
     optimization : {"random-cd", "lloyd"}, optional
-        Post-processing optimisation to improve space-filling quality.
-        "random-cd": minimise centered discrepancy via random permutations.
+        Post-processing optimization to improve space-filling quality.
+        "random-cd": minimize centered discrepancy via random permutations.
         "lloyd": move points toward a more uniform distribution.
-        None: no optimisation (default, fastest).
+        None: no optimization (default, fastest).
 
     Returns
     -------

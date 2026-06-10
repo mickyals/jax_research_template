@@ -2,103 +2,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Optional
 
-from utils.plotting.plot2d import _resolve_clim
+from utils.plotting._style import DEFAULT_CMAP, _resolve_clim, _imshow_with_colorbar, _comparison_stats
+from utils.plotting.aggregation import take_slice_np
 
 
 # ---------------------------------------------------------------------------
-# plot3d functions
+# volumes functions
 # ---------------------------------------------------------------------------
-
-def plot_volume_slice(
-    volume: np.ndarray,
-    slice_index: int,
-    axis: int = 2,
-    extent: Optional[list[float]] = None,
-    cmap: str = "RdBu_r",
-    title: str = "",
-    xlabel: str = "",
-    ylabel: str = "",
-    colorbar_label: str = "",
-    symmetric_cmap: bool = True,
-    vmin: Optional[float] = None,
-    vmax: Optional[float] = None,
-    figsize: tuple[int, int] = (8, 5),
-) -> tuple[plt.Figure, np.ndarray]:
-    """Plot a single 2D slice of a 3D volume.
-
-    Extracts one slice along the specified axis at the given index
-    and plots it as a 2D image. Call in a loop to visualise multiple
-    levels.
-
-    Input should be a NumPy array or convertible via ``np.array()``.
-    JAX arrays are accepted and converted automatically.
-
-    Parameters
-    ----------
-    volume : np.ndarray
-        3D array of shape (nx, ny, nz), or any array-like convertible
-        via ``np.array()``.
-    slice_index : int
-        Index along ``axis`` to extract.
-    axis : int
-        Axis to slice along. Default 2 (z / altitude).
-        0 = x, 1 = y, 2 = z.
-    extent : list[float], optional
-        [xmin, xmax, ymin, ymax] for the two axes not sliced.
-        If None the axes show pixel indices.
-    cmap : str
-        Matplotlib colormap.
-    title : str
-        Plot title. If empty, defaults to "axis=index" e.g. "z = 16".
-    xlabel : str
-        X-axis label.
-    ylabel : str
-        Y-axis label.
-    colorbar_label : str
-        Colorbar label.
-    symmetric_cmap : bool
-        If True (default), scale colormap symmetrically around zero.
-        Set to False for all-positive or all-negative data.
-    vmin : float, optional
-        Colormap minimum override.
-    vmax : float, optional
-        Colormap maximum override.
-    figsize : tuple[int, int]
-        Figure size in inches.
-
-    Returns
-    -------
-    tuple[plt.Figure, np.ndarray]
-        (figure, extracted 2D slice).
-
-    Example
-    -------
-    >>> vol = np.random.randn(64, 64, 32)
-    >>> fig, slc = plot_volume_slice(vol, slice_index=16)
-    >>> for i in [8, 16, 24]:
-    ...     fig, slc = plot_volume_slice(vol, slice_index=i, title=f"z={i}")
-    ...     fig.savefig(f"slice_{i}.png")
-    """
-    volume = np.asarray(volume)
-    slc = np.take(volume, slice_index, axis=axis)
-    lo, hi = _resolve_clim(slc, symmetric_cmap, vmin, vmax)
-
-    if not title:
-        axis_name = {0: "x", 1: "y", 2: "z"}.get(axis, str(axis))
-        title = f"{axis_name} = {slice_index}"
-
-    fig, ax = plt.subplots(figsize=figsize)
-    im = ax.imshow(
-        slc, origin="lower", cmap=cmap,
-        vmin=lo, vmax=hi, aspect="auto", extent=extent,
-    )
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    fig.colorbar(im, ax=ax, label=colorbar_label)
-    fig.tight_layout()
-    return fig, slc
-
 
 def plot_volume_comparison(
     true_volume: np.ndarray,
@@ -106,7 +16,7 @@ def plot_volume_comparison(
     slice_index: int,
     axis: int = 2,
     extent: Optional[list[float]] = None,
-    cmap: str = "RdBu_r",
+    cmap: str = DEFAULT_CMAP,
     title_prefix: str = "",
     xlabel: str = "",
     ylabel: str = "",
@@ -115,11 +25,11 @@ def plot_volume_comparison(
 ) -> tuple[plt.Figure, np.ndarray, float]:
     """Plot target, prediction, and residual slices side by side.
 
-    Extracts the same slice from both volumes, computes the residual,
-    and plots all three as a three-panel figure. The target and
-    prediction panels share a symmetric colormap scaled to the maximum
-    absolute value across both. The residual panel uses its own
-    symmetric scale.
+    Extracts the same slice from both volumes (via
+    ``aggregation.take_slice_np``), computes the residual, and plots all
+    three as a three-panel figure. The target and prediction panels share a
+    symmetric colormap scaled to the maximum absolute value across both. The
+    residual panel uses its own symmetric scale.
 
     Parameters
     ----------
@@ -155,19 +65,12 @@ def plot_volume_comparison(
     -------
     >>> fig, resid, mse = plot_volume_comparison(true_vol, pred_vol,
     ...                                           slice_index=16)
-    >>> fig.savefig("comparison.png", dpi=150)
     """
-    true_volume = np.asarray(true_volume)
-    pred_volume = np.asarray(pred_volume)
-
-    true_slc = np.take(true_volume, slice_index, axis=axis)
-    pred_slc = np.take(pred_volume, slice_index, axis=axis)
-    resid = pred_slc - true_slc
-    mse = float((resid ** 2).mean())
+    true_slc = take_slice_np(true_volume, axis=axis, index=slice_index)
+    pred_slc = take_slice_np(pred_volume, axis=axis, index=slice_index)
+    resid, vmax, rmax, mse = _comparison_stats(true_slc, pred_slc)
 
     axis_name = {0: "x", 1: "y", 2: "z"}.get(axis, str(axis))
-    vmax = float(max(np.abs(true_slc).max(), np.abs(pred_slc).max()))
-    rmax = float(np.abs(resid).max()) + 1e-12
 
     fig, axes = plt.subplots(1, 3, figsize=figsize)
     panels = [
@@ -176,14 +79,10 @@ def plot_volume_comparison(
         (resid,    f"{title_prefix}Residual",   rmax),
     ]
     for ax, (data, title, clim) in zip(axes, panels):
-        im = ax.imshow(
-            data, origin="lower", extent=extent,
-            cmap=cmap, vmin=-clim, vmax=clim, aspect="auto",
-        )
+        _imshow_with_colorbar(ax, fig, data, extent=extent, cmap=cmap, vmin=-clim, vmax=clim)
         ax.set_title(f"{title} ({axis_name}={slice_index})")
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        fig.colorbar(im, ax=ax)
 
     fig.tight_layout()
 
@@ -233,7 +132,7 @@ def plot_surface_3d(
         Surface transparency. 1.0 is fully opaque.
     stride : int
         Subsampling stride for rendering. Default 1 (no subsampling).
-        Increase for large grids — ``stride=2`` reduces vertex count by 4×.
+        Increase for large grids -- ``stride=2`` reduces vertex count by 4x.
     symmetric_cmap : bool
         If True, scale colormap symmetrically around zero. Default False.
     vmin : float, optional

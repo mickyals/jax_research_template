@@ -6,8 +6,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from unittest.mock import patch
 
-from utils.plotting.plot3d import (
-    plot_volume_slice,
+from utils.plotting.volumes import (
     plot_volume_comparison,
     plot_surface_3d,
 )
@@ -24,12 +23,6 @@ def volume():
 
 
 @pytest.fixture
-def positive_volume():
-    rng = np.random.default_rng(1)
-    return np.abs(rng.standard_normal((32, 32, 16))).astype(np.float32)
-
-
-@pytest.fixture
 def volume_pair(volume):
     rng = np.random.default_rng(2)
     pred = volume + rng.standard_normal(volume.shape).astype(np.float32) * 0.1
@@ -40,91 +33,6 @@ def volume_pair(volume):
 def surface():
     rng = np.random.default_rng(3)
     return rng.standard_normal((50, 50)).astype(np.float32)
-
-
-# ---------------------------------------------------------------------------
-# plot_volume_slice
-# ---------------------------------------------------------------------------
-
-class TestPlotVolumeSlice:
-
-    @patch("matplotlib.pyplot.show")
-    def test_runs_default_axis(self, mock_show, volume):
-        plot_volume_slice(volume, slice_index=8)
-
-    @patch("matplotlib.pyplot.show")
-    def test_runs_axis_0(self, mock_show, volume):
-        plot_volume_slice(volume, slice_index=16, axis=0)
-
-    @patch("matplotlib.pyplot.show")
-    def test_runs_axis_1(self, mock_show, volume):
-        plot_volume_slice(volume, slice_index=16, axis=1)
-
-    @patch("matplotlib.pyplot.show")
-    def test_returns_correct_shape_axis2(self, mock_show, volume):
-        fig, slc = plot_volume_slice(volume, slice_index=8, axis=2)
-        assert slc.shape == (32, 32)
-        plt.close(fig)
-
-    @patch("matplotlib.pyplot.show")
-    def test_returns_correct_shape_axis0(self, mock_show, volume):
-        fig, slc = plot_volume_slice(volume, slice_index=16, axis=0)
-        assert slc.shape == (32, 16)
-        plt.close(fig)
-
-    @patch("matplotlib.pyplot.show")
-    def test_returns_correct_shape_axis1(self, mock_show, volume):
-        fig, slc = plot_volume_slice(volume, slice_index=16, axis=1)
-        assert slc.shape == (32, 16)
-        plt.close(fig)
-
-    @patch("matplotlib.pyplot.show")
-    def test_returned_slice_values_correct(self, mock_show, volume):
-        fig, slc = plot_volume_slice(volume, slice_index=5, axis=2)
-        assert np.allclose(slc, volume[:, :, 5])
-        plt.close(fig)
-
-    @patch("matplotlib.pyplot.show")
-    def test_default_title_generated(self, mock_show, volume):
-        plot_volume_slice(volume, slice_index=8)
-        fig = plt.gcf()
-        ax = fig.axes[0]
-        assert "z" in ax.get_title()
-        assert "8" in ax.get_title()
-        plt.close(fig)
-
-    @patch("matplotlib.pyplot.show")
-    def test_custom_title(self, mock_show, volume):
-        plot_volume_slice(volume, slice_index=8, title="my slice")
-        fig = plt.gcf()
-        assert fig.axes[0].get_title() == "my slice"
-        plt.close(fig)
-
-    @patch("matplotlib.pyplot.show")
-    def test_asymmetric_cmap(self, mock_show, positive_volume):
-        slc = plot_volume_slice(positive_volume, slice_index=8,
-                                 symmetric_cmap=False)
-        assert slc is not None
-
-    @patch("matplotlib.pyplot.show")
-    def test_explicit_vmin_vmax(self, mock_show, volume):
-        plot_volume_slice(volume, slice_index=8, vmin=-1., vmax=1.)
-
-    @patch("matplotlib.pyplot.show")
-    def test_accepts_jax_array(self, mock_show):
-        try:
-            import jax.numpy as jnp
-            vol = jnp.ones((16, 16, 8))
-            fig, slc = plot_volume_slice(vol, slice_index=4)
-            assert isinstance(slc, np.ndarray)
-            plt.close(fig)
-        except ImportError:
-            pytest.skip("JAX not available")
-
-    @patch("matplotlib.pyplot.show")
-    def test_with_extent(self, mock_show, volume):
-        plot_volume_slice(volume, slice_index=8,
-                           extent=[-1., 1., -1., 1.])
 
 
 # ---------------------------------------------------------------------------

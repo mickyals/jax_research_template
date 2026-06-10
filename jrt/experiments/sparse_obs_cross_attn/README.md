@@ -132,8 +132,12 @@ sparse_obs_cross_attn/
 │       └── insitu_land.py   InsituLandDataset — haversine spatial filter,
 │                                reliability filtering, binary-search time queries
 ├── plotting/
-│   └── plotting.py      Confusion matrix, class metrics, and geographic
-│                           attention plots
+│   └── plotting.py      Confusion matrix and class metrics (thin wrappers
+│                           over jrt/utils/plotting fields.plot_heatmap and
+│                           curves.plot_grouped_bars), and geographic
+│                           attention plots (unit_circle: bespoke polar
+│                           scatter via _value_scatter; domain: thin wrapper
+│                           over fields.plot_scatter_overlay)
 └── train/
     ├── model.py         TCClassifier — unified Transformer encoder
     ├── metrics.py       cross_entropy, accuracy, binary_accuracy, mae_class

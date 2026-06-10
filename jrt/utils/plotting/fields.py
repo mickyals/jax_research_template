@@ -2,49 +2,24 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import Optional
 
-
-# ---------------------------------------------------------------------------
-# Private helpers
-# ---------------------------------------------------------------------------
-
-def _symmetric_clim(data: np.ndarray) -> tuple[float, float]:
-    """Return (-vmax, vmax) where vmax = max(|data|)."""
-    vmax = float(np.abs(data).max())
-    return -vmax, vmax
-
-
-def _resolve_clim(
-    data: np.ndarray,
-    symmetric: bool,
-    vmin: Optional[float],
-    vmax: Optional[float],
-) -> tuple[float, float]:
-    """Resolve colormap limits from data, symmetric flag, and explicit overrides.
-
-    Explicit vmin/vmax always win. Otherwise symmetric or data-range scaling.
-    """
-    if vmin is not None and vmax is not None:
-        return vmin, vmax
-    if symmetric:
-        lo, hi = _symmetric_clim(data)
-    else:
-        lo = float(data.min())
-        hi = float(data.max())
-    if vmin is not None:
-        lo = vmin
-    if vmax is not None:
-        hi = vmax
-    return lo, hi
+from utils.plotting._style import (
+    DEFAULT_CMAP,
+    _resolve_clim,
+    _imshow_with_colorbar,
+    _comparison_stats,
+    _contrast_color,
+    _value_scatter,
+)
 
 
 # ---------------------------------------------------------------------------
-# plot2d functions
+# fields functions
 # ---------------------------------------------------------------------------
 
 def plot_field_2d(
     field: np.ndarray,
     extent: Optional[list[float]] = None,
-    cmap: str = "RdBu_r",
+    cmap: str = DEFAULT_CMAP,
     title: str = "",
     xlabel: str = "x",
     ylabel: str = "y",
@@ -97,14 +72,13 @@ def plot_field_2d(
     lo, hi = _resolve_clim(field, symmetric_cmap, vmin, vmax)
 
     fig, ax = plt.subplots(figsize=figsize)
-    im = ax.imshow(
-        field, origin="lower", cmap=cmap,
-        vmin=lo, vmax=hi, aspect="auto", extent=extent,
+    _imshow_with_colorbar(
+        ax, fig, field, extent=extent, cmap=cmap,
+        vmin=lo, vmax=hi, colorbar_label=colorbar_label,
     )
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    fig.colorbar(im, ax=ax, label=colorbar_label)
     fig.tight_layout()
     return fig
 
@@ -113,7 +87,7 @@ def plot_field_comparison_2d(
     true_field: np.ndarray,
     pred_field: np.ndarray,
     extent: Optional[list[float]] = None,
-    cmap: str = "RdBu_r",
+    cmap: str = DEFAULT_CMAP,
     title_prefix: str = "",
     xlabel: str = "x",
     ylabel: str = "y",
@@ -157,10 +131,7 @@ def plot_field_comparison_2d(
     >>> fig, resid, mse = plot_field_comparison_2d(true, pred,
     ...                                             extent=[-100, -40, 0, 30])
     """
-    resid = pred_field - true_field
-    mse = float((resid ** 2).mean())
-    vmax = float(max(np.abs(true_field).max(), np.abs(pred_field).max()))
-    rmax = float(np.abs(resid).max()) + 1e-12
+    resid, vmax, rmax, mse = _comparison_stats(true_field, pred_field)
 
     fig, axes = plt.subplots(1, 3, figsize=figsize)
     panels = [
@@ -169,14 +140,10 @@ def plot_field_comparison_2d(
         (resid,       f"{title_prefix}Residual",   rmax),
     ]
     for ax, (data, title, clim) in zip(axes, panels):
-        im = ax.imshow(
-            data, origin="lower", extent=extent,
-            cmap=cmap, vmin=-clim, vmax=clim, aspect="auto",
-        )
+        _imshow_with_colorbar(ax, fig, data, extent=extent, cmap=cmap, vmin=-clim, vmax=clim)
         ax.set_title(title)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        fig.colorbar(im, ax=ax)
 
     fig.tight_layout()
 
@@ -187,34 +154,43 @@ def plot_field_comparison_2d(
 
 
 def plot_scatter_overlay(
-    field: np.ndarray,
+    field: Optional[np.ndarray],
     scatter_x: np.ndarray,
     scatter_y: np.ndarray,
     scatter_values: Optional[np.ndarray] = None,
     extent: Optional[list[float]] = None,
-    cmap: str = "RdBu_r",
+    cmap: str = DEFAULT_CMAP,
     title: str = "",
     xlabel: str = "x",
     ylabel: str = "y",
-    scatter_size: int = 30,
+    colorbar_label: str = "",
+    scatter_size: float = 30,
+    scatter_size_range: Optional[tuple[float, float]] = None,
     scatter_vmin: Optional[float] = None,
     scatter_vmax: Optional[float] = None,
     symmetric_cmap: bool = True,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
+    marker_x: Optional[float] = None,
+    marker_y: Optional[float] = None,
+    marker_label: Optional[str] = None,
+    marker_kwargs: Optional[dict] = None,
+    grid: bool = False,
     figsize: tuple[int, int] = (10, 5),
 ) -> plt.Figure:
-    """Plot a 2D field with a scatter overlay.
+    """Plot scattered points, optionally over a 2D field background.
 
     Scatter points can use independent colour scaling from the field
     via ``scatter_vmin`` / ``scatter_vmax``. If those are not provided
     and ``scatter_values`` is given, the scatter inherits the field's
-    colormap limits.
+    colormap limits. If ``field`` is None, the scatter values get their
+    own colorbar (resolved the same way the field's would be).
 
     Parameters
     ----------
-    field : np.ndarray
-        2D array of shape (rows, cols).
+    field : np.ndarray or None
+        2D array of shape (rows, cols), or None to plot scatter points
+        on bare axes (e.g. station positions with no background field).
     scatter_x : np.ndarray
         X coordinates of scatter points, shape (n,).
     scatter_y : np.ndarray
@@ -223,7 +199,8 @@ def plot_scatter_overlay(
         Values used to colour scatter points.
         If None, points are plotted in black.
     extent : list[float], optional
-        [xmin, xmax, ymin, ymax] for axis labels.
+        [xmin, xmax, ymin, ymax] for axis labels. Also sets the axis
+        limits when ``field`` is None.
     cmap : str
         Matplotlib colormap applied to both field and scatter.
     title : str
@@ -232,8 +209,14 @@ def plot_scatter_overlay(
         X-axis label.
     ylabel : str
         Y-axis label.
-    scatter_size : int
-        Scatter marker size.
+    colorbar_label : str
+        Label for the scatter colorbar, used only when ``field`` is None
+        and ``scatter_values`` is given.
+    scatter_size : float
+        Scatter marker size, used when ``scatter_size_range`` is None.
+    scatter_size_range : tuple[float, float], optional
+        If given, point sizes are scaled by ``scatter_values`` normalised
+        to ``[0, 1]`` and mapped onto ``(lo, hi)``.
     scatter_vmin : float, optional
         Colormap minimum for scatter points. Defaults to field vmin.
     scatter_vmax : float, optional
@@ -245,6 +228,17 @@ def plot_scatter_overlay(
         Field colormap minimum override.
     vmax : float, optional
         Field colormap maximum override.
+    marker_x, marker_y : float, optional
+        Position of a single highlighted reference point (e.g. a query
+        or storm centre), drawn as a star marker.
+    marker_label : str, optional
+        Legend label for the reference point.
+    marker_kwargs : dict, optional
+        Extra kwargs for the reference-point scatter, merged over the
+        default ``{"marker": "*", "s": 200, "color": "royalblue", "zorder": 5}``.
+    grid : bool
+        If True, draw a dashed grid. Only applied when ``field`` is None
+        (a grid over an image is usually unwanted). Default False.
     figsize : tuple[int, int]
         Figure size in inches.
 
@@ -256,32 +250,56 @@ def plot_scatter_overlay(
     -------
     >>> fig = plot_scatter_overlay(field, lons, lats, values,
     ...                            extent=[-100, -40, 0, 30])
+    >>> fig = plot_scatter_overlay(None, lons, lats, values,
+    ...                            extent=[-100, -40, 0, 30],
+    ...                            marker_x=q_lon, marker_y=q_lat)
     """
-    field_vmin, field_vmax = _resolve_clim(field, symmetric_cmap, vmin, vmax)
-
     fig, ax = plt.subplots(figsize=figsize)
-    im = ax.imshow(
-        field, origin="lower", cmap=cmap,
-        vmin=field_vmin, vmax=field_vmax,
-        aspect="auto", extent=extent,
-    )
-    if scatter_values is not None:
+
+    if field is not None:
+        field_vmin, field_vmax = _resolve_clim(field, symmetric_cmap, vmin, vmax)
+        _imshow_with_colorbar(
+            ax, fig, field, extent=extent, cmap=cmap,
+            vmin=field_vmin, vmax=field_vmax,
+        )
         s_vmin = scatter_vmin if scatter_vmin is not None else field_vmin
         s_vmax = scatter_vmax if scatter_vmax is not None else field_vmax
-        ax.scatter(
-            scatter_x, scatter_y,
-            c=scatter_values, cmap=cmap,
-            vmin=s_vmin, vmax=s_vmax,
-            s=scatter_size, edgecolor="black", linewidth=0.3,
-        )
+    elif scatter_values is not None:
+        s_vmin, s_vmax = _resolve_clim(scatter_values, symmetric_cmap,
+                                        scatter_vmin, scatter_vmax)
     else:
-        ax.scatter(scatter_x, scatter_y, color="black",
-                   s=scatter_size, alpha=0.6)
+        s_vmin = s_vmax = None
+
+    if scatter_values is not None:
+        sc = _value_scatter(
+            ax, scatter_x, scatter_y, values=scatter_values,
+            cmap=cmap, vmin=s_vmin, vmax=s_vmax,
+            size=scatter_size, size_range=scatter_size_range,
+            edgecolor="black", linewidth=0.3,
+        )
+        if field is None:
+            fig.colorbar(sc, ax=ax, label=colorbar_label)
+    else:
+        _value_scatter(ax, scatter_x, scatter_y, values=None,
+                       size=scatter_size, alpha=0.6)
+
+    if marker_x is not None and marker_y is not None:
+        mk = {"marker": "*", "s": 200, "color": "royalblue", "zorder": 5}
+        if marker_kwargs:
+            mk.update(marker_kwargs)
+        ax.scatter([marker_x], [marker_y], label=marker_label, **mk)
+        if marker_label:
+            ax.legend()
 
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    fig.colorbar(im, ax=ax)
+    if field is None:
+        if extent is not None:
+            ax.set_xlim(extent[0], extent[1])
+            ax.set_ylim(extent[2], extent[3])
+        if grid:
+            ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
     return fig
 
@@ -292,7 +310,7 @@ def plot_heatmap(
     col_labels: Optional[list[str]] = None,
     xlabel: str = "",
     ylabel: str = "",
-    cmap: str = "RdBu_r",
+    cmap: str = DEFAULT_CMAP,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     title: str = "",
@@ -332,7 +350,8 @@ def plot_heatmap(
     colorbar_label : str
         Label for the colorbar.
     annotate : bool
-        If True, write the numeric value of each cell in the plot.
+        If True, write the numeric value of each cell in the plot, with
+        text colour (white/black) chosen for contrast against the cell.
     fmt : str
         Format string for annotations. Default ".2f".
     annotate_fontsize : int
@@ -361,8 +380,14 @@ def plot_heatmap(
         h = min(max_figsize[1], max(4, n_rows * 0.8 + 1))
         figsize = (w, h)
 
+    lo = vmin if vmin is not None else float(matrix.min())
+    hi = vmax if vmax is not None else float(matrix.max())
+
     fig, ax = plt.subplots(figsize=figsize)
-    im = ax.imshow(matrix, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+    _imshow_with_colorbar(
+        ax, fig, matrix, cmap=cmap, vmin=lo, vmax=hi,
+        origin="upper", colorbar_label=colorbar_label,
+    )
 
     if row_labels is not None:
         ax.set_yticks(range(n_rows))
@@ -376,12 +401,12 @@ def plot_heatmap(
             for j in range(n_cols):
                 ax.text(j, i, format(matrix[i, j], fmt),
                         ha="center", va="center",
-                        fontsize=annotate_fontsize)
+                        fontsize=annotate_fontsize,
+                        color=_contrast_color(matrix[i, j], lo, hi))
 
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    fig.colorbar(im, ax=ax, label=colorbar_label)
     fig.tight_layout()
     return fig
 
@@ -390,7 +415,7 @@ def plot_mollweide(
     field: np.ndarray,
     lon_grid: np.ndarray,
     lat_grid: np.ndarray,
-    cmap: str = "RdBu_r",
+    cmap: str = DEFAULT_CMAP,
     title: str = "",
     colorbar_label: str = "",
     symmetric_cmap: bool = True,
@@ -407,7 +432,11 @@ def plot_mollweide(
 ) -> plt.Figure:
     """Plot a scalar field on a Mollweide projection.
 
-    Scatter points can be coloured independently from the field via
+    Generic matplotlib Mollweide projection -- works for any sphere (Earth,
+    all-sky, black-hole imaging), not just geographic data. For Earth maps
+    with coastlines/borders, see ``geographic.py``.
+
+    Scatter points can be coloured independently of the field via
     ``scatter_vmin`` / ``scatter_vmax`` and ``scatter_cmap``.
     If those are not provided, scatter inherits the field's colormap
     and colour limits.
@@ -495,7 +524,7 @@ def plot_mollweide_comparison(
     pred_field: np.ndarray,
     lon_grid: np.ndarray,
     lat_grid: np.ndarray,
-    cmap: str = "RdBu_r",
+    cmap: str = DEFAULT_CMAP,
     title_prefix: str = "",
     scatter_lon: Optional[np.ndarray] = None,
     scatter_lat: Optional[np.ndarray] = None,
@@ -548,10 +577,7 @@ def plot_mollweide_comparison(
     -------
     >>> fig, resid, mse = plot_mollweide_comparison(true, pred, LON, LAT)
     """
-    resid = pred_field - true_field
-    mse = float((resid ** 2).mean())
-    vmax = float(max(np.abs(true_field).max(), np.abs(pred_field).max()))
-    rmax = float(np.abs(resid).max()) + 1e-12
+    resid, vmax, rmax, mse = _comparison_stats(true_field, pred_field)
 
     fig = plt.figure(figsize=figsize)
     panels = [

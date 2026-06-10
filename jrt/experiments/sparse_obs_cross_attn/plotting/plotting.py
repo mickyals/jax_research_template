@@ -7,13 +7,16 @@ matrix / per-class metric charts, and geographic attention visualizations.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import jax
 import matplotlib.pyplot as plt
 
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from utils.plotting._style import _value_scatter
+from utils.plotting.curves import plot_grouped_bars
+from utils.plotting.fields import plot_heatmap, plot_scatter_overlay
 
 
 # ---------------------------------------------------------------------------
@@ -25,103 +28,65 @@ def plot_confusion_matrix(
     class_names: list[str],
     normalize:   bool = True,
     title:       str  = 'Confusion Matrix',
-    ax:          Optional[Any] = None,
 ) -> plt.Figure:
     """Heatmap of confusion matrix.
+
+    Thin wrapper over ``utils.plotting.fields.plot_heatmap``: normalisation
+    is the only confusion-matrix-specific decision, made here.
 
     Parameters
     ----------
     normalize : bool
         True  → row-normalised (each row sums to 1; value = recall per class).
         False → raw counts.
-    ax : matplotlib Axes, optional
-        If None a new figure is created.
 
     Returns
     -------
     plt.Figure
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(11, 9))
-    else:
-        fig = ax.figure
-
     if normalize:
-        row_sums = cm.sum(axis=1, keepdims=True)
-        display  = np.where(row_sums > 0, cm.astype(float) / row_sums, 0.0)
-        vmax     = 1.0
-        clabel   = 'Recall (fraction of true class)'
-        cell_fmt = '{:.2f}'
+        display = np.where(cm.sum(axis=1, keepdims=True) > 0,
+                            cm.astype(float) / cm.sum(axis=1, keepdims=True), 0.0)
+        vmax    = 1.0
+        clabel  = 'Recall (fraction of true class)'
+        fmt     = '.2f'
     else:
-        display  = cm.astype(float)
-        vmax     = float(cm.max()) if cm.max() > 0 else 1.0
-        clabel   = 'Count'
-        cell_fmt = '{:d}'
+        display = cm.astype(float)
+        vmax    = float(cm.max()) if cm.max() > 0 else 1.0
+        clabel  = 'Count'
+        fmt     = '.0f'
 
-    im   = ax.imshow(display, interpolation='nearest', cmap='Blues',
-                     vmin=0.0, vmax=vmax)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label(clabel, fontsize=9)
-
-    n = len(class_names)
-    ax.set_xticks(range(n))
-    ax.set_yticks(range(n))
-    ax.set_xticklabels(class_names, rotation=45, ha='right', fontsize=8)
-    ax.set_yticklabels(class_names, fontsize=8)
-    ax.set_xlabel('Predicted class', fontsize=9)
-    ax.set_ylabel('True class', fontsize=9)
-    ax.set_title(title, fontsize=11)
-
-    thresh = display.max() / 2.0
-    for i in range(n):
-        for j in range(n):
-            val = display[i, j]
-            txt = cell_fmt.format(val if normalize else int(cm[i, j]))
-            ax.text(j, i, txt, ha='center', va='center', fontsize=6,
-                    color='white' if val > thresh else 'black')
-
-    fig.tight_layout()
-    return fig
+    return plot_heatmap(
+        display, row_labels=class_names, col_labels=class_names,
+        xlabel='Predicted class', ylabel='True class',
+        cmap='Blues', vmin=0.0, vmax=vmax, title=title,
+        colorbar_label=clabel, annotate=True, fmt=fmt,
+        annotate_fontsize=6, figsize=(11, 9),
+    )
 
 
 def plot_class_metrics(
     metrics:     dict[int, dict[str, float]],
     class_names: list[str],
-    ax:          Optional[Any] = None,
 ) -> plt.Figure:
     """Grouped bar chart: per-class precision, recall, F1.
+
+    Thin wrapper over ``utils.plotting.curves.plot_grouped_bars``.
 
     Parameters
     ----------
     metrics : dict returned by per_class_metrics()
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(13, 5))
-    else:
-        fig = ax.figure
-
-    n     = len(class_names)
-    x     = np.arange(n)
-    w     = 0.25
-
+    n    = len(class_names)
     prec = [metrics[k]['precision'] for k in range(n)]
     rec  = [metrics[k]['recall']    for k in range(n)]
     f1   = [metrics[k]['f1']        for k in range(n)]
 
-    ax.bar(x - w, prec, w, label='Precision', color='steelblue',  alpha=0.85)
-    ax.bar(x,     rec,  w, label='Recall',    color='darkorange', alpha=0.85)
-    ax.bar(x + w, f1,   w, label='F1',        color='seagreen',   alpha=0.85)
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(class_names, rotation=45, ha='right', fontsize=8)
-    ax.set_ylabel('Score')
-    ax.set_ylim(0, 1.05)
-    ax.set_title('Per-class Precision / Recall / F1')
-    ax.legend(fontsize=9)
-    ax.grid(axis='y', linestyle='--', alpha=0.4)
-
-    fig.tight_layout()
-    return fig
+    return plot_grouped_bars(
+        {'Precision': prec, 'Recall': rec, 'F1': f1}, class_names,
+        ylabel='Score', title='Per-class Precision / Recall / F1',
+        ylim=(0, 1.05), colors=['steelblue', 'darkorange', 'seagreen'],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +114,44 @@ def extract_attention_weights(
     return np.asarray(weights, dtype=np.float32)
 
 
+def _decode_domain_coords(
+    coords:       np.ndarray,
+    query_coords: np.ndarray,
+    fov_lat:      tuple[float, float],
+    fov_lon:      tuple[float, float],
+) -> tuple[np.ndarray, np.ndarray, float, float]:
+    """Decode normalised domain-encoded coordinates to lon/lat degrees.
+
+    Parameters
+    ----------
+    coords : np.ndarray (n, 2)
+        Normalised station coordinates, columns (lat, lon) each in
+        [-pi/2, pi/2].
+    query_coords : np.ndarray (2,)
+        Normalised query coordinate, (lat, lon).
+    fov_lat, fov_lon : tuple[float, float]
+        (min, max) field-of-view bounds in degrees.
+
+    Returns
+    -------
+    lons, lats : np.ndarray (n,)
+        Decoded station longitudes/latitudes in degrees.
+    q_lon, q_lat : float
+        Decoded query longitude/latitude in degrees.
+    """
+    half_pi = float(np.pi / 2)
+    lat_min, lat_max = fov_lat
+    lon_min, lon_max = fov_lon
+    lat_span = lat_max - lat_min
+    lon_span = lon_max - lon_min
+
+    lats = (coords[:, 0] / half_pi + 1) / 2 * lat_span + lat_min
+    lons = (coords[:, 1] / half_pi + 1) / 2 * lon_span + lon_min
+    q_lat = (query_coords[0] / half_pi + 1) / 2 * lat_span + lat_min
+    q_lon = (query_coords[1] / half_pi + 1) / 2 * lon_span + lon_min
+    return lons, lats, q_lon, q_lat
+
+
 def plot_attention_geographic(
     weights:           np.ndarray,
     batch:             dict,
@@ -158,15 +161,17 @@ def plot_attention_geographic(
     radius_km:         float = 500.0,
     sample_idx:        int   = 0,
     head_agg:          str   = 'mean',
-    ax:                Optional[Any] = None,
 ) -> plt.Figure:
     """Plot per-station attention weight for one sample.
 
     For ``unit_circle`` encoding: polar axes — radius = normalised distance
     from storm centre, angle = bearing.  The storm is at the origin.
+    Compass conventions and km-scaled radial ticks are bespoke to this
+    plot, so it composes ``_value_scatter`` directly.
 
     For ``domain`` encoding: Cartesian axes — decoded lat/lon from the
     normalised coord representation.  Query position marked with a star.
+    Renders via ``utils.plotting.fields.plot_scatter_overlay``.
 
     Parameters
     ----------
@@ -196,28 +201,15 @@ def plot_attention_geographic(
     w_station = w_station[:N]                                     # (N,) drop query self-attn
     w_real = w_station[mask]                                      # (n_real,)
 
-    # Normalise to [0, 1] for sizing/colouring
-    w_norm = (w_real - w_real.min()) / (w_real.max() - w_real.min() + 1e-12)
-
     if location_encoding == 'unit_circle':
         norm_dist   = coords[mask, 0]          # [0, 1]
         bearing_rad = coords[mask, 1]          # [0, 2π)
 
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(7, 7),
-                                   subplot_kw={'projection': 'polar'})
-        else:
-            fig = ax.figure
-
-        sc = ax.scatter(
-            bearing_rad, norm_dist,
-            s=30 + w_norm * 250,
-            c=w_real,
-            cmap='YlOrRd',
-            alpha=0.85,
-            edgecolors='k',
-            linewidths=0.4,
-            zorder=3,
+        fig, ax = plt.subplots(figsize=(7, 7), subplot_kw={'projection': 'polar'})
+        sc = _value_scatter(
+            ax, bearing_rad, norm_dist, values=w_real,
+            cmap='YlOrRd', size_range=(30, 280),
+            alpha=0.85, edgecolors='k', linewidths=0.4, zorder=3,
         )
         # Storm centre
         ax.scatter([0], [0], marker='*', s=200, color='royalblue',
@@ -234,51 +226,27 @@ def plot_attention_geographic(
         ax.set_title('Self-attention weights (query row)\n(polar: distance × bearing from storm)',
                      pad=15, fontsize=10)
         fig.colorbar(sc, ax=ax, label='Attention weight', shrink=0.7, pad=0.1)
+        fig.tight_layout()
+        return fig
 
-    else:  # domain
-        if fov_lat is None or fov_lon is None:
-            raise ValueError("fov_lat and fov_lon required for domain encoding.")
+    # domain
+    if fov_lat is None or fov_lon is None:
+        raise ValueError("fov_lat and fov_lon required for domain encoding.")
 
-        half_pi  = float(np.pi / 2)
-        lat_min, lat_max = fov_lat
-        lon_min, lon_max = fov_lon
-        lat_span = lat_max - lat_min
-        lon_span = lon_max - lon_min
+    lons, lats, q_lon, q_lat = _decode_domain_coords(
+        coords[mask], query_coords, fov_lat, fov_lon,
+    )
+    lat_min, lat_max = fov_lat
+    lon_min, lon_max = fov_lon
 
-        # Decode station positions
-        lats = (coords[mask, 0] / half_pi + 1) / 2 * lat_span + lat_min
-        lons = (coords[mask, 1] / half_pi + 1) / 2 * lon_span + lon_min
-
-        # Decode query position
-        q_lat = (query_coords[0] / half_pi + 1) / 2 * lat_span + lat_min
-        q_lon = (query_coords[1] / half_pi + 1) / 2 * lon_span + lon_min
-
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(9, 7))
-        else:
-            fig = ax.figure
-
-        sc = ax.scatter(
-            lons, lats,
-            s=30 + w_norm * 250,
-            c=w_real,
-            cmap='YlOrRd',
-            alpha=0.85,
-            edgecolors='k',
-            linewidths=0.4,
-            zorder=3,
-        )
-        ax.scatter([q_lon], [q_lat], marker='*', s=250, color='royalblue',
-                   zorder=5, label='Query (storm centre)')
-
-        ax.set_xlabel('Longitude')
-        ax.set_ylabel('Latitude')
-        ax.set_title('Self-attention weights (query row) (domain encoding)', fontsize=10)
-        ax.legend(fontsize=8)
-        ax.set_xlim(lon_min, lon_max)
-        ax.set_ylim(lat_min, lat_max)
-        ax.grid(True, linestyle='--', alpha=0.4)
-        fig.colorbar(sc, ax=ax, label='Attention weight')
-
-    fig.tight_layout()
-    return fig
+    return plot_scatter_overlay(
+        None, lons, lats, scatter_values=w_real,
+        extent=[lon_min, lon_max, lat_min, lat_max],
+        cmap='YlOrRd',
+        title='Self-attention weights (query row) (domain encoding)',
+        xlabel='Longitude', ylabel='Latitude',
+        colorbar_label='Attention weight',
+        scatter_size_range=(30, 280), grid=True,
+        marker_x=q_lon, marker_y=q_lat, marker_label='Query (storm centre)',
+        marker_kwargs={'s': 250}, figsize=(9, 7),
+    )

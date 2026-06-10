@@ -6,9 +6,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from unittest.mock import patch
 
-from utils.plotting.plot2d import (
-    _symmetric_clim,
-    _resolve_clim,
+from utils.plotting.fields import (
     plot_field_2d,
     plot_field_comparison_2d,
     plot_scatter_overlay,
@@ -60,74 +58,6 @@ def scatter_pts():
         rng.uniform(-np.pi / 2, np.pi / 2, n),
         rng.standard_normal(n).astype(np.float32),
     )
-
-
-# ---------------------------------------------------------------------------
-# _symmetric_clim
-# ---------------------------------------------------------------------------
-
-class TestSymmetricClim:
-
-    def test_symmetric_around_zero(self):
-        data = np.array([-3., 1., 2.])
-        lo, hi = _symmetric_clim(data)
-        assert lo == -3.
-        assert hi == 3.
-
-    def test_all_positive(self):
-        data = np.array([1., 2., 4.])
-        lo, hi = _symmetric_clim(data)
-        assert lo == -4.
-        assert hi == 4.
-
-    def test_all_negative(self):
-        data = np.array([-5., -2., -1.])
-        lo, hi = _symmetric_clim(data)
-        assert lo == -5.
-        assert hi == 5.
-
-    def test_zeros(self):
-        data = np.zeros((4, 4))
-        lo, hi = _symmetric_clim(data)
-        assert lo == 0.
-        assert hi == 0.
-
-
-# ---------------------------------------------------------------------------
-# _resolve_clim
-# ---------------------------------------------------------------------------
-
-class TestResolveClim:
-
-    def test_symmetric_mode(self):
-        data = np.array([-2., 1.])
-        lo, hi = _resolve_clim(data, symmetric=True, vmin=None, vmax=None)
-        assert lo == -2.
-        assert hi == 2.
-
-    def test_asymmetric_mode(self):
-        data = np.array([1., 3., 5.])
-        lo, hi = _resolve_clim(data, symmetric=False, vmin=None, vmax=None)
-        assert lo == 1.
-        assert hi == 5.
-
-    def test_explicit_overrides_symmetric(self):
-        data = np.array([-10., 10.])
-        lo, hi = _resolve_clim(data, symmetric=True, vmin=-1., vmax=1.)
-        assert lo == -1.
-        assert hi == 1.
-
-    def test_partial_override_vmax_only(self):
-        data = np.array([-2., 2.])
-        lo, hi = _resolve_clim(data, symmetric=True, vmin=None, vmax=5.)
-        assert lo == -2.
-        assert hi == 5.
-
-    def test_partial_override_vmin_only(self):
-        data = np.array([-2., 2.])
-        lo, hi = _resolve_clim(data, symmetric=True, vmin=-0.5, vmax=None)
-        assert lo == -0.5
-        assert hi == 2.
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +191,63 @@ class TestPlotScatterOverlay:
         assert isinstance(result, Figure)
         plt.close(result)
 
+    @patch("matplotlib.pyplot.show")
+    def test_no_field_no_values(self, mock_show):
+        x = np.linspace(-1., 1., 10)
+        y = np.linspace(-1., 1., 10)
+        result = plot_scatter_overlay(None, x, y)
+        assert isinstance(result, Figure)
+        plt.close(result)
+
+    @patch("matplotlib.pyplot.show")
+    def test_no_field_with_values_adds_colorbar(self, mock_show):
+        x = np.linspace(-1., 1., 10)
+        y = np.linspace(-1., 1., 10)
+        v = np.random.default_rng(0).standard_normal(10)
+        fig = plot_scatter_overlay(None, x, y, scatter_values=v,
+                                    colorbar_label="value")
+        assert len(fig.axes) == 2  # scatter axis + colorbar
+        plt.close(fig)
+
+    @patch("matplotlib.pyplot.show")
+    def test_no_field_sets_extent_limits(self, mock_show):
+        x = np.array([0., 1.])
+        y = np.array([0., 1.])
+        fig = plot_scatter_overlay(None, x, y, extent=[-100., -40., 0., 30.])
+        ax = fig.axes[0]
+        assert ax.get_xlim() == (-100., -40.)
+        assert ax.get_ylim() == (0., 30.)
+        plt.close(fig)
+
+    @patch("matplotlib.pyplot.show")
+    def test_size_range_scales_scatter(self, mock_show):
+        x = np.linspace(-1., 1., 5)
+        y = np.linspace(-1., 1., 5)
+        v = np.linspace(0., 1., 5)
+        fig = plot_scatter_overlay(None, x, y, scatter_values=v,
+                                    scatter_size_range=(10., 100.))
+        plt.close(fig)
+
+    @patch("matplotlib.pyplot.show")
+    def test_marker_adds_reference_point(self, mock_show):
+        x = np.linspace(-1., 1., 5)
+        y = np.linspace(-1., 1., 5)
+        fig = plot_scatter_overlay(None, x, y,
+                                    marker_x=0., marker_y=0.,
+                                    marker_label="Reference")
+        ax = fig.axes[0]
+        assert ax.get_legend() is not None
+        plt.close(fig)
+
+    @patch("matplotlib.pyplot.show")
+    def test_grid_enabled_without_field(self, mock_show):
+        x = np.linspace(-1., 1., 5)
+        y = np.linspace(-1., 1., 5)
+        fig = plot_scatter_overlay(None, x, y, grid=True)
+        ax = fig.axes[0]
+        assert any(line.get_visible() for line in ax.get_xgridlines())
+        plt.close(fig)
+
 
 # ---------------------------------------------------------------------------
 # plot_heatmap
@@ -319,6 +306,30 @@ class TestPlotHeatmap:
         result = plot_heatmap(np.eye(3))
         assert isinstance(result, Figure)
         plt.close(result)
+
+    @patch("matplotlib.pyplot.show")
+    def test_annotate_uses_contrast_color(self, mock_show):
+        matrix = np.array([[0.0, 1.0], [0.5, 0.51]])
+        fig = plot_heatmap(matrix, vmin=0.0, vmax=1.0, annotate=True)
+        ax = fig.axes[0]
+        colors = {t.get_text(): t.get_color() for t in ax.texts}
+        assert colors["0.00"] == "black"
+        assert colors["1.00"] == "white"
+        assert colors["0.50"] == "black"
+        assert colors["0.51"] == "white"
+        plt.close(fig)
+
+    @patch("matplotlib.pyplot.show")
+    def test_annotate_contrast_uses_resolved_clim(self, mock_show):
+        matrix = np.array([[0.0, 10.0], [6.0, 4.0]])
+        fig = plot_heatmap(matrix, annotate=True)
+        ax = fig.axes[0]
+        colors = {t.get_text(): t.get_color() for t in ax.texts}
+        assert colors["0.00"] == "black"
+        assert colors["10.00"] == "white"
+        assert colors["6.00"] == "white"
+        assert colors["4.00"] == "black"
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------

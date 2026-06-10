@@ -6,8 +6,8 @@ All tests use synthetic in-memory data — no disk access required.
 Coverage
 --------
 TestPlotConfusionMatrix      returns Figure; normalized values in [0,1];
-                              raw-count mode; existing axes accepted
-TestPlotClassMetrics         returns Figure; existing axes accepted
+                              raw-count mode
+TestPlotClassMetrics         returns Figure
 TestExtractAttentionWeights  shape (B, H, N); values finite; non-negative
 TestPlotAttentionGeographic  unit_circle returns Figure; domain returns Figure;
                               domain raises without fov
@@ -106,12 +106,6 @@ class TestPlotConfusionMatrix:
         assert isinstance(fig, plt.Figure)
         plt.close('all')
 
-    def test_accepts_existing_axes(self):
-        fig0, ax = plt.subplots()
-        fig_ret  = plot_confusion_matrix(self._make_cm(), CLASS_NAMES, ax=ax)
-        assert isinstance(fig_ret, plt.Figure)
-        plt.close('all')
-
 
 # ---------------------------------------------------------------------------
 # TestPlotClassMetrics
@@ -126,12 +120,6 @@ class TestPlotClassMetrics:
     def test_returns_figure(self):
         fig = plot_class_metrics(self._make_metrics(), CLASS_NAMES)
         assert isinstance(fig, plt.Figure)
-        plt.close('all')
-
-    def test_accepts_existing_axes(self):
-        fig0, ax = plt.subplots()
-        fig_ret  = plot_class_metrics(self._make_metrics(), CLASS_NAMES, ax=ax)
-        assert isinstance(fig_ret, plt.Figure)
         plt.close('all')
 
 

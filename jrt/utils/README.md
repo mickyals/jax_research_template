@@ -58,27 +58,48 @@ Functions for generating spatial coordinate samples within a domain — used for
 
 All plotting functions return a `matplotlib.Figure` (or a tuple `(fig, ...)` for comparison plots) and never call `plt.show()`. This makes them safe to use in headless training loops — pass the returned figure directly to `logger.log_figure(key, fig, step)`.
 
-### `plot1d.py`
+### `aggregation.py`
+
+Array preparation for plotting — masked reductions, point binning, smoothing, and volume slicing. No matplotlib imports; outputs are plain arrays (or array + extent) ready for the renderers below. A function lives here only if it encodes a decision (mask semantics, empty-bin convention, window centering) — trivial reductions stay inline at call sites.
 
 | Function | Description |
 |----------|-------------|
-| `plot_losses(losses, title, window, xlabel, ylabel)` | Smoothed loss curve with optional rolling window |
+| `masked_mean_np(x, mask, axis=None)` / `masked_mean_jax(...)` | Mean over `mask`-True entries; 0.0 (not NaN) when nothing is valid |
+| `bin_to_grid_np(x, y, values, extent, shape, reduce="mean")` / `bin_to_grid_jax(...)` | Scattered `(x, y, value)` points → 2D grid; `reduce` ∈ {"mean", "count", "max"}; empty cells are NaN (mean/max) or 0 (count); returns `(grid, extent)`. `_np` drops out-of-range points, `_jax` clips them to the nearest edge bin (static shape) |
+| `rolling_mean_np(values, window)` | Centered moving average, output aligned to input indices (window shrinks near edges) |
+| `take_slice_np(volume, axis, index)` | Bounds-checked 2D slice from an N-D volume |
 
-### `plot2d.py`
+### `_style.py`
+
+Private rendering helpers shared by `curves.py`, `fields.py`, and `volumes.py` — not part of the public API. `DEFAULT_CMAP`, `_symmetric_clim`/`_resolve_clim` (colormap limit resolution), `_imshow_with_colorbar` (image+colorbar core), `_comparison_stats` (residual + shared clims + MSE for target/prediction/residual panels), `_contrast_color` (white/black text colour for annotation contrast against a heatmap cell), `_value_scatter` (scatter points optionally coloured/sized by a value array).
+
+### `curves.py`
+
+Charts with a value axis — loss curves and grouped bar charts.
+
+| Function | Description |
+|----------|-------------|
+| `plot_losses(losses, title, window, xlabel, ylabel)` | Smoothed loss curve; smoothing via `aggregation.rolling_mean_np` |
+| `plot_grouped_bars(values, categories, ylabel, title, ylim, colors, ...)` | Grouped bar chart — one group per category, one bar per series (e.g. precision/recall/F1 per class) |
+
+### `fields.py`
+
+2D images in index/abstract coordinates. Mollweide stays here (generic matplotlib projection, any sphere) — Earth-specific maps with coastlines/borders live in `geographic.py` (not yet implemented).
 
 | Function | Description |
 |----------|-------------|
 | `plot_field_2d(field, ...)` | 2D scalar field (imshow) |
-| `plot_field_comparison_2d(pred, target, ...)` | Side-by-side prediction vs target + residual; returns `(fig, axes)` |
-| `plot_scatter_overlay(field, coords, values, ...)` | Field background with scattered observation overlay |
-| `plot_heatmap(matrix, xlabels, ylabels, ...)` | Annotated heatmap (confusion matrices, correlation matrices) |
+| `plot_field_comparison_2d(pred, target, ...)` | Side-by-side prediction vs target + residual; returns `(fig, resid, mse)` |
+| `plot_scatter_overlay(field, scatter_x, scatter_y, scatter_values, ...)` | Scattered points, optionally over a 2D field background. `field=None` gives a standalone scatter plot with its own colorbar (driven by `scatter_values`). Optional `marker_x`/`marker_y`/`marker_label` draws a single highlighted reference point (e.g. a query location); `scatter_size_range` scales marker size by value; `grid` adds gridlines when there's no field |
+| `plot_heatmap(matrix, row_labels, col_labels, ..., annotate=True)` | Annotated heatmap (confusion matrices, correlation matrices); annotation text colour auto-contrasts against each cell via `_contrast_color` |
 | `plot_mollweide(field, lats, lons, ...)` | Global Mollweide projection |
-| `plot_mollweide_comparison(pred, target, ...)` | Side-by-side Mollweide; returns `(fig, axes)` |
+| `plot_mollweide_comparison(pred, target, ...)` | Side-by-side Mollweide; returns `(fig, resid, mse)` |
 
-### `plot3d.py`
+### `volumes.py`
 
 | Function | Description |
 |----------|-------------|
-| `plot_volume_slice(volume, ...)` | 2D slice through a 3D volume; returns `(fig, slice_ax)` |
-| `plot_volume_comparison(pred, target, ...)` | Volume slice comparison + residual; returns `(fig, resid, mse)` |
+| `plot_volume_comparison(pred, target, slice_index, axis, ...)` | Slices both volumes via `aggregation.take_slice_np`, then renders target/prediction/residual; returns `(fig, resid, mse)` |
 | `plot_surface_3d(Z, X, Y, ...)` | 3D surface plot |
+
+For a single slice without a comparison, use `aggregation.take_slice_np` + `fields.plot_field_2d`.
