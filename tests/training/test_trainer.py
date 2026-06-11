@@ -571,6 +571,37 @@ class TestCheckpointing:
 
 
 # ---------------------------------------------------------------------------
+# TestManifest
+# ---------------------------------------------------------------------------
+
+class TestManifest:
+
+    def test_writes_json_next_to_checkpoints(self, trainer):
+        manifest = {"train": {"seasons": [2019], "n_rows": 5}}
+        trainer.write_manifest(manifest)
+        path = trainer._checkpoint_dir / "manifest.json"
+        assert path.exists()
+        with open(path) as fh:
+            assert json.load(fh) == manifest
+
+    def test_custom_filename(self, trainer):
+        trainer.write_manifest({"a": 1}, filename="split_manifest.json")
+        assert (trainer._checkpoint_dir / "split_manifest.json").exists()
+
+    def test_pushes_to_logger_hparams(self, trainer):
+        trainer.write_manifest({"train": {"n_rows": 5}})
+        with open(trainer.logger.log_dir / "hparams.json") as fh:
+            hparams = json.load(fh)
+        assert hparams["manifest"] == {"train": {"n_rows": 5}}
+
+    def test_creates_checkpoint_dir_if_missing(self, tmp_path, model):
+        cfg = _base_config(tmp_path, checkpoint_dir=str(tmp_path / "fresh_ckpts"))
+        t = Trainer(model, _METRICS, cfg)
+        t.write_manifest({"x": 1})
+        assert (t._checkpoint_dir / "manifest.json").exists()
+
+
+# ---------------------------------------------------------------------------
 # TestFit
 # ---------------------------------------------------------------------------
 

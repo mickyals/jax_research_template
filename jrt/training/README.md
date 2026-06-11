@@ -32,6 +32,7 @@ test_metrics = trainer.test(dm.test_loader())
 - Orbax checkpointing of both `best/` and `latest/` states
 - `num_steps` budget as an alternative to `num_epochs`
 - Epoch callbacks: `fit(..., epoch_callbacks=[fn])` where each `fn(state, epoch, global_step)` is called after validation
+- Run manifests: `trainer.write_manifest(dm.manifest())` writes `manifest.json` under `checkpoint_dir` (the durable record of what the run trained on — e.g. resolved split membership) and pushes a copy to the logger via `log_hyperparams`
 
 **Config keys** (YAML `trainer:` block):
 
@@ -64,7 +65,8 @@ test_metrics = trainer.test(dm.test_loader())
 ├── checkpoints/
 │   ├── best/              Best validation state (orbax pytree)
 │   ├── latest/            End-of-epoch state for --resume
-│   └── latest_metadata.json
+│   ├── latest_metadata.json
+│   └── manifest.json      Run manifest (resolved data split etc.), via write_manifest()
 └── logs/
     ├── hparams.json
     ├── figures/           Saved by NullLogger

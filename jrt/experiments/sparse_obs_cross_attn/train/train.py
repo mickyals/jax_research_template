@@ -311,6 +311,10 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # Log full config so every run is reproducible from its artifact
     trainer.log_hyperparams(config)
 
+    # Persist the resolved data split (manifest.json next to checkpoints +
+    # logger copy) — the durable answer to "what did this run train on"
+    trainer.write_manifest(dm.manifest())
+
     # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------

@@ -6,7 +6,8 @@ DataModule: the interface between raw datasets and the training loop.
 Responsibilities
 ----------------
 - Load one or more datasets from a config dict (from the YAML  data:  block)
-- Split each into train / val / test using the dataset's own split() method
+- Split each into train / val / test from the required data.split config
+  block (disjoint per-split column values, validated up front)
 - Concatenate multiple datasets along the sample axis
 - Normalise features and targets using training-set statistics only
   (no leakage from val / test into the normalisation fit)
@@ -44,6 +45,11 @@ Single dataset
       target_norm:   standard
       train_shuffle: true       # optional; overrides train_loader default
       val_shuffle:   false      # optional; overrides val_loader default
+      split:
+        column: SEASON          # any column present in the dataset
+        train: {values: [2005, ..., 2020]}
+        val:   {values: [2021, 2022]}
+        test:  {values: [2023, 2024, 2025]}
 
 Multiple datasets
     data:
@@ -54,6 +60,15 @@ Multiple datasets
       feature_cols: [LAT, LON, STORM_SPEED, STORM_DIR]
       feature_norm: standard
       target_norm:  standard
+      split:
+        column: SEASON
+        train: {values: [...]}
+        val:   {values: [...]}
+        test:  {values: [...]}
+
+split is required and is shared across all sources — every source must
+have the named column. Splitting is a row filter (dataset.filter_column),
+so 'train'/'val'/'test' values must be disjoint (validated up front).
 
 Positional encoding  (optional; applied after to_Xy, before normalisation)
     data:
@@ -88,6 +103,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from datasets.batching import as_batches, epoch_iterator, num_batches
+from datasets.splitting import validate_disjoint_groups
 from utils.jax_core.helpers import create_rng, minmax_norm, standardise
 
 
@@ -246,13 +262,15 @@ def _build_dataset(ds_config: dict):
     return DATASETS[name](ds_config)
 
 
-def _split_dataset(dataset, which: str):
-    """Call dataset.split(which).
+def _split_dataset(dataset, split_config: dict, which: str):
+    """Filter dataset to the rows belonging to split `which`.
 
     Parameters
     ----------
     dataset : NpzDataset subclass
-        A dataset instance that implements split().
+        A dataset instance that implements filter_column().
+    split_config : dict
+        The data.split block — see module docstring for schema.
     which : str
         'train', 'val', or 'test'.
 
@@ -261,7 +279,9 @@ def _split_dataset(dataset, which: str):
     NpzDataset
         The requested split.
     """
-    return dataset.split(which)
+    column = split_config["column"]
+    values = split_config[which]["values"]
+    return dataset.filter_column(column, values)
 
 
 def _apply_norm(
@@ -486,6 +506,15 @@ class BaseDataModule(ABC):
         """Invert target normalisation to recover physical units."""
         return _invert_norm(np.asarray(y), self.norm_stats.get("target", {"method": "none"}))
 
+    def manifest(self) -> dict:
+        """JSON-serialisable summary of what this run trained on.
+
+        Default is empty. Subclasses that resolve data splits (e.g. via a
+        splits resolver) should override this to return the resolved
+        seasons/SIDs/row counts per split — see Trainer.write_manifest.
+        """
+        return {}
+
     def summary(self) -> None:
         """Print a human-readable overview of the prepared splits."""
         print(f"{self.__class__.__name__}: no summary implemented.")
@@ -498,9 +527,9 @@ class BaseDataModule(ABC):
 class DataModule(BaseDataModule):
     """Coordinates one or more datasets into train / val / test splits.
 
-    Handles loading, concatenation, and normalisation.  Dataset-specific
-    split logic lives in each dataset class — the DataModule just calls
-    dataset.split().
+    Handles loading, concatenation, and normalisation.  Splitting is a
+    generic column-value filter (see data.split in the module docstring),
+    applied via dataset.filter_column().
 
     Create via the classmethod:
         dm = DataModule.from_config(config)
@@ -540,6 +569,11 @@ class DataModule(BaseDataModule):
         tgt_norm     = config.get("target_norm",  "standard")
         enc_mode     = config.get("position_encoding_mode")
 
+        split_config = config["split"]
+        validate_disjoint_groups({
+            name: split_config[name]["values"] for name in ("train", "val", "test")
+        })
+
         # Normalise to a list of sub-configs
         if "datasets" in config:
             ds_configs = [
@@ -555,9 +589,9 @@ class DataModule(BaseDataModule):
 
         for ds_cfg in ds_configs:
             ds       = _build_dataset(ds_cfg)
-            train_ds = _split_dataset(ds, "train")
-            val_ds   = _split_dataset(ds, "val")
-            test_ds  = _split_dataset(ds, "test")
+            train_ds = _split_dataset(ds, split_config, "train")
+            val_ds   = _split_dataset(ds, split_config, "val")
+            test_ds  = _split_dataset(ds, split_config, "test")
 
             X_tr, y_tr = train_ds.to_Xy(target_cols, feature_cols)
             X_va, y_va = val_ds.to_Xy(target_cols, feature_cols)
@@ -657,6 +691,24 @@ class DataModule(BaseDataModule):
         f_m = self._norm_stats["feature"]["method"]
         t_m = self._norm_stats["target"]["method"]
         print(f"  feature_norm={f_m}   target_norm={t_m}")
+        split_config = self._config["split"]
+        print(f"  split column={split_config['column']!r}")
+        for name in ("train", "val", "test"):
+            print(f"    {name:<6}: values={split_config[name]['values']}")
+
+    def manifest(self) -> dict:
+        """Resolved split values and row counts per split.
+
+        See BaseDataModule.manifest for how this is consumed by Trainer.
+        """
+        split_config = self._config["split"]
+        manifest: dict = {"split": {"column": split_config["column"]}}
+        for name, key in [("train", "_train"), ("val", "_val"), ("test", "_test")]:
+            manifest[name] = {
+                "values": split_config[name]["values"],
+                "n_rows": int(getattr(self, key)["X"].shape[0]),
+            }
+        return manifest
 
 
 # ---------------------------------------------------------------------------

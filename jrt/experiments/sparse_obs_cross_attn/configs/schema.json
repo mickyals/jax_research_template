@@ -8,14 +8,46 @@
 
     "data": {
       "type": "object",
-      "required": ["ibtracs_path", "insitu_obs_path", "insitu_meta_path"],
+      "required": ["ibtracs_path", "insitu_obs_path", "insitu_meta_path", "split"],
       "additionalProperties": true,
       "properties": {
 
-        "ibtracs_path":       { "type": "string" },
-        "multi_storm_path":   { "type": ["string", "null"] },
-        "insitu_obs_path":    { "type": "string" },
-        "insitu_meta_path":   { "type": "string" },
+        "ibtracs_path":          { "type": "string" },
+        "multi_storm_path":      { "type": ["string", "null"] },
+        "ibtracs_sid_meta_path": { "type": ["string", "null"] },
+        "insitu_obs_path":       { "type": "string" },
+        "insitu_meta_path":      { "type": "string" },
+
+        "split": {
+          "type": "object",
+          "required": ["train", "val", "test"],
+          "additionalProperties": true,
+          "properties": {
+            "strategy": { "type": "string", "enum": ["season"] },
+            "train": {
+              "type": "object",
+              "required": ["seasons"],
+              "properties": {
+                "seasons": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+              }
+            },
+            "val": {
+              "type": "object",
+              "required": ["seasons"],
+              "properties": {
+                "seasons": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+              }
+            },
+            "test": {
+              "type": "object",
+              "required": ["seasons"],
+              "properties": {
+                "seasons":   { "type": "array", "minItems": 1, "items": { "type": "integer" } },
+                "hard_test": { "type": "string", "enum": ["multi_storm"] }
+              }
+            }
+          }
+        },
 
         "reliability_levels": {
           "type": "array",

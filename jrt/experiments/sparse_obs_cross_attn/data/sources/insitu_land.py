@@ -244,44 +244,27 @@ class InsituLandDataset:
         )
 
     # ------------------------------------------------------------------
-    # Temporal split
+    # Temporal filtering
     # ------------------------------------------------------------------
 
-    def split(self, which: str) -> InsituLandDataset:
-        """Return a split filtered to rows within a given season range.
+    def filter_years(self, years: list[int]) -> InsituLandDataset:
+        """Return obs rows whose calendar year (from report_timestamp) is in years.
 
-        Uses the same year boundaries as IBTrACSDataset. Year is derived
-        from Unix-ns timestamps.
+        Generalized year-list filter primitive — policy (which years belong
+        to which split) lives in the experiment's split resolver, not here.
 
         Parameters
         ----------
-        which : 'train' | 'val' | 'test'
+        years : list[int]
 
         Returns
         -------
         InsituLandDataset
         """
-        from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
-            IBTRACS_TRAIN_SEASONS,
-            IBTRACS_VAL_SEASONS,
-            IBTRACS_TEST_SEASONS,
-        )
-
-        season_map = {
-            'train': IBTRACS_TRAIN_SEASONS,
-            'val':   IBTRACS_VAL_SEASONS,
-            'test':  IBTRACS_TEST_SEASONS,
-        }
-        if which not in season_map:
-            raise ValueError(
-                f"Unknown split '{which}'. Choose from: 'train', 'val', 'test'."
-            )
-
-        years = _timestamps_to_years(self._timestamps)
-        mask  = np.isin(years, season_map[which])
+        obs_years = _timestamps_to_years(self._timestamps)
+        mask = np.isin(obs_years, years)
 
         filtered_obs = {k: v[mask] for k, v in self._obs.items()}
-        filtered_int = self._obs_station_int[mask]
 
         new_unique, new_inv = np.unique(filtered_obs['primary_station_id'],
                                         return_inverse=True)

@@ -94,7 +94,31 @@ def _make_ibtracs_npz(tmp_path, n_per_season=8):
     ms_path = tmp_path / 'ibtracs_multi_storm_times.npz'
     np.savez(ms_path, ISO_TIME=iso_times[:3], n_active=np.full(3, 2, dtype=np.int32))
 
-    return npz_path, ms_path, n, iso_times
+    return npz_path, ms_path, n, iso_times, sids
+
+
+def _make_sid_meta_npz(tmp_path, sids, n_per_sid=4):
+    """Synthetic ibtracs_sid_meta.npz matching _make_ibtracs_npz's SIDs."""
+    unique_sids = list(dict.fromkeys(sids))   # preserve order, dedupe
+    n = len(unique_sids)
+    data = {
+        'SID':         np.array(unique_sids),
+        'NAME':        np.array([f'STORM_{s}' for s in unique_sids]),
+        'SEASON':      np.array([int(s[:4]) for s in unique_sids], dtype=np.int32),
+        'BASIN':       np.full(n, 'NA'),
+        'SUBBASIN':    np.full(n, 'CS'),
+        'USA_AGENCY':  np.full(n, 'hurdat_atl'),
+        'USA_ATCF_ID': np.array([f'AL{i:02d}' for i in range(n)]),
+        'peak_wind':   np.full(n, 50.0, dtype=np.float32),
+        'peak_sshs':   np.full(n, 1, dtype=np.int32),
+        'min_pres':    np.full(n, 99000.0, dtype=np.float32),
+        'n_timesteps': np.full(n, n_per_sid, dtype=np.int32),
+        'track_start': np.full(n, 0, dtype=np.int64),
+        'track_end':   np.full(n, 0, dtype=np.int64),
+    }
+    path = tmp_path / 'ibtracs_sid_meta.npz'
+    np.savez(path, **data)
+    return path
 
 
 @pytest.fixture
@@ -112,6 +136,12 @@ def ds(ibtracs_paths):
 def ds_no_multi(ibtracs_paths):
     npz, *_ = ibtracs_paths
     return IBTrACSDataset(npz)
+
+
+@pytest.fixture
+def sid_meta_path(tmp_path, ibtracs_paths):
+    *_, sids = ibtracs_paths
+    return _make_sid_meta_npz(tmp_path, sids, n_per_sid=4)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +211,7 @@ class TestSeasonConstants:
 class TestIBTrACSInit:
 
     def test_len(self, ds, ibtracs_paths):
-        _, _, n, _ = ibtracs_paths
+        _, _, n, _, _ = ibtracs_paths
         assert len(ds) == n
 
     def test_seasons_dtype(self, ds):
@@ -194,7 +224,7 @@ class TestIBTrACSInit:
         assert ds.n_sids == 6   # 2 SIDs per season × 3 seasons
 
     def test_is_multi_storm_shape(self, ds, ibtracs_paths):
-        _, _, n, _ = ibtracs_paths
+        _, _, n, _, _ = ibtracs_paths
         assert ds.is_multi_storm.shape == (n,)
         assert ds.is_multi_storm.dtype == bool
 
@@ -237,41 +267,48 @@ class TestFiltering:
     def test_filter_returns_ibtracs_type(self, ds):
         assert type(ds.filter_seasons([2019])) is IBTrACSDataset
 
+    def test_filter_sids(self, ds):
+        sub = ds.filter_sids(['2019A'])
+        assert len(sub) == 4
+        assert set(sub['SID'].tolist()) == {'2019A'}
+
+    def test_filter_sids_multiple(self, ds):
+        sub = ds.filter_sids(['2019A', '2021B'])
+        assert set(sub['SID'].tolist()) == {'2019A', '2021B'}
+
+    def test_filter_sids_returns_ibtracs_type(self, ds):
+        assert type(ds.filter_sids(['2019A'])) is IBTrACSDataset
+
 
 # ---------------------------------------------------------------------------
-# Splits
+# SID metadata validation
 # ---------------------------------------------------------------------------
 
-class TestSplits:
+class TestSidMeta:
 
-    def test_train_seasons(self, ds):
-        tr = ds.split('train')
-        assert set(tr.seasons.tolist()).issubset(set(IBTRACS_TRAIN_SEASONS))
+    def test_loads_with_valid_meta(self, ibtracs_paths, sid_meta_path):
+        npz, ms, *_ = ibtracs_paths
+        ds = IBTrACSDataset(npz, ms, sid_meta_path)
+        assert ds._sid_meta is not None
 
-    def test_train_no_multi_storm(self, ds):
-        assert ds.split('train').is_multi_storm.sum() == 0
+    def test_raises_on_sid_set_mismatch(self, tmp_path, ibtracs_paths):
+        npz, ms, n, iso_times, sids = ibtracs_paths
+        bad_meta = _make_sid_meta_npz(tmp_path, sids + ['9999Z'], n_per_sid=4)
+        with pytest.raises(ValueError, match='SID set'):
+            IBTrACSDataset(npz, ms, bad_meta)
 
-    def test_val_seasons(self, ds):
-        val = ds.split('val')
-        assert set(val.seasons.tolist()).issubset(set(IBTRACS_VAL_SEASONS))
+    def test_raises_on_n_timesteps_mismatch(self, tmp_path, ibtracs_paths):
+        npz, ms, n, iso_times, sids = ibtracs_paths
+        bad_meta = _make_sid_meta_npz(tmp_path, sids, n_per_sid=999)
+        with pytest.raises(ValueError, match='n_timesteps'):
+            IBTrACSDataset(npz, ms, bad_meta)
 
-    def test_test_seasons(self, ds):
-        tst = ds.split('test')
-        assert set(tst.seasons.tolist()).issubset(set(IBTRACS_TEST_SEASONS))
+    def test_filter_preserves_sid_meta(self, ibtracs_paths, sid_meta_path):
+        npz, ms, *_ = ibtracs_paths
+        ds = IBTrACSDataset(npz, ms, sid_meta_path)
+        sub = ds.filter_seasons([2019])
+        assert sub._sid_meta is not None
 
-    def test_hard_test_all_multi(self, ds):
-        ht = ds.split('hard_test')
-        assert ht.is_multi_storm.all()
-        assert len(ht) == 3
+    def test_no_validation_without_sid_meta_path(self, ds):
+        assert ds._sid_meta is None
 
-    def test_unknown_split_raises(self, ds):
-        with pytest.raises(ValueError, match='Unknown split'):
-            ds.split('bogus')
-
-    def test_split_without_multi_path_warns(self, ds_no_multi):
-        with pytest.warns(UserWarning, match='multi_storm_path'):
-            result = ds_no_multi.split('train')
-        assert len(result) > 0
-
-    def test_split_returns_ibtracs_type(self, ds):
-        assert type(ds.split('train')) is IBTrACSDataset

@@ -3,17 +3,23 @@ experiments/sparse_obs_cross_attn/data/sources/ibtracs.py
 
 IBTrACSDataset: NpzDataset subclass for IBTrACS best-track data.
 
-Column constants and season splits live here alongside the class so that
+Column constants and label mappings live here alongside the class so that
 imports are self-contained:
 
     from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
-        IBTrACSDataset, IBTRACS_TRAIN_SEASONS, SSHS_TO_CLASS, N_CLASSES,
+        IBTrACSDataset, SSHS_TO_CLASS, N_CLASSES,
     )
+
+Splitting is not a dataset concern: this class exposes filter primitives
+(filter_seasons, filter_sids, filter_single_storm, filter_multi_storm) and
+the split policy lives in the data.split config block, resolved by
+experiments.sparse_obs_cross_attn.data.splits.resolve_splits. The
+IBTRACS_*_SEASONS constants remain only as the reference values of the
+original split (used by the config defaults and the resolver's referee test).
 """
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -76,9 +82,19 @@ class IBTrACSDataset(NpzDataset):
     multi_storm_path : str or Path, optional
         Path to ibtracs_multi_storm_times.npz. Required for split() and
         filter_single_storm() / filter_multi_storm().
+    sid_meta_path : str or Path, optional
+        Path to ibtracs_sid_meta.npz (per-storm metadata table). When given,
+        the file is validated against npz_path on load: the SID set must
+        match exactly and n_timesteps must sum to the row count. Mismatches
+        raise ValueError immediately (staleness guard).
     """
 
-    def __init__(self, npz_path: str | Path, multi_storm_path: Optional[str | Path] = None,) -> None:
+    def __init__(
+        self,
+        npz_path: str | Path,
+        multi_storm_path: Optional[str | Path] = None,
+        sid_meta_path: Optional[str | Path] = None,
+    ) -> None:
         super().__init__(npz_path)
 
 
@@ -89,6 +105,14 @@ class IBTrACSDataset(NpzDataset):
         if self.multi_storm_path is not None:
             ms = np.load(self.multi_storm_path, allow_pickle=True)
             self._multi_times = ms['ISO_TIME']   # int64 Unix-ns
+
+        self.sid_meta_path: Optional[Path] = (Path(sid_meta_path) if sid_meta_path is not None else None)
+        self._sid_meta: Optional[dict[str, np.ndarray]] = None
+
+        if self.sid_meta_path is not None:
+            sid_meta_raw = np.load(self.sid_meta_path, allow_pickle=True)
+            self._sid_meta = {k: sid_meta_raw[k] for k in sid_meta_raw.files}
+            self._validate_sid_meta()
 
     # ------------------------------------------------------------------
     # _from_data / _mask_to_dataset — carry multi-storm state through filters
@@ -103,6 +127,8 @@ class IBTrACSDataset(NpzDataset):
         obj._n               = len(next(iter(data.values()))) if data else 0
         obj.multi_storm_path = extra_attrs.get('multi_storm_path', None)
         obj._multi_times     = extra_attrs.get('_multi_times', None)
+        obj.sid_meta_path    = extra_attrs.get('sid_meta_path', None)
+        obj._sid_meta        = extra_attrs.get('_sid_meta', None)
         return obj
 
     def _mask_to_dataset(self, mask: np.ndarray) -> IBTrACSDataset:
@@ -111,7 +137,40 @@ class IBTrACSDataset(NpzDataset):
             npz_path         = self.npz_path,
             multi_storm_path = self.multi_storm_path,
             _multi_times     = self._multi_times,
+            sid_meta_path    = self.sid_meta_path,
+            _sid_meta        = self._sid_meta,
         )
+
+    # ------------------------------------------------------------------
+    # SID metadata validation
+    # ------------------------------------------------------------------
+
+    def _validate_sid_meta(self) -> None:
+        """Fail loudly if ibtracs_sid_meta.npz is stale relative to this file.
+
+        Checks (decision 1, plan-data-splits-sampling):
+          - SID set in sid_meta matches the SID set in this dataset exactly
+          - n_timesteps sums to this dataset's row count
+        """
+        meta_sids = set(np.unique(self._sid_meta['SID']).tolist())
+        data_sids = set(np.unique(self._data['SID']).tolist())
+        if meta_sids != data_sids:
+            missing = data_sids - meta_sids
+            extra   = meta_sids - data_sids
+            raise ValueError(
+                f"{self.sid_meta_path.name}: SID set does not match "
+                f"{self.npz_path.name}. "
+                f"Missing from sid_meta: {len(missing)}. "
+                f"Extra in sid_meta: {len(extra)}."
+            )
+
+        meta_n_timesteps = int(self._sid_meta['n_timesteps'].sum())
+        if meta_n_timesteps != self._n:
+            raise ValueError(
+                f"{self.sid_meta_path.name}: n_timesteps sums to "
+                f"{meta_n_timesteps}, but {self.npz_path.name} has "
+                f"{self._n} rows."
+            )
 
     # ------------------------------------------------------------------
     # Properties
@@ -154,6 +213,10 @@ class IBTrACSDataset(NpzDataset):
         """
         return self.filter_column('SEASON', [float(s) for s in seasons])
 
+    def filter_sids(self, sids: list[str]) -> IBTrACSDataset:
+        """Keep rows whose SID is in sids."""
+        return self.filter_column('SID', sids)
+
     def filter_single_storm(self) -> IBTrACSDataset:
         """Remove rows where more than one storm was active simultaneously."""
         return self._mask_to_dataset(~self.is_multi_storm)
@@ -161,47 +224,6 @@ class IBTrACSDataset(NpzDataset):
     def filter_multi_storm(self) -> IBTrACSDataset:
         """Keep only rows where more than one storm was active simultaneously."""
         return self._mask_to_dataset(self.is_multi_storm)
-
-    # ------------------------------------------------------------------
-    # Splits
-    # ------------------------------------------------------------------
-
-    def split(self, which: str) -> IBTrACSDataset:
-        """Return a predefined data split.
-
-        Parameters
-        ----------
-        which : 'train' | 'val' | 'test' | 'hard_test'
-            train / val / test : season-based, single-storm rows only.
-            hard_test          : multi-storm rows (requires multi_storm_path).
-
-        Returns
-        -------
-        IBTrACSDataset
-        """
-        if which == 'hard_test':
-            return self.filter_multi_storm()
-
-        season_map = {
-            'train': IBTRACS_TRAIN_SEASONS,
-            'val':   IBTRACS_VAL_SEASONS,
-            'test':  IBTRACS_TEST_SEASONS,
-        }
-        if which not in season_map:
-            raise ValueError(
-                f"Unknown split '{which}'. "
-                "Choose from: 'train', 'val', 'test', 'hard_test'."
-            )
-        if self._multi_times is None:
-            warnings.warn(
-                f"{self.__class__.__name__}: multi_storm_path not provided. "
-                "Multi-storm timesteps are NOT excluded from this split. "
-                "Pass multi_storm_path for clean train/val/test splits.",
-                UserWarning,
-                stacklevel=2,
-            )
-            return self.filter_seasons(season_map[which])
-        return self.filter_seasons(season_map[which]).filter_single_storm()
 
     # ------------------------------------------------------------------
     # Summary

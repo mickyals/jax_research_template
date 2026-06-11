@@ -201,15 +201,27 @@ class TestGetObsNear:
 
 
 # ---------------------------------------------------------------------------
-# Temporal split
+# Temporal filtering — filter_years
 # ---------------------------------------------------------------------------
 
-class TestSplit:
+class TestFilterYears:
 
-    def test_split_returns_insitu_type(self, ds):
-        sub = ds.split('train')
-        assert type(sub) is InsituLandDataset
+    def test_returns_insitu_type(self, ds):
+        assert type(ds.filter_years([2019])) is InsituLandDataset
 
-    def test_unknown_split_raises(self, ds):
-        with pytest.raises(ValueError, match='Unknown split'):
-            ds.split('bad_split')
+    def test_keeps_matching_year(self, ds):
+        # All synthetic obs are 2019-09-01 .. 2019-09-01 (12 hours)
+        sub = ds.filter_years([2019])
+        assert len(sub.timestamps) == len(ds.timestamps)
+
+    def test_excludes_non_matching_year(self, ds):
+        sub = ds.filter_years([2020])
+        assert len(sub.timestamps) == 0
+
+    def test_multiple_years_union(self, ds):
+        sub = ds.filter_years([2019, 2020])
+        assert len(sub.timestamps) == len(ds.timestamps)
+
+    def test_n_stations_after_filter(self, ds):
+        sub = ds.filter_years([2019])
+        assert sub.n_stations == ds.n_stations

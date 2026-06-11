@@ -102,8 +102,22 @@ data:
   # --- Source files ---
   ibtracs_path:           E:/sparse_obs/ibtracs/ibtracs_full.npz
   multi_storm_path:       E:/sparse_obs/ibtracs/ibtracs_multi_storm_times.npz
+  ibtracs_sid_meta_path:  E:/sparse_obs/ibtracs/ibtracs_sid_meta.npz
   insitu_obs_path:        E:/sparse_obs/insitu-land/insitu_land_clean.npz
   insitu_meta_path:       E:/sparse_obs/insitu-land/insitu_land_station_meta.npz
+
+  # --- Train/val/test split ---
+  # Must match tc_classifier.yaml — see data/splits.py (season strategy).
+  split:
+    strategy: season
+    train:
+      seasons: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014,
+                2015, 2016, 2017, 2018, 2019, 2020]
+    val:
+      seasons: [2021, 2022]
+    test:
+      seasons: [2023, 2024, 2025]
+      hard_test: multi_storm
 
   # --- Station filtering ---
   reliability_levels:     [always_active, mostly_active]

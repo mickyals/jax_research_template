@@ -548,6 +548,28 @@ class Trainer:
         """Log a hyperparameter dict to the experiment logger."""
         self._logger.log_hyperparams(params)
 
+    def write_manifest(self, manifest: dict, filename: str = "manifest.json") -> None:
+        """Write a run manifest next to checkpoints and push it to the logger.
+
+        The file under checkpoint_dir is the source of truth; the logger
+        copy (via log_hyperparams) is a convenience for browsing alongside
+        the run's config.
+
+        Parameters
+        ----------
+        manifest : dict
+            JSON-serialisable summary of what this run trained on, e.g.
+            from DataModule.manifest().
+        filename : str
+            Name of the JSON file written under checkpoint_dir. Default
+            'manifest.json'.
+        """
+        self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        path = self._checkpoint_dir / filename
+        with open(path, "w") as fh:
+            json.dump(manifest, fh, indent=2, default=str)
+        self._logger.log_hyperparams({"manifest": manifest})
+
     def init_state(self, exmp_batch: dict) -> TrainState:
         """Initialise model and optimizer state from one example batch.
 

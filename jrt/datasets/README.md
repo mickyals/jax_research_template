@@ -29,7 +29,7 @@ df = ds.to_dataframe()       # pandas DataFrame
 X, y = ds.to_Xy(feature_cols=["LAT", "LON"], target_cols=["USA_WIND"])
 ```
 
-`NpzDataset` is designed to be subclassed. Experiments override `__init__` to add domain-specific filtering, column derivation, and train/val/test splitting.
+`NpzDataset` is designed to be subclassed. Experiments override `__init__` to add domain-specific filtering and column derivation. Train/val/test splitting is **not** baked into dataset classes — datasets expose filter primitives (`filter_column` and experiment-specific filters), and split *policy* comes from config (see `datamodule.py` and `splitting.py`).
 
 ---
 
@@ -45,6 +45,18 @@ Low-level utilities for iterating over NumPy arrays in batches.
 | `num_batches(n_samples, batch_size)` | Number of complete + partial batches |
 
 These are the lowest-level building blocks. `ArrayLoader` (in `datamodule.py`) wraps them into a re-iterable object.
+
+---
+
+### `splitting.py` — group-split helpers
+
+Generic mechanism for group-based splits (split by storm, by season, by station — any per-row group id). Policy (which groups go where) belongs to callers: the `data.split` config block or an experiment-side resolver. Pure numpy, no pandas.
+
+| Function | Description |
+|----------|-------------|
+| `validate_disjoint_groups(groups)` | Raise `ValueError` if any value is assigned to two splits |
+| `group_mask(row_groups, groups)` | Boolean row mask: rows whose group id is in `groups` |
+| `assign_groups_by_fraction(groups, fraction, seed, stratify_by=None)` | Seeded fraction-based selection of unique groups; with `stratify_by`, the fraction holds per stratum and every non-empty stratum contributes at least one group (floor rule — a 4-group stratum at fraction 0.2 would otherwise round to zero) |
 
 ---
 
@@ -68,6 +80,8 @@ Subclasses must implement:
 - `val_loader(**kwargs) -> iterable`
 - `test_loader(**kwargs) -> iterable`
 
+Optionally override `manifest() -> dict` (default `{}`): a JSON-serialisable summary of what the run trains on (resolved split membership, row counts, ...). The Trainer's `write_manifest()` persists it next to the checkpoints and pushes it to the logger.
+
 **`DataModule`** — generic concrete implementation for array-based datasets.
 
 ```python
@@ -79,31 +93,39 @@ trainer.fit(dm.train_loader(batch_size=64), dm.val_loader(batch_size=64))
 
 Handles feature/target normalisation (standardise or minmax) using training-set statistics only — no leakage into val/test.
 
+The `data:` config block **requires a `split:` section** — splitting is config policy applied via `dataset.filter_column`, not a method on the dataset:
+
+```yaml
+data:
+  dataset: ibtracs
+  npz_path: ...
+  split:
+    column: SEASON            # any column present in the dataset
+    train: {values: [2005, 2006, ..., 2020]}
+    val:   {values: [2021, 2022]}
+    test:  {values: [2023, 2024, 2025]}
+```
+
+Per-split values must be disjoint (checked with `splitting.validate_disjoint_groups` before any filtering). `DataModule.manifest()` reports the resolved split (column, per-split values, row counts).
+
 ---
 
 ## Adding a dataset for a new experiment
 
-Subclass `NpzDataset` in your experiment directory:
+Subclass `NpzDataset` in your experiment directory. Add domain filtering and derived columns — but no split logic; splits come from config:
 
 ```python
 # jrt/experiments/my_experiment/dataset.py
 from datasets.base import NpzDataset
 
 class MyDataset(NpzDataset):
-    def __init__(self, path: str, split: str = "train"):
+    def __init__(self, path: str):
         super().__init__(path)
-        # domain filtering, column derivation, split logic
-        years = self._data["YEAR"]
-        if split == "train":
-            mask = years < 2021
-        elif split == "val":
-            mask = (years >= 2021) & (years < 2023)
-        else:
-            mask = years >= 2023
-        self._data = {k: v[mask] for k, v in self._data.items()}
+        # domain filtering, column derivation — no split logic here
+        self._data = {k: v for k, v in self._data.items()}  # e.g. drop bad rows
 ```
 
-Then subclass `BaseDataModule` to wrap it:
+Then subclass `BaseDataModule` to wrap it, resolving the split from the config (`filter_column` for simple value splits; `datasets.splitting` helpers for group/fraction splits):
 
 ```python
 # jrt/experiments/my_experiment/datamodule.py
@@ -111,8 +133,10 @@ from datasets.datamodule import BaseDataModule, ArrayLoader
 
 class MyDataModule(BaseDataModule):
     def __init__(self, config: dict):
-        train_ds = MyDataset(config["path"], split="train")
-        val_ds   = MyDataset(config["path"], split="val")
+        full     = MyDataset(config["path"])
+        split    = config["split"]                       # {column, train/val/test values}
+        train_ds = full.filter_column(split["column"], split["train"]["values"])
+        val_ds   = full.filter_column(split["column"], split["val"]["values"])
         self._train, self._val = train_ds.to_Xy(...), val_ds.to_Xy(...)
 
     def train_loader(self, batch_size=64, seed=42, shuffle=True):

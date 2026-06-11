@@ -126,11 +126,14 @@ sparse_obs_cross_attn/
 │   │                       coordinate encoding, obs normalisation
 │   ├── datamodule.py    TCDataModule + TCLoader — balanced TC/background
 │   │                       batches, re-iterable with per-epoch seed
+│   ├── splits.py        resolve_splits — data.split config → per-split
+│   │                       datasets + run manifest (season strategy)
 │   └── sources/
-│       ├── ibtracs.py       IBTrACSDataset — season splits, multi-storm
-│       │                       filtering, SSHS label mapping
+│       ├── ibtracs.py       IBTrACSDataset — filter primitives (seasons,
+│       │                       SIDs, single/multi-storm), sid-meta
+│       │                       validation, SSHS label mapping
 │       └── insitu_land.py   InsituLandDataset — haversine spatial filter,
-│                                reliability filtering, binary-search time queries
+│                                reliability/year filtering, binary-search time queries
 ├── plotting/
 │   └── plotting.py      Confusion matrix and class metrics (thin wrappers
 │                           over jrt/utils/plotting fields.plot_heatmap and
@@ -169,17 +172,20 @@ python -m ipykernel install --user --name jrt --display-name "JAX Research Templ
 
 ### 2. Data
 
-The four data files are not in the repository. Place them on the target machine and update the `data:` paths in the config. Recommended layout:
+The five data files are not in the repository. Place them on the target machine and update the `data:` paths in the config. Recommended layout:
 
 ```
 /data/sparse_obs/
     ibtracs/
         ibtracs_full.npz
         ibtracs_multi_storm_times.npz
+        ibtracs_sid_meta.npz
     insitu-land/
         insitu_land_clean.npz
         insitu_land_station_meta.npz
 ```
+
+`ibtracs_sid_meta.npz` is the per-storm metadata table (SID, SEASON, peak SSHS, track start/end, ...). It is validated against `ibtracs_full.npz` on load — SID set and row counts must match exactly — so regenerate both together.
 
 To keep machine-specific paths out of version control, create a `configs/tc_classifier_local.yaml` (gitignored) and load it instead, or patch paths programmatically in a notebook (see below).
 
@@ -190,8 +196,9 @@ jrt/experiments/sparse_obs_cross_attn/configs/*_local.yaml
 
 ### 3. Config
 
-The only required edits before a first run are the four `data:` paths. Key flags to understand:
+The only required edits before a first run are the five `data:` paths. Key flags to understand:
 
+- `data.split` is required — per-split IBTrACS season lists (disjoint, validated), resolved by `data/splits.py` into filtered datasets plus a run manifest written next to the checkpoints. The default config reproduces the original hardcoded split (train 2005–2020, val 2021–2022, test 2023–2025, `hard_test: multi_storm`)
 - `data.location_encoding` and `model.location_encoding` must match — `unit_circle` (default) or `domain`
 - `model.use_learned_mask: true` (default) — learned mask token for missing obs; `false` for constant sentinel
 - `trainer.run_dir` — change per run to avoid overwriting checkpoints

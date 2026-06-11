@@ -39,6 +39,7 @@ from utils.jax_core.helpers import create_rng
 from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDataset
 from experiments.sparse_obs_cross_attn.data.sources.insitu_land import InsituLandDataset
 from experiments.sparse_obs_cross_attn.data.dataset import TCDataset
+from experiments.sparse_obs_cross_attn.data.splits import resolve_splits
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +288,11 @@ class TCDataModule(BaseDataModule):
     ----------------------------------
         ibtracs_path             str
         multi_storm_path         str   optional
+        ibtracs_sid_meta_path    str   optional
         insitu_obs_path          str
         insitu_meta_path         str
+        split                    dict  required — see
+                                        experiments.sparse_obs_cross_attn.data.splits
         reliability_levels       list  default [always_active, mostly_active]
         obs_vars                 list  default DEFAULT_OBS_VARS (from insitu_land)
         radius_km                float default 500.0
@@ -335,6 +339,7 @@ class TCDataModule(BaseDataModule):
     def setup(self, config: dict) -> None:
         ibtracs_path      = config['ibtracs_path']
         multi_path        = config.get('multi_storm_path')
+        sid_meta_path     = config.get('ibtracs_sid_meta_path')
         obs_path          = config['insitu_obs_path']
         meta_path         = config['insitu_meta_path']
         reliability       = config.get('reliability_levels', ['always_active', 'mostly_active'])
@@ -362,7 +367,7 @@ class TCDataModule(BaseDataModule):
         self._location_encoding  = location_encoding
         self._obs_normalisation  = obs_normalisation
 
-        ibtracs_full = IBTrACSDataset(ibtracs_path, multi_path)
+        ibtracs_full = IBTrACSDataset(ibtracs_path, multi_path, sid_meta_path)
         insitu_full  = InsituLandDataset(obs_path, meta_path)
         if reliability:
             insitu_full = insitu_full.filter_reliability(reliability)
@@ -372,9 +377,12 @@ class TCDataModule(BaseDataModule):
             ms = np.load(multi_path, allow_pickle=True)
             multi_times = ms['ISO_TIME']
 
+        resolved = resolve_splits(config['split'], ibtracs_full, insitu_full)
+        self._manifest = resolved['manifest']
+
         for split_name in ('train', 'val', 'test'):
-            ib  = ibtracs_full.split(split_name)
-            ins = insitu_full.split(split_name)
+            ib  = resolved[split_name]['ibtracs']
+            ins = resolved[split_name]['insitu']
             bg_pool = _build_background_pool(
                 insitu=ins,
                 ibtracs=ib,
@@ -443,6 +451,14 @@ class TCDataModule(BaseDataModule):
         )
 
     # ------------------------------------------------------------------
+    # Manifest
+    # ------------------------------------------------------------------
+
+    def manifest(self) -> dict:
+        """Resolved split seasons/SIDs/row counts — see resolve_splits."""
+        return self._manifest
+
+    # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
 
@@ -460,6 +476,19 @@ class TCDataModule(BaseDataModule):
         print()
         print("─" * 58)
         print(f"Data  ({self._location_encoding} · {self._obs_normalisation})")
+        print(f"  {'split':<6}  {'seasons':>16}  {'SIDs':>6}")
+        for name in ('train', 'val', 'test'):
+            entry = self._manifest[name]
+            seasons = entry['seasons']
+            season_str = (
+                f"{seasons[0]}-{seasons[-1]}" if len(seasons) > 1
+                else str(seasons[0]) if seasons else "-"
+            )
+            print(f"  {name:<6}  {season_str:>16}  {entry['n_sids']:>6,}")
+        if 'hard_test' in self._manifest:
+            ht = self._manifest['hard_test']
+            print(f"  {'hard_test (multi-storm)':<24}  rows={ht['n_rows']:,}  SIDs={ht['n_sids']:,}")
+        print(f"  {'─'*6}  {'─'*8}  {'─'*16}  {'─'*10}")
         print(f"  {'split':<6}  {'TC rows':>8}  {'background pool':>16}  {'steps/ep':>10}")
         print(f"  {'─'*6}  {'─'*8}  {'─'*16}  {'─'*10}")
         for name in ('train', 'val', 'test'):
