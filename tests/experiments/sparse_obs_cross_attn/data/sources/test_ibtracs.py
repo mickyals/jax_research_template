@@ -97,10 +97,26 @@ def _make_ibtracs_npz(tmp_path, n_per_season=8):
     return npz_path, ms_path, n, iso_times, sids
 
 
-def _make_sid_meta_npz(tmp_path, sids, n_per_sid=4):
-    """Synthetic ibtracs_sid_meta.npz matching _make_ibtracs_npz's SIDs."""
+def _make_sid_meta_npz(tmp_path, sids, n_per_sid=4,
+                       peak_sshs=None, track_years=None):
+    """Synthetic ibtracs_sid_meta.npz matching _make_ibtracs_npz's SIDs.
+
+    peak_sshs : optional dict {sid: int} — per-storm stratum label.
+    track_years : optional dict {sid: (start_year, end_year)} — track span;
+        track_start/track_end become mid-year timestamps in those years.
+    """
+    import pandas as pd
+
     unique_sids = list(dict.fromkeys(sids))   # preserve order, dedupe
     n = len(unique_sids)
+    if track_years is None:
+        track_start = np.full(n, 0, dtype=np.int64)
+        track_end   = np.full(n, 0, dtype=np.int64)
+    else:
+        track_start = np.array([pd.Timestamp(f'{track_years[s][0]}-06-01').value
+                                for s in unique_sids], dtype=np.int64)
+        track_end   = np.array([pd.Timestamp(f'{track_years[s][1]}-06-08').value
+                                for s in unique_sids], dtype=np.int64)
     data = {
         'SID':         np.array(unique_sids),
         'NAME':        np.array([f'STORM_{s}' for s in unique_sids]),
@@ -110,11 +126,13 @@ def _make_sid_meta_npz(tmp_path, sids, n_per_sid=4):
         'USA_AGENCY':  np.full(n, 'hurdat_atl'),
         'USA_ATCF_ID': np.array([f'AL{i:02d}' for i in range(n)]),
         'peak_wind':   np.full(n, 50.0, dtype=np.float32),
-        'peak_sshs':   np.full(n, 1, dtype=np.int32),
+        'peak_sshs':   (np.full(n, 1, dtype=np.int32) if peak_sshs is None
+                        else np.array([peak_sshs[s] for s in unique_sids],
+                                      dtype=np.int32)),
         'min_pres':    np.full(n, 99000.0, dtype=np.float32),
         'n_timesteps': np.full(n, n_per_sid, dtype=np.int32),
-        'track_start': np.full(n, 0, dtype=np.int64),
-        'track_end':   np.full(n, 0, dtype=np.int64),
+        'track_start': track_start,
+        'track_end':   track_end,
     }
     path = tmp_path / 'ibtracs_sid_meta.npz'
     np.savez(path, **data)

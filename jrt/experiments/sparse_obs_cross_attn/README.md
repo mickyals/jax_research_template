@@ -127,7 +127,8 @@ sparse_obs_cross_attn/
 │   ├── datamodule.py    TCDataModule + TCLoader — balanced TC/background
 │   │                       batches, re-iterable with per-epoch seed
 │   ├── splits.py        resolve_splits — data.split config → per-split
-│   │                       datasets + run manifest (season strategy)
+│   │                       datasets + run manifest ('season' and 'sid'
+│   │                       strategies)
 │   └── sources/
 │       ├── ibtracs.py       IBTrACSDataset — filter primitives (seasons,
 │       │                       SIDs, single/multi-storm), sid-meta
@@ -198,7 +199,7 @@ jrt/experiments/sparse_obs_cross_attn/configs/*_local.yaml
 
 The only required edits before a first run are the five `data:` paths. Key flags to understand:
 
-- `data.split` is required — per-split IBTrACS season lists (disjoint, validated), resolved by `data/splits.py` into filtered datasets plus a run manifest written next to the checkpoints. The default config reproduces the original hardcoded split (train 2005–2020, val 2021–2022, test 2023–2025, `hard_test: multi_storm`)
+- `data.split` is required — resolved by `data/splits.py` into filtered datasets plus a run manifest written next to the checkpoints. Two strategies: `season` (per-split IBTrACS season lists, disjoint, validated — the default config reproduces the original hardcoded split: train 2005–2020, val 2021–2022, test 2023–2025, `hard_test: multi_storm`) and `sid` (hybrid: `test.seasons` lists edge years, with membership decided by track calendar years from the sid-meta table; remaining interior storms are assigned train/val by SID at `val.fraction`, seeded, stratified by `val.stratify_by`, train being the implicit remainder; train and val deliberately share the interior-year insitu stream — only test is time-separated)
 - `data.location_encoding` and `model.location_encoding` must match — `unit_circle` (default) or `domain`
 - `model.use_learned_mask: true` (default) — learned mask token for missing obs; `false` for constant sentinel
 - `trainer.run_dir` — change per run to avoid overwriting checkpoints

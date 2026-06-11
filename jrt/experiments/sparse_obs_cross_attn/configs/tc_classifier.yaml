@@ -32,6 +32,14 @@ data:
   # season strategy: disjoint sets of IBTrACS seasons per split. Multi-storm
   # timesteps are excluded from train/val/test (when multi_storm_path is set)
   # and test.hard_test selects them as a separate held-out evaluation set.
+  #
+  # Alternative 'sid' strategy (see data/splits.py): test = edge years by
+  # track-year membership; interior storms assigned train/val by SID,
+  # seeded + stratified; train is the implicit remainder (no train block):
+  #   split:
+  #     strategy: sid
+  #     test: {seasons: [2005, 2025], hard_test: multi_storm}
+  #     val:  {fraction: 0.2, seed: 42, stratify_by: peak_sshs}
   split:
     strategy: season
     train:

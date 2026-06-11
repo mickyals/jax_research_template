@@ -20,33 +20,66 @@
 
         "split": {
           "type": "object",
-          "required": ["train", "val", "test"],
           "additionalProperties": true,
           "properties": {
-            "strategy": { "type": "string", "enum": ["season"] },
-            "train": {
-              "type": "object",
-              "required": ["seasons"],
+            "strategy": { "type": "string", "enum": ["season", "sid"] }
+          },
+          "oneOf": [
+            {
+              "description": "season strategy: disjoint explicit season lists per split",
+              "required": ["train", "val", "test"],
               "properties": {
-                "seasons": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                "strategy": { "const": "season" },
+                "train": {
+                  "type": "object",
+                  "required": ["seasons"],
+                  "properties": {
+                    "seasons": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                  }
+                },
+                "val": {
+                  "type": "object",
+                  "required": ["seasons"],
+                  "properties": {
+                    "seasons": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                  }
+                },
+                "test": {
+                  "type": "object",
+                  "required": ["seasons"],
+                  "properties": {
+                    "seasons":   { "type": "array", "minItems": 1, "items": { "type": "integer" } },
+                    "hard_test": { "type": "string", "enum": ["multi_storm"] }
+                  }
+                }
               }
             },
-            "val": {
-              "type": "object",
-              "required": ["seasons"],
+            {
+              "description": "sid strategy: edge-year test (by track years) + seeded stratified SID train/val over the interior; train is the implicit remainder (no train block). Requires data.ibtracs_sid_meta_path.",
+              "required": ["strategy", "val", "test"],
+              "not": { "required": ["train"] },
               "properties": {
-                "seasons": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
-              }
-            },
-            "test": {
-              "type": "object",
-              "required": ["seasons"],
-              "properties": {
-                "seasons":   { "type": "array", "minItems": 1, "items": { "type": "integer" } },
-                "hard_test": { "type": "string", "enum": ["multi_storm"] }
+                "strategy": { "const": "sid" },
+                "val": {
+                  "type": "object",
+                  "required": ["fraction", "seed", "stratify_by"],
+                  "properties": {
+                    "fraction":    { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+                    "seed":        { "type": "integer", "minimum": 0 },
+                    "stratify_by": { "type": "string" }
+                  }
+                },
+                "test": {
+                  "type": "object",
+                  "required": ["seasons"],
+                  "properties": {
+                    "seasons":   { "type": "array", "minItems": 1, "items": { "type": "integer" } },
+                    "hard_test": { "type": "string", "enum": ["multi_storm"] }
+                  }
+                }
               }
             }
-          }
+          ]
         },
 
         "reliability_levels": {
