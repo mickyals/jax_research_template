@@ -10,8 +10,13 @@ module only -- nothing else in ``utils.plotting`` may import it. If
 cartopy is missing, ``_import_cartopy`` raises a clear ImportError with
 the install command.
 
-Scope: PlateCarree only. Widening to other projections (e.g.
-``geo="mercator"``) can happen backward-compatibly later.
+Projections: PlateCarree (default) and AzimuthalEquidistant
+(``projection='azimuthal'`` + ``center``). The azimuthal projection's
+native coordinates are metres from the centre along (east, north) —
+i.e. (distance·sin(bearing), distance·cos(bearing)) — which makes it the
+exact geographic canvas for storm-centred local x-y data: plot in native
+metres with the default transform and the coastlines land in the right
+place by construction.
 """
 
 from __future__ import annotations
@@ -86,8 +91,10 @@ def _make_geoaxes(
     color: str = "black",
     lw: float = 0.5,
     gridlines: bool = True,
+    projection: str = "platecarree",
+    center: Optional[tuple[float, float]] = None,
 ):
-    """Create a figure with a PlateCarree GeoAxes, map features, and gridlines.
+    """Create a figure with a GeoAxes, map features, and gridlines.
 
     The canvas counterpart of ``plt.subplots`` for geo-capable renderers.
     Labeled gridlines replace the plain-axes ``grid``/``xlabel``/``ylabel``
@@ -98,8 +105,9 @@ def _make_geoaxes(
     figsize : tuple[int, int]
         Figure size in inches.
     extent : list[float], optional
-        [lon_min, lon_max, lat_min, lat_max] in degrees. If None, the map
-        extent follows the data.
+        For 'platecarree': [lon_min, lon_max, lat_min, lat_max] degrees.
+        For 'azimuthal': [x_min, x_max, y_min, y_max] METRES from the
+        centre (east/north offsets). If None, the extent follows the data.
     scale : str
         Natural Earth feature resolution ('110m', '50m', '10m').
     color : str
@@ -109,16 +117,45 @@ def _make_geoaxes(
     gridlines : bool
         If True (default), draw labeled dashed gridlines (top/right
         labels off).
+    projection : {'platecarree', 'azimuthal'}
+        'azimuthal' = AzimuthalEquidistant centred on ``center``: native
+        axes coordinates are metres from the centre along (east, north),
+        i.e. (distance·sin(bearing), distance·cos(bearing)) — distance
+        and bearing from the centre are preserved exactly. Plot
+        storm-centred local x-y data in native metres with the DEFAULT
+        matplotlib transform (no ``transform=`` kwarg).
+    center : (lat, lon), optional
+        Projection centre in degrees. Required for 'azimuthal'.
 
     Returns
     -------
     tuple
-        ``(fig, ax, transform)`` -- ``transform`` is the data CRS
-        (PlateCarree) to pass to every artist call on ``ax``, so callers
-        never import cartopy themselves.
+        ``(fig, ax, transform)`` -- ``transform`` is the lon/lat data CRS
+        (PlateCarree) to pass to artist calls whose data is in degrees,
+        so callers never import cartopy themselves. Data already in the
+        projection's native coordinates (azimuthal metres) should be
+        plotted WITHOUT a transform kwarg.
     """
     ccrs, _ = _import_cartopy()
-    proj = ccrs.PlateCarree()
+    lonlat = ccrs.PlateCarree()
+
+    if projection == "platecarree":
+        proj = lonlat
+    elif projection == "azimuthal":
+        if center is None:
+            raise ValueError(
+                "_make_geoaxes: projection='azimuthal' requires "
+                "center=(lat, lon)."
+            )
+        proj = ccrs.AzimuthalEquidistant(
+            central_latitude=float(center[0]),
+            central_longitude=float(center[1]),
+        )
+    else:
+        raise ValueError(
+            f"_make_geoaxes: unknown projection '{projection}' "
+            f"(expected 'platecarree' or 'azimuthal')."
+        )
 
     fig, ax = plt.subplots(figsize=figsize, subplot_kw={"projection": proj})
     if extent is not None:
@@ -128,4 +165,4 @@ def _make_geoaxes(
         gl = ax.gridlines(draw_labels=True, linestyle="--", alpha=0.4)
         gl.top_labels = False
         gl.right_labels = False
-    return fig, ax, proj
+    return fig, ax, lonlat

@@ -200,6 +200,16 @@ trainer:
   # --- Gradient clipping ---
   max_grad_norm:        1.0
 
+  # --- Profiling ---
+  # true = trace the first profile_steps training steps with the JAX
+  # profiler, written to <run_dir>/logs/profile. View with TensorBoard's
+  # Profile plugin (tensorboard --logdir <dir>); WandB cannot render XLA
+  # traces — attach the directory as an artifact if needed. The first
+  # traced step includes jit compilation; read later steps for
+  # steady-state timing (e.g. is the GPU idle waiting on the loader?).
+  profile:              false
+  profile_steps:        5
+
   # --- Run directory ---
   # Relative paths are resolved against the experiment directory
   # (sparse_obs_cross_attn/, two levels above train/train.py), so

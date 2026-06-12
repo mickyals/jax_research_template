@@ -42,7 +42,7 @@ JAX utility functions for model initialisation and array manipulation.
 
 ### `diagnostics.py`
 
-JAX runtime diagnostics: device listing, memory checks, and debugging helpers.
+JAX runtime diagnostics: device listing, memory checks, and debugging helpers. Includes `trace_profile(trace_dir, enabled=True)` — a context manager around `jax.profiler.start_trace`/`stop_trace` for ad-hoc profiling; view traces with TensorBoard's Profile plugin (WandB cannot render XLA traces). The Trainer exposes the same capability declaratively via the `profile`/`profile_steps` config keys (see `jrt/training/README.md`).
 
 ---
 
@@ -75,7 +75,7 @@ Private rendering helpers shared by `curves.py`, `fields.py`, and `volumes.py` �
 
 ### `_geo.py`
 
-Private cartopy canvas factory behind the `geo=` argument — not part of the public API; there are no public geo functions. `_make_geoaxes(figsize, extent, scale, color, lw, gridlines)` returns `(fig, GeoAxes, transform)` for a PlateCarree map with coastline/border/state linework (`_add_map_features`) and labeled dashed gridlines; geo-capable renderers thread the returned `transform` through their artist calls so cartopy never leaks to call sites.
+Private cartopy canvas factory behind the `geo=` argument — not part of the public API; there are no public geo functions. `_make_geoaxes(figsize, extent, scale, color, lw, gridlines, projection, center)` returns `(fig, GeoAxes, transform)` with coastline/border/state linework (`_add_map_features`) and labeled dashed gridlines; geo-capable renderers thread the returned `transform` (always the lon/lat PlateCarree CRS) through artist calls whose data is in degrees, so cartopy never leaks to call sites. Two projections: `'platecarree'` (default; extent in degrees) and `'azimuthal'` (`AzimuthalEquidistant` centred on `center=(lat, lon)`; extent in metres from the centre). The azimuthal projection's native axes coordinates are metres along (east, north) from the centre — i.e. (distance·sin(bearing), distance·cos(bearing)) — so storm-centred local x-y data scaled to metres plots with the *default* transform and coastlines land correctly by construction.
 
 cartopy is an **optional dependency**, imported lazily inside `_geo.py` only — the template installs and runs without it; calling a geo path without cartopy raises an ImportError with the install command (`pip install cartopy`). Natural Earth shapefiles download on first *render* at the chosen `scale` ('50m' default; pass `geo={"scale": "10m"}` for publication-quality linework).
 

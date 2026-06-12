@@ -57,6 +57,8 @@ test_metrics = trainer.test(dm.test_loader())
 | `log_kwargs` | `{}` | forwarded to the logger constructor |
 | `seed` | 42 | model init and dropout RNG |
 | `use_tqdm` | true | progress bars |
+| `profile` | false | JAX-profiler trace of the first `profile_steps` training steps → `<log_dir>/profile`; view with TensorBoard's Profile plugin (WandB cannot render XLA traces — attach the dir as an artifact instead). First traced step includes jit compilation; read later steps for steady-state timing |
+| `profile_steps` | 5 | steps to trace when `profile: true` |
 
 **Run directory layout** (when `run_dir` is set):
 

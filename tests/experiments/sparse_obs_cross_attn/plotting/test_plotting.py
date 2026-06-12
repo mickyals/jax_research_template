@@ -222,6 +222,32 @@ class TestPlotAttentionGeographic:
         assert isinstance(fig.axes[0].projection, ccrs.PlateCarree)
         plt.close('all')
 
+    def test_unit_circle_geo_returns_azimuthal_map(self, weights_and_batch):
+        # No canvas.draw()/savefig: Natural Earth downloads at render time.
+        pytest.importorskip("cartopy")
+        import cartopy.crs as ccrs
+
+        weights, batch = weights_and_batch
+        fig = plot_attention_geographic(
+            weights, batch, location_encoding='unit_circle',
+            radius_km=500.0, geo=True, storm_latlon=(15.0, -75.0),
+        )
+        assert isinstance(fig, plt.Figure)
+        assert isinstance(fig.axes[0].projection, ccrs.AzimuthalEquidistant)
+        params = fig.axes[0].projection.proj4_params
+        assert params['lat_0'] == pytest.approx(15.0)
+        assert params['lon_0'] == pytest.approx(-75.0)
+        plt.close('all')
+
+    def test_unit_circle_geo_requires_storm_latlon(self, weights_and_batch):
+        pytest.importorskip("cartopy")
+        weights, batch = weights_and_batch
+        with pytest.raises(ValueError, match='storm_latlon'):
+            plot_attention_geographic(
+                weights, batch, location_encoding='unit_circle', geo=True,
+            )
+        plt.close('all')
+
     def test_domain_raises_without_fov(self, weights_and_batch):
         weights, batch = weights_and_batch
         with pytest.raises(ValueError, match="fov_lat"):

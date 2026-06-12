@@ -105,6 +105,44 @@ class TestMakeGeoaxes:
         assert _count_feature_artists(ax) == 3
         plt.close(fig)
 
+    # --- azimuthal projection (storm-centred local maps) ---
+
+    def test_azimuthal_projection_and_lonlat_transform(self):
+        fig, ax, transform = _make_geoaxes(
+            projection="azimuthal", center=(15.0, -75.0),
+        )
+        assert isinstance(ax.projection, ccrs.AzimuthalEquidistant)
+        # transform stays the lon/lat CRS for degree-coordinate artists
+        assert isinstance(transform, ccrs.PlateCarree)
+        plt.close(fig)
+
+    def test_azimuthal_centre_applied(self):
+        fig, ax, _ = _make_geoaxes(
+            projection="azimuthal", center=(15.0, -75.0),
+        )
+        params = ax.projection.proj4_params
+        assert params["lat_0"] == pytest.approx(15.0)
+        assert params["lon_0"] == pytest.approx(-75.0)
+        plt.close(fig)
+
+    def test_azimuthal_extent_in_metres(self):
+        r_m = 500_000.0
+        fig, ax, _ = _make_geoaxes(
+            projection="azimuthal", center=(15.0, -75.0),
+            extent=[-r_m, r_m, -r_m, r_m],
+        )
+        assert np.allclose(ax.get_extent(crs=ax.projection),
+                           [-r_m, r_m, -r_m, r_m])
+        plt.close(fig)
+
+    def test_azimuthal_requires_center(self):
+        with pytest.raises(ValueError, match="center"):
+            _make_geoaxes(projection="azimuthal")
+
+    def test_unknown_projection_raises(self):
+        with pytest.raises(ValueError, match="projection"):
+            _make_geoaxes(projection="mercator")
+
 
 @needs_cartopy
 class TestAddMapFeatures:
@@ -202,6 +240,13 @@ class TestPlotScatterOverlayGeo:
     def test_geo_unknown_option_raises(self, lonlat_points):
         lons, lats, vals = lonlat_points
         with pytest.raises(TypeError):
+            plot_scatter_overlay(None, lons, lats, scatter_values=vals,
+                                 geo={"no_such_option": 1})
+        plt.close("all")
+
+    def test_geo_unknown_projection_raises(self, lonlat_points):
+        lons, lats, vals = lonlat_points
+        with pytest.raises(ValueError, match="projection"):
             plot_scatter_overlay(None, lons, lats, scatter_values=vals,
                                  geo={"projection": "mercator"})
         plt.close("all")

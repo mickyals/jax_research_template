@@ -222,7 +222,14 @@
         "log_every_n_steps":    { "type": "integer", "minimum": 1 },
         "log_kwargs":           { "type": "object" },
         "seed":                 { "type": "integer", "minimum": 0 },
-        "use_tqdm":             { "type": "boolean" }
+        "use_tqdm":             { "type": "boolean" },
+
+        "attn_log_every_n_steps":   { "type": "integer", "minimum": 1, "description": "Step cadence for val/attn_entropy; defaults to log_every_n_steps." },
+        "attn_fig_every_n_epochs":  { "type": "integer", "minimum": 0, "description": "Epoch cadence for val/attn_map + val/attn_grid figures; 0 = disabled." },
+        "eval_plots_every_n_epochs":{ "type": "integer", "minimum": 0, "description": "Epoch cadence for val confusion matrix / per-class F1; 0 = disabled." },
+        "grad_hist_every_n_epochs": { "type": "integer", "minimum": 0, "description": "Epoch cadence for grad_flow/* histograms (TRAIN probe, also at init); 0 = disabled." },
+        "profile":                  { "type": "boolean", "description": "Trace the first profile_steps training steps with the JAX profiler to <log_dir>/profile (view with TensorBoard's Profile plugin)." },
+        "profile_steps":            { "type": "integer", "minimum": 1 }
       }
     }
 

@@ -241,6 +241,7 @@ def plot_attention_geographic(
     sample_idx:        int   = 0,
     head_agg:          str   = 'mean',
     geo:               bool | dict = False,
+    storm_latlon:      Optional[tuple[float, float]] = None,
 ) -> plt.Figure:
     """Plot per-station attention weight for one sample.
 
@@ -272,10 +273,20 @@ def plot_attention_geographic(
     head_agg : {'mean', 'max'}
         How to collapse the head dimension before plotting.
     geo : bool or dict
-        Domain mode only (ignored for unit_circle): forwarded to
-        ``plot_scatter_overlay`` to draw on a PlateCarree map with
-        coastlines/borders. Requires cartopy (optional dependency);
-        default False keeps the cartopy-free plain-axes plot.
+        Draw on a cartopy map with coastlines/borders (requires cartopy,
+        optional dependency; default False keeps the cartopy-free
+        plain-axes plot). Domain mode: forwarded to
+        ``plot_scatter_overlay`` (PlateCarree). unit_circle mode: an
+        AzimuthalEquidistant map centred on the storm — the local x-y
+        encoding times radius_km IS that projection's native metre grid,
+        so stations, km rings, and coastlines align exactly; requires
+        ``storm_latlon``. Dict keys (scale/color/lw/gridlines) are
+        forwarded to the canvas factory.
+    storm_latlon : (lat, lon), optional
+        Absolute storm/query position in degrees — the projection centre
+        for the unit_circle geo map (available as
+        batch['meta']['query_lat']/['query_lon']). Ignored unless
+        unit_circle mode with geo enabled.
     """
     X            = batch['X']
     coords       = np.asarray(X['station_coords'][sample_idx])   # (N, 2)
@@ -293,9 +304,34 @@ def plot_attention_geographic(
         x = coords[mask, 0]                    # east offset,  [-1, 1]
         y = coords[mask, 1]                    # north offset, [-1, 1]
 
-        fig, ax = plt.subplots(figsize=(7, 7))
+        geo_opts = {} if geo is True else dict(geo) if isinstance(geo, dict) else None
+        if geo_opts is not None:
+            # Azimuthal-equidistant map centred on the storm: native axes
+            # coordinates are metres east/north of the centre, which is
+            # exactly the local x-y encoding scaled by the radius — plot
+            # in native metres with the default transform.
+            if storm_latlon is None:
+                raise ValueError(
+                    "plot_attention_geographic: geo=True with unit_circle "
+                    "encoding requires storm_latlon=(lat, lon) — available "
+                    "as batch['meta']['query_lat']/['query_lon']."
+                )
+            from utils.plotting._geo import _make_geoaxes
+            r_m = radius_km * 1000.0
+            fig, ax, _ = _make_geoaxes(
+                figsize=(7, 7),
+                extent=[-1.08 * r_m, 1.08 * r_m, -1.08 * r_m, 1.08 * r_m],
+                projection='azimuthal',
+                center=(float(storm_latlon[0]), float(storm_latlon[1])),
+                **geo_opts,
+            )
+            unit = r_m   # data coords below are in metres
+        else:
+            fig, ax = plt.subplots(figsize=(7, 7))
+            unit = 1.0   # data coords below are fractions of the radius
+
         sc = _value_scatter(
-            ax, x, y, values=w_real,
+            ax, x * unit, y * unit, values=w_real,
             cmap='YlOrRd', size_range=(30, 280),
             alpha=0.85, edgecolors='k', linewidths=0.4, zorder=3,
         )
@@ -306,20 +342,21 @@ def plot_attention_geographic(
         # Distance rings with km labels (north-up: +y = north)
         for r in (0.25, 0.5, 0.75, 1.0):
             ax.add_patch(plt.Circle(
-                (0, 0), r, fill=False, color='grey',
+                (0, 0), r * unit, fill=False, color='grey',
                 linewidth=0.6, linestyle='--', zorder=2,
             ))
             ax.annotate(
                 f'{r * radius_km:.0f} km',
-                xy=(r / np.sqrt(2), r / np.sqrt(2)),
+                xy=(r * unit / np.sqrt(2), r * unit / np.sqrt(2)),
                 fontsize=7, color='grey', ha='left', va='bottom',
             )
 
-        ax.set_xlim(-1.08, 1.08)
-        ax.set_ylim(-1.08, 1.08)
-        ax.set_aspect('equal')
-        ax.set_xlabel('East offset (× radius)')
-        ax.set_ylabel('North offset (× radius)')
+        if geo_opts is None:
+            ax.set_xlim(-1.08, 1.08)
+            ax.set_ylim(-1.08, 1.08)
+            ax.set_aspect('equal')
+            ax.set_xlabel('East offset (× radius)')
+            ax.set_ylabel('North offset (× radius)')
         ax.set_title('Self-attention weights (query row)\n'
                      '(storm-centred local map, north up)',
                      pad=15, fontsize=10)

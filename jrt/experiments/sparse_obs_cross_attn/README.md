@@ -217,6 +217,55 @@ The only required edits before a first run are the five `data:` paths. Key flags
 
 ## Usage
 
+### CLI quick reference
+
+All commands run from the **repository root**. `CFG` below is the config path
+(positional argument for every entry point):
+
+```bash
+CFG=jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+
+# Train                                  # Resume from latest checkpoint
+python -m experiments.sparse_obs_cross_attn.train.train $CFG
+python -m experiments.sparse_obs_cross_attn.train.train $CFG --resume
+
+# Evaluate (best checkpoint)
+python -m experiments.sparse_obs_cross_attn.train.evaluate $CFG \
+    --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
+    --output_dir    runs/tc_classifier/run_01/eval \
+    --split test --n_attn_samples 4 --geo --no_show
+
+# Hyperparameter search
+python -m experiments.sparse_obs_cross_attn.train.tune \
+    jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+    --n_trials 50 \
+    --storage sqlite:///runs/tc_classifier/hp_search/study.db \
+    --study_name tc_classifier_v1
+```
+
+| Entry point | Argument | Default | Meaning |
+|---|---|---|---|
+| `train.train` | `config` (positional) | — | YAML config path |
+| | `--resume` | off | continue from `checkpoints/latest/` |
+| `train.evaluate` | `config` (positional) | — | YAML config path |
+| | `--checkpoint_dir` | from config | override `trainer.checkpoint_dir`/`run_dir` |
+| | `--output_dir` | None | save figures as PNGs here |
+| | `--split` | `test` | `test` or `val` |
+| | `--n_attn_samples` | 4 | attention figures from the first batch; 0 = skip |
+| | `--geo` | off | cartopy map canvases (azimuthal storm-centred for unit_circle, PlateCarree for domain; needs cartopy) |
+| | `--no_show` | off | don't open figure windows |
+| `train.tune` | `config` (positional) | — | tune YAML config path |
+| | `--n_trials` | 25 | Optuna trials |
+| | `--storage` | in-memory | e.g. `sqlite:///path/study.db` (re-run same command to resume) |
+| | `--study_name` | `tc_classifier` | study identifier inside the storage |
+| | `--direction` | `minimize` | optimization direction |
+| | `--n_startup_trials` | 5 | trials before pruning activates |
+| | `--n_warmup_steps` | 10 | epochs per trial before pruning is checked |
+
+Profiling is config-driven, not a CLI flag: set `trainer.profile: true`
+(+ optional `trainer.profile_steps`) and the first training steps are traced
+to `<run_dir>/logs/profile` — view with `tensorboard --logdir <that dir>`.
+
 ### Training (CLI)
 
 Run from the **repository root** so Python module imports resolve:
@@ -270,7 +319,7 @@ python -m experiments.sparse_obs_cross_attn.train.evaluate \
 Outputs:
 - Confusion matrix — row-normalised 11×11 and raw counts
 - Per-class precision / recall / F1 bar chart
-- Geographic attention maps — storm-centred local x-y scatter with km distance rings (unit_circle) or lat/lon scatter (domain), coloured by mean attention weight of the last layer's query row. In domain mode, `plot_attention_geographic(..., geo=True)` draws the scatter on a PlateCarree map with coastlines/borders (requires cartopy, optional dependency; default stays cartopy-free)
+- Geographic attention maps — storm-centred local x-y scatter with km distance rings (unit_circle) or lat/lon scatter (domain), coloured by mean attention weight of the last layer's query row. Figure titles carry storm attribution: `"<SID> <NAME> — true: Cat 3, pred: TS"` (or `background`). With `--geo` (or `geo=True`) the scatter is drawn on a cartopy map with coastlines/borders: PlateCarree for domain, and for unit_circle an **AzimuthalEquidistant projection centred on the storm** — that projection's native coordinates are metres east/north of the centre, i.e. exactly the local x-y encoding × radius, so stations, km rings, and coastlines align by construction. Requires cartopy (optional dependency); default stays cartopy-free
 - Attention-matrix grids — layers × heads panels of the full (N+1)×(N+1) matrices per sample (`plot_attention_matrix_grid`; plain imshow, no per-token labels, dashed lines mark the query row/column)
 - Attention-mask figure — the exact asymmetric boolean mask the model builds (`plot_attention_mask`, single source of truth: `model.build_attention_mask`)
 

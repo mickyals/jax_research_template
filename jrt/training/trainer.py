@@ -229,6 +229,18 @@ class Trainer:
         self._seed            = config.get("seed", 42)
         self._use_tqdm        = config.get("use_tqdm", True)
 
+        # --- profiling ---
+        # profile: true traces the first profile_steps training steps of the
+        # run with the JAX profiler, written to <log_dir>/profile. View with
+        # TensorBoard's Profile plugin (WandB cannot render XLA traces).
+        # The first traced step includes jit compilation — read the later
+        # steps in the trace for steady-state timings.
+        self._profile          = bool(config.get("profile", False))
+        self._profile_steps    = int(config.get("profile_steps", 5))
+        self._profile_dir      = str(Path(_log_dir) / "profile")
+        self._profile_active   = False
+        self._profile_done     = False
+
         # --- optimizer + scheduler ---
         schedule = get_scheduler(
             config["scheduler"],
@@ -382,10 +394,28 @@ class Trainer:
 
         for batch in iterator:
             batch = _to_jax_batch(batch)
-            state, step_metrics = self._train_step(state, batch)
+
+            if self._profile and not self._profile_done and not self._profile_active:
+                Path(self._profile_dir).mkdir(parents=True, exist_ok=True)
+                jax.profiler.start_trace(self._profile_dir)
+                self._profile_active = True
+                self._profile_start  = self._global_step
+
+            if self._profile_active:
+                with jax.profiler.StepTraceAnnotation(
+                    "train_step", step_num=self._global_step
+                ):
+                    state, step_metrics = self._train_step(state, batch)
+            else:
+                state, step_metrics = self._train_step(state, batch)
+
             self._global_step  += 1
             loss_val            = float(step_metrics[self._loss_key])
             losses.append(loss_val)
+
+            if (self._profile_active
+                    and self._global_step - self._profile_start >= self._profile_steps):
+                self._stop_profile()
 
             if use_tqdm:
                 pbar.set_postfix({self._loss_key: f"{loss_val:.4f}"})
@@ -413,7 +443,23 @@ class Trainer:
             if self._global_step >= self._num_steps:
                 break
 
+        # Tiny loaders: the epoch may end before profile_steps completes.
+        if self._profile_active:
+            self._stop_profile()
+
         return state, {f"train/{self._loss_key}": float(np.mean(losses))}
+
+    def _stop_profile(self) -> None:
+        """Finish the JAX profiler trace (loss floats above already forced
+        device sync, so the traced steps are fully captured)."""
+        jax.profiler.stop_trace()
+        self._profile_active = False
+        self._profile_done   = True
+        print(
+            f"[profiler] trace of {self._profile_steps} training steps "
+            f"written to {self._profile_dir} — view with: "
+            f"tensorboard --logdir {self._profile_dir}"
+        )
 
     def _eval_model(
         self,

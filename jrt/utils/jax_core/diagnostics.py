@@ -1,12 +1,60 @@
 import jax
 import jax.numpy as jnp
+from contextlib import contextmanager
 from flax import linen as nn
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Callable, Sequence, Optional
 
 from utils.jax_core.helpers import create_rng
+
+
+# ---------------------------------------------------------------------------
+# Profiling
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def trace_profile(trace_dir: str | Path, enabled: bool = True):
+    """Context manager around the JAX profiler trace.
+
+    Writes an XLA trace of everything executed inside the block to
+    ``trace_dir``. View it with TensorBoard's Profile plugin
+    (``tensorboard --logdir <trace_dir>`` → Profile → trace_viewer /
+    memory_viewer). WandB cannot render these traces — attach the
+    directory as a run artifact if you want it tied to a WandB run.
+
+    The first operations inside the block include any pending jit
+    compilation; for steady-state timings, trace a few steps and read the
+    later ones. Call ``jax.block_until_ready`` on a result before the
+    block exits if the last step must be fully captured.
+
+    Parameters
+    ----------
+    trace_dir : str or Path
+        Output directory (created if missing).
+    enabled : bool
+        If False the block runs untraced — lets call sites keep one code
+        path behind a config flag.
+
+    Example
+    -------
+    >>> with trace_profile("traces/", enabled=args.profile):
+    ...     for _ in range(3):
+    ...         state, metrics = train_step(state, batch)
+    ...     jax.block_until_ready(state.params)
+    """
+    if not enabled:
+        yield
+        return
+    trace_dir = Path(trace_dir)
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    jax.profiler.start_trace(str(trace_dir))
+    try:
+        yield
+    finally:
+        jax.profiler.stop_trace()
 
 
 # ---------------------------------------------------------------------------

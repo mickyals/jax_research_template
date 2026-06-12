@@ -313,6 +313,7 @@ def evaluate(
     split:          str  = 'test',
     n_attn_samples: int  = 4,
     show_plots:     bool = True,
+    geo:            bool = False,
 ) -> None:
     """Full evaluation pipeline: load checkpoint → inference → report + plots.
 
@@ -331,6 +332,10 @@ def evaluate(
         Each sample uses the first batch; set 0 to skip attention plots.
     show_plots : bool
         Call ``plt.show()`` after plotting.
+    geo : bool
+        Draw the attention maps on cartopy map canvases (coastlines/
+        borders): azimuthal storm-centred for unit_circle, PlateCarree
+        for domain. Requires cartopy (optional dependency).
     """
     config = _load_config(config_path)
     if checkpoint_dir is not None:
@@ -400,6 +405,25 @@ def evaluate(
         # attn_weights: (num_layers, B, num_heads, N+1, N+1)
         n_plot       = min(n_attn_samples, attn_weights.shape[1])
 
+        # Per-batch predictions + storm attribution for figure titles.
+        batch_preds = np.asarray(
+            model.apply(variables, attn_batch['X'], train=False)
+        ).argmax(axis=-1)
+        batch_meta = attn_batch.get('meta')
+        ds         = dm._test_ds if split == 'test' else dm._val_ds
+        sid_to_name = dict(zip(
+            np.asarray(ds.ibtracs['SID']).tolist(),
+            np.asarray(ds.ibtracs['NAME']).tolist(),
+        ))
+
+        def _sample_title(i: int) -> str:
+            true_c = CLASS_NAMES[int(attn_batch['y'][i])]
+            pred_c = CLASS_NAMES[int(batch_preds[i])]
+            sid    = batch_meta['sid'][i] if batch_meta is not None else None
+            who    = (f"{sid} {sid_to_name.get(sid, '')}".strip()
+                      if sid is not None else 'background')
+            return f"{who} — true: {true_c}, pred: {pred_c}"
+
         fig_mask = plot_attention_mask(
             np.asarray(attn_batch['X']['station_mask'][0])
         )
@@ -408,8 +432,12 @@ def evaluate(
                              dpi=150, bbox_inches='tight')
 
         for i in range(n_plot):
-            label_i = int(attn_batch['y'][i])
-            title_i = CLASS_NAMES[label_i] if label_i < len(CLASS_NAMES) else str(label_i)
+            title_i = _sample_title(i)
+            storm_latlon = (
+                (float(batch_meta['query_lat'][i]),
+                 float(batch_meta['query_lon'][i]))
+                if batch_meta is not None else None
+            )
             fig_a   = plot_attention_geographic(
                 attn_weights[-1][:, :, -1, :], attn_batch,  # last layer, query row
                 location_encoding=loc_enc,
@@ -417,12 +445,13 @@ def evaluate(
                 fov_lon=fov_lon,
                 radius_km=rad_km,
                 sample_idx=i,
+                geo=geo,
+                storm_latlon=storm_latlon,
             )
-            fig_a.suptitle(f'Sample {i} — true label: {title_i}', y=1.01,
-                           fontsize=10)
+            fig_a.suptitle(title_i, y=1.01, fontsize=10)
             fig_g = plot_attention_matrix_grid(
                 attn_weights, sample_idx=i,
-                title=f'Attention matrices — sample {i} (true: {title_i})',
+                title=f'Attention matrices — {title_i}',
             )
             if output_dir is not None:
                 fig_a.savefig(out / f'{split}_attn_sample{i}.png',
@@ -471,6 +500,12 @@ def _parse_args(argv=None):
         '--no_show', action='store_true',
         help="Do not display plots interactively.",
     )
+    parser.add_argument(
+        '--geo', action='store_true',
+        help="Draw attention maps on cartopy map canvases (coastlines/"
+             "borders; azimuthal storm-centred for unit_circle). "
+             "Requires cartopy.",
+    )
     return parser.parse_args(argv)
 
 
@@ -483,4 +518,5 @@ if __name__ == '__main__':
         split=args.split,
         n_attn_samples=args.n_attn_samples,
         show_plots=not args.no_show,
+        geo=args.geo,
     )

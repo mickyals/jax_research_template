@@ -478,3 +478,34 @@ class TestPlotOutputAtInit:
                 extent=extent,
                 seed=seed,
             )
+
+# ---------------------------------------------------------------------------
+# trace_profile
+# ---------------------------------------------------------------------------
+
+class TestTraceProfile:
+
+    def test_writes_trace_files(self, tmp_path):
+        from utils.jax_core.diagnostics import trace_profile
+        with trace_profile(tmp_path / "traces"):
+            x = jnp.ones((8, 8))
+            y = (x @ x).sum()
+            jax.block_until_ready(y)
+        out = tmp_path / "traces"
+        assert out.exists()
+        assert any(out.rglob("*"))
+
+    def test_disabled_is_noop(self, tmp_path):
+        from utils.jax_core.diagnostics import trace_profile
+        with trace_profile(tmp_path / "traces", enabled=False):
+            jax.block_until_ready(jnp.ones(4).sum())
+        assert not (tmp_path / "traces").exists()
+
+    def test_stops_trace_on_exception(self, tmp_path):
+        from utils.jax_core.diagnostics import trace_profile
+        with pytest.raises(RuntimeError, match="boom"):
+            with trace_profile(tmp_path / "traces"):
+                raise RuntimeError("boom")
+        # A second trace must be startable — i.e. the first was stopped.
+        with trace_profile(tmp_path / "traces2"):
+            jax.block_until_ready(jnp.ones(4).sum())

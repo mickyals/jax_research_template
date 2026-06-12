@@ -133,14 +133,19 @@ def _make_attn_figure_callback(
 
     @jax.jit
     def _attn(params):
-        _, weights = model.apply({'params': params}, probe_X,
-                                 train=False, return_weights=True)
-        return weights  # (L, B, H, N+1, N+1)
+        logits, weights = model.apply({'params': params}, probe_X,
+                                      train=False, return_weights=True)
+        return logits, weights  # (B, C), (L, B, H, N+1, N+1)
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
         if fig_every <= 0 or epoch % fig_every != 0:
             return
-        weights = np.asarray(_attn(state.params))   # (L, B, H, N+1, N+1)
+        logits, weights = _attn(state.params)
+        weights = np.asarray(weights)               # (L, B, H, N+1, N+1)
+        true_c  = CLASS_NAMES[int(probe_batch['y'][0])]
+        pred_c  = CLASS_NAMES[int(np.asarray(logits)[0].argmax())]
+        title   = f'true: {true_c}, pred: {pred_c}'
+
         fig = plot_attention_geographic(
             weights[-1][:, :, -1, :], probe_batch,   # last layer, query row
             location_encoding=loc_enc,
@@ -149,10 +154,14 @@ def _make_attn_figure_callback(
             radius_km=radius_km,
             sample_idx=0,
         )
+        fig.suptitle(title, y=1.01, fontsize=10)
         # Use global_step so the map aligns with all other metrics in WandB.
         logger.log_figure('val/attn_map', fig, step=global_step)
 
-        fig_grid = plot_attention_matrix_grid(weights, sample_idx=0)
+        fig_grid = plot_attention_matrix_grid(
+            weights, sample_idx=0,
+            title=f'Attention matrices — {title}',
+        )
         logger.log_figure('val/attn_grid', fig_grid, step=global_step)
 
     return callback

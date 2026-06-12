@@ -1053,3 +1053,47 @@ class TestMetaBatchKey:
         vl     = _MetaLoader(_make_loader(val_arrs, shuffle=False))
         result = Trainer(_TinyMLP(), _METRICS, cfg).fit(tl, vl)
         assert isinstance(result, TrainState)
+
+
+# ---------------------------------------------------------------------------
+# TestProfiling — trainer.profile yaml flag (JAX profiler trace)
+# ---------------------------------------------------------------------------
+
+class TestProfiling:
+
+    def test_profile_writes_trace(self, tmp_path, model, train_arrs, val_arrs):
+        cfg = _base_config(tmp_path, profile=True, profile_steps=2,
+                           num_epochs=1)
+        trainer = Trainer(model, _METRICS, cfg)
+        trainer.fit(_make_loader(train_arrs), _make_loader(val_arrs, shuffle=False))
+        profile_dir = Path(trainer._profile_dir)
+        assert profile_dir.exists()
+        # jax writes plugins/profile/<timestamp>/ trace files
+        assert any(profile_dir.rglob('*'))
+        assert trainer._profile_done
+        assert not trainer._profile_active
+
+    def test_profile_traces_only_once(self, tmp_path, model, train_arrs, val_arrs):
+        cfg = _base_config(tmp_path, profile=True, profile_steps=2,
+                           num_epochs=2)
+        trainer = Trainer(model, _METRICS, cfg)
+        trainer.fit(_make_loader(train_arrs), _make_loader(val_arrs, shuffle=False))
+        runs = list((Path(trainer._profile_dir) / 'plugins' / 'profile').iterdir())
+        assert len(runs) == 1   # one trace session, not one per epoch
+
+    def test_profile_stops_when_epoch_shorter_than_steps(
+        self, tmp_path, model, train_arrs, val_arrs,
+    ):
+        # 64 rows / batch 8 = 8 steps < profile_steps=50 — must still stop
+        cfg = _base_config(tmp_path, profile=True, profile_steps=50,
+                           num_epochs=1)
+        trainer = Trainer(model, _METRICS, cfg)
+        trainer.fit(_make_loader(train_arrs), _make_loader(val_arrs, shuffle=False))
+        assert trainer._profile_done
+        assert not trainer._profile_active
+
+    def test_profile_off_by_default(self, tmp_path, model, train_arrs, val_arrs):
+        cfg = _base_config(tmp_path, num_epochs=1)
+        trainer = Trainer(model, _METRICS, cfg)
+        trainer.fit(_make_loader(train_arrs), _make_loader(val_arrs, shuffle=False))
+        assert not Path(trainer._profile_dir).exists()
