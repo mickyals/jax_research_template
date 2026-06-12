@@ -61,6 +61,52 @@ def sample_regional(
     return lons, lats
 
 
+def sample_regional_area_uniform(
+    key: jax.Array,
+    n: int,
+    lon_bounds: tuple[float, float],
+    lat_bounds: tuple[float, float],
+) -> tuple[jax.Array, jax.Array]:
+    """Area-uniform random sampling in a lon/lat box.
+
+    Latitude is drawn via the inverse CDF lat = arcsin(u) with u uniform
+    in [sin(lat_min), sin(lat_max)], so points are uniform with respect to
+    surface area. Plain ``sample_regional`` is uniform in degrees, which
+    oversamples high latitudes by the 1/cos(lat) factor (~13% across a
+    0-30° band).
+
+    Parameters
+    ----------
+    key : jax.Array
+        JAX PRNGKey.
+    n : int
+        Number of samples.
+    lon_bounds : tuple[float, float]
+        (lon_min, lon_max) in degrees.
+    lat_bounds : tuple[float, float]
+        (lat_min, lat_max) in degrees.
+
+    Returns
+    -------
+    tuple[jax.Array, jax.Array]
+        (lons, lats) in degrees, each shape (n,).
+
+    Example
+    -------
+    >>> key = jax.random.PRNGKey(0)
+    >>> lons, lats = sample_regional_area_uniform(key, 100, (-100., -40.), (0., 30.))
+    >>> lons.shape
+    (100,)
+    """
+    k1, k2 = jax.random.split(key)
+    lons = jax.random.uniform(k1, (n,), minval=lon_bounds[0], maxval=lon_bounds[1])
+    sin_lo = jnp.sin(jnp.deg2rad(lat_bounds[0]))
+    sin_hi = jnp.sin(jnp.deg2rad(lat_bounds[1]))
+    u    = jax.random.uniform(k2, (n,), minval=sin_lo, maxval=sin_hi)
+    lats = jnp.rad2deg(jnp.arcsin(u))
+    return lons, lats
+
+
 def sample_sphere_uniform_area(
     key: jax.Array,
     n: int,

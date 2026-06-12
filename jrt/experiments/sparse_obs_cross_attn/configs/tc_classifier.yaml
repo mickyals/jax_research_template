@@ -9,8 +9,9 @@ seed: 3678
 # Changing this affects both the data preprocessing pipeline and the model, so
 # it lives here rather than being duplicated in data: and model:.
 #
-# unit_circle  station_coords = [norm_distance, bearing_rad] relative to query
-#              query_coords   = [0, 0] sentinel; query = purely learned content
+# unit_circle  station_coords = [x, y] storm-centred local map
+#              (norm_dist·sin(bearing), norm_dist·cos(bearing)), each in [-1, 1]
+#              query_coords   = [0, 0] = storm position; query = learned content
 # domain       station_coords = [norm_lat_rad, norm_lon_rad] absolute position
 #              query_coords   = same encoding; pos_proj adds a positional term
 location_encoding:      unit_circle
@@ -58,12 +59,16 @@ data:
 
   # --- Observed variables ---
   # Order matters — must match model.n_obs_features.
+  # wind_east/wind_north are DERIVED: TCDataset decomposes wind_speed +
+  # wind_from_direction (meteorological FROM convention) into (u, v)
+  # components — no 0/360 seam, low-speed direction noise shrunk by
+  # magnitude, calm (speed 0, direction missing) → exact (0, 0).
   obs_vars:
     - air_pressure_at_sea_level
     - air_temperature
     - dew_point_temperature
-    - wind_speed
-    - wind_from_direction
+    - wind_east
+    - wind_north
 
   # --- Observation normalisation ---
   # minmax_01   → [0, 1]    using per-variable [min, max]
@@ -77,12 +82,18 @@ data:
     air_pressure_at_sea_level: [87000.0, 105000.0]   # Pa  (870–1084 hPa) in the case of the Caribbean in set 1050 but  1084 is the max of land insitu
     air_temperature:           [193.0,   333.0]        # K   (-80 °C to +60 °C)
     dew_point_temperature:     [193.0,   308.0]        # K   (-80 °C to +35 °C)
-    wind_speed:                [0.0,     115.0]         # m/s (max observed ~224 kt)
-    wind_from_direction:       [0.0,     360.0]         # degrees
+    wind_east:                 [-115.0,  115.0]         # m/s, signed symmetric — 0 m/s maps to 0
+    wind_north:                [-115.0,  115.0]         # m/s (max observed speed ~224 kt)
 
   # --- Token padding / truncation ---
   max_stations:           64          # pad or truncate every sample to this many station tokens
   min_stations:           8           # samples with fewer real stations are discarded
+
+  # How the TRAIN loader picks stations when more than max_stations match:
+  # random  = fresh random subset each epoch (subsampling augmentation)
+  # nearest = deterministic nearest-N by distance
+  # Val/test loaders always use 'nearest' (deterministic deployment policy).
+  station_selection:      random
 
   # --- Batch construction ---
   # batch_size is NOT set here — it flows down from trainer.batch_size automatically.
@@ -209,10 +220,18 @@ trainer:
   # Defaults to log_every_n_steps if not set.
   attn_log_every_n_steps:   10
 
-  # How often to render and log a geographic attention map (epoch-level).
-  # Expensive (matplotlib render + WandB upload) — keep infrequent.
+  # How often to render and log the attention figures (epoch-level):
+  # geographic query-row map (val/attn_map) + layers×heads matrix grid
+  # (val/attn_grid), both from the fixed VAL probe batch. Expensive
+  # (matplotlib render + WandB upload) — keep infrequent.
   # 0 = disabled.  Appears in WandB under Media → Images.
+  # The static attention-mask figure (val/attn_mask) is logged once at step 0.
   attn_fig_every_n_epochs:  5
+
+  # How often to log per-layer gradient histograms (grad_flow/<tree path>)
+  # from a fixed TRAIN probe batch — also logged once at init (step 0).
+  # Train-only diagnostic. 0 = disabled.
+  grad_hist_every_n_epochs: 5
 
   # How often to run full val inference and log confusion matrix + per-class F1.
   # Each call iterates the entire val loader — keep infrequent for long runs.

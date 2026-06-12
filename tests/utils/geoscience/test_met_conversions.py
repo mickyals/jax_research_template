@@ -25,6 +25,8 @@ from utils.geoscience.met_conversions import (
     fahrenheit_to_kelvin, kelvin_to_fahrenheit,
     # bearing
     bearing_to_components, components_to_bearing,
+    # wind
+    wind_to_components, components_to_wind,
     # thresholds
     R34_MS_THRESHOLD, R50_MS_THRESHOLD, R64_MS_THRESHOLD,
 )
@@ -210,3 +212,81 @@ class TestBearing:
         assert isinstance(s, jax.Array)
         recovered = components_to_bearing(s, c)
         assert jnp.allclose(recovered, bearings, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Wind decomposition (meteorological FROM convention)
+# ---------------------------------------------------------------------------
+
+class TestWindComponents:
+    @pytest.mark.parametrize("speed,direction", [
+        (10.0, 0.0), (5.0, 45.0), (20.0, 90.0), (3.3, 180.0),
+        (15.0, 270.0), (7.0, 359.0), (1.0, 123.4),
+    ])
+    def test_roundtrip(self, speed, direction):
+        u, v = wind_to_components(speed, direction)
+        s, d = components_to_wind(u, v)
+        assert float(s) == pytest.approx(speed, abs=1e-6)
+        assert float(d) == pytest.approx(direction, abs=1e-4)
+
+    def test_from_convention(self):
+        # Wind FROM north blows toward the south: u=0, v=-speed
+        u, v = wind_to_components(10.0, 0.0)
+        assert float(u) == pytest.approx(0.0, abs=1e-10)
+        assert float(v) == pytest.approx(-10.0)
+        # Wind FROM east blows toward the west: u=-speed, v=0
+        u, v = wind_to_components(10.0, 90.0)
+        assert float(u) == pytest.approx(-10.0)
+        assert float(v) == pytest.approx(0.0, abs=1e-6)
+
+    def test_calm_with_nan_direction_is_zero_vector(self):
+        u, v = wind_to_components(0.0, np.nan)
+        assert float(u) == 0.0
+        assert float(v) == 0.0
+
+    def test_calm_inverse_direction_is_nan(self):
+        s, d = components_to_wind(0.0, 0.0)
+        assert float(s) == 0.0
+        assert np.isnan(float(d))
+
+    def test_negative_speed_raises(self):
+        with pytest.raises(ValueError, match='non-negative'):
+            wind_to_components(-5.0, 90.0)
+        with pytest.raises(ValueError, match='non-negative'):
+            wind_to_components(np.array([3.0, -0.1]), np.array([0.0, 90.0]))
+
+    def test_nan_speed_passes_negative_guard(self):
+        # NaN means missing, not invalid — must not trip the guard
+        u, v = wind_to_components(np.array([np.nan, 1.0]),
+                                  np.array([0.0, 180.0]))
+        assert np.isnan(u[0]) and np.isnan(v[0])
+        assert v[1] == pytest.approx(1.0)
+
+    def test_nan_propagation(self):
+        # Non-calm speed with missing direction → unknown vector
+        u, v = wind_to_components(5.0, np.nan)
+        assert np.isnan(float(u)) and np.isnan(float(v))
+        # Missing speed → unknown vector
+        u, v = wind_to_components(np.nan, 90.0)
+        assert np.isnan(float(u)) and np.isnan(float(v))
+
+    def test_numpy_array_mixed(self):
+        speed     = np.array([0.0, 10.0, 5.0, np.nan])
+        direction = np.array([np.nan, 90.0, np.nan, 45.0])
+        u, v = wind_to_components(speed, direction)
+        assert u.shape == (4,)
+        assert u[0] == 0.0 and v[0] == 0.0          # calm
+        assert u[1] == pytest.approx(-10.0)         # from east
+        assert np.isnan(u[2]) and np.isnan(v[2])    # speed w/o direction
+        assert np.isnan(u[3]) and np.isnan(v[3])    # direction w/o speed
+
+    def test_jax_array(self):
+        speed     = jnp.array([0.0, 10.0])
+        direction = jnp.array([jnp.nan, 180.0])
+        u, v = wind_to_components(speed, direction)
+        assert isinstance(u, jax.Array)
+        assert float(u[0]) == 0.0 and float(v[0]) == 0.0
+        s, d = components_to_wind(u, v)
+        assert jnp.isnan(d[0])
+        assert float(s[1]) == pytest.approx(10.0)
+        assert float(d[1]) == pytest.approx(180.0, abs=1e-4)

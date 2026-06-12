@@ -160,8 +160,20 @@ class TestTCClassifierFakeData:
         model, vs, X = self._init(cfg)
         logits, weights = model.apply(vs, X, train=False, return_weights=True)
         assert logits.shape  == (B, N_CLASSES)
-        assert weights.shape == (B, HEADS, N + 1)
-        assert jnp.allclose(weights.sum(axis=-1), jnp.ones((B, HEADS)), atol=1e-5)
+        # Full attention matrices from every layer (leading axis = LAYERS)
+        assert weights.shape == (LAYERS, B, HEADS, N + 1, N + 1)
+        row_sums = weights.sum(axis=-1)
+        assert jnp.allclose(row_sums, jnp.ones_like(row_sums), atol=1e-5)
+        # Query row of the last layer is a distribution over N+1 tokens
+        q_row = weights[-1][:, :, -1, :]
+        assert q_row.shape == (B, HEADS, N + 1)
+
+    def test_return_weights_stations_blocked_from_query(self, cfg):
+        # Station rows must place ZERO weight on the query column (token N)
+        model, vs, X = self._init(cfg)
+        _, weights = model.apply(vs, X, train=False, return_weights=True)
+        station_rows_query_col = weights[:, :, :, :N, N]
+        assert jnp.allclose(station_rows_query_col, 0.0, atol=1e-6)
 
     def test_gradient_flows(self, cfg):
         """Loss gradient w.r.t. all parameters must be non-None and finite."""
@@ -208,6 +220,26 @@ def test_use_learned_mask_false():
     logits = model.apply(vs, X, train=False)
     assert logits.shape == (B, N_CLASSES)
     assert jnp.all(jnp.isfinite(logits))
+
+
+def test_build_attention_mask_pattern():
+    """build_attention_mask: asymmetry + padding blocking, exact pattern."""
+    from experiments.sparse_obs_cross_attn.train.model import (
+        build_attention_mask,
+    )
+    N_t = 4
+    station_mask = jnp.array([[True, True, False, True]])   # one padding col
+    mask = build_attention_mask(station_mask)               # (1, 1, 5, 5)
+    assert mask.shape == (1, 1, N_t + 1, N_t + 1)
+    m = np.asarray(mask)[0, 0]
+    # stations → query column blocked
+    assert not m[:N_t, N_t].any()
+    # query row: self True, real stations True, padding station False
+    assert bool(m[N_t, N_t])
+    assert bool(m[N_t, 0]) and bool(m[N_t, 1]) and bool(m[N_t, 3])
+    assert not m[:, 2].any()        # padding column blocked for everyone
+    # real station ↔ real station allowed
+    assert bool(m[0, 1]) and bool(m[1, 0])
 
 
 def test_asymmetric_mask_station_independent_of_query():
@@ -284,8 +316,8 @@ class TestTCClassifierRealData:
                 'air_pressure_at_sea_level',
                 'air_temperature',
                 'dew_point_temperature',
-                'wind_speed',
-                'wind_from_direction',
+                'wind_east',
+                'wind_north',
             ],
             'radius_km':             500.0,
             'time_window_hours':     0.1,
@@ -302,8 +334,8 @@ class TestTCClassifierRealData:
                 'air_pressure_at_sea_level': [87000.0, 108400.0],
                 'air_temperature':           [193.0, 333.0],
                 'dew_point_temperature':     [193.0, 308.0],
-                'wind_speed':                [0.0, 115.0],
-                'wind_from_direction':       [0.0, 360.0],
+                'wind_east':                 [-115.0, 115.0],
+                'wind_north':                [-115.0, 115.0],
             },
         }
         dm = TCDataModule.from_config(config)

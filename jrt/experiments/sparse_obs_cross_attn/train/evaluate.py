@@ -48,6 +48,8 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_class_metrics,
     extract_attention_weights,
     plot_attention_geographic,
+    plot_attention_mask,
+    plot_attention_matrix_grid,
 )
 from training.trainer import Trainer
 
@@ -79,7 +81,7 @@ def collect_predictions(
     model:     TCClassifier,
     variables: dict,
     loader:    Any,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, Optional[dict]]:
     """Run all batches through the model.
 
     Parameters
@@ -88,19 +90,25 @@ def collect_predictions(
     variables : dict
         Flax variables dict, e.g. ``{'params': state.params}``.
     loader : iterable
-        Yields ``{'X': ..., 'y': ...}`` dicts.
+        Yields ``{'X': ..., 'y': ...}`` dicts, optionally with a 'meta'
+        entry (see data.datamodule._collate).
 
     Returns
     -------
     preds  : np.ndarray int32 (N,)  — argmax predictions
     labels : np.ndarray int32 (N,)
     logits : np.ndarray float32 (N, n_classes)
+    meta   : dict | None — concatenated batch metadata aligned with preds
+             (sid: list[str | None], iso_time / query_lat / query_lon /
+             n_available / n_used arrays), or None if the loader yields
+             no 'meta' entry.
     """
     apply_fn = jax.jit(lambda X: model.apply(variables, X, train=False))
 
     all_preds  = []
     all_labels = []
     all_logits = []
+    all_meta: dict[str, list] = {}
     for batch in loader:
         logits = np.asarray(apply_fn(batch['X']), dtype=np.float32)
         preds  = logits.argmax(axis=-1).astype(np.int32)
@@ -108,12 +116,55 @@ def collect_predictions(
         all_preds.append(preds)
         all_labels.append(labels)
         all_logits.append(logits)
+        if 'meta' in batch:
+            for k, v in batch['meta'].items():
+                all_meta.setdefault(k, []).append(v)
+
+    meta: Optional[dict] = None
+    if all_meta:
+        meta = {
+            k: (sum(chunks, []) if isinstance(chunks[0], list)
+                else np.concatenate(chunks))
+            for k, chunks in all_meta.items()
+        }
 
     return (
         np.concatenate(all_preds),
         np.concatenate(all_labels),
         np.concatenate(all_logits),
+        meta,
     )
+
+
+def per_storm_metrics(
+    preds:  np.ndarray,
+    labels: np.ndarray,
+    sids:   list,
+) -> dict[str, dict[str, float]]:
+    """Group predictions by storm so every prediction is attributable.
+
+    Background samples (sid is None) are skipped.
+
+    Returns
+    -------
+    dict[sid, dict] with 'n' (samples), 'accuracy' (exact class match)
+    and 'mae_class' (mean |pred − label|), per named storm.
+    """
+    by_sid: dict[str, list[int]] = {}
+    for i, sid in enumerate(sids):
+        if sid is not None:
+            by_sid.setdefault(sid, []).append(i)
+
+    out: dict[str, dict[str, float]] = {}
+    for sid, idx in by_sid.items():
+        p = preds[idx]
+        l = labels[idx]
+        out[sid] = {
+            'n':         len(idx),
+            'accuracy':  float((p == l).mean()),
+            'mae_class': float(np.abs(p - l).mean()),
+        }
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -298,10 +349,20 @@ def evaluate(
     best_state     = trainer.load_checkpoint(abstract_state)
     variables      = {'params': best_state.params}
 
-    preds, labels, logits = collect_predictions(model, variables, loader)
+    preds, labels, logits, meta = collect_predictions(model, variables, loader)
 
     print_report(preds, labels, logits, metrics_fns,
                  split=split, class_names=CLASS_NAMES, n_classes=N_CLASSES)
+
+    if meta is not None:
+        storm_m = per_storm_metrics(preds, labels, meta['sid'])
+        print(f"  Per-storm attribution: {len(storm_m)} named storms")
+        worst = sorted(storm_m.items(), key=lambda kv: kv[1]['accuracy'])[:5]
+        print(f"  Lowest-accuracy storms:")
+        for sid, m in worst:
+            print(f"    {sid:<16}  n={m['n']:>4}  acc={m['accuracy']:.3f}  "
+                  f"mae={m['mae_class']:.2f}")
+        print()
 
     cm  = confusion_matrix(preds, labels)
     pcm = per_class_metrics(cm)
@@ -325,7 +386,8 @@ def evaluate(
         print(f"Confusion / metrics plots saved to {out}/")
 
     # ------------------------------------------------------------------
-    # Attention geographic plots
+    # Attention plots — geographic maps + layers×heads matrix grids + the
+    # static asymmetric-mask figure, all from the first batch
     # ------------------------------------------------------------------
     if n_attn_samples > 0:
         loc_enc  = config['model'].get('location_encoding', 'unit_circle')
@@ -335,13 +397,21 @@ def evaluate(
 
         attn_batch   = exmp_batch  # first batch reused
         attn_weights = extract_attention_weights(model, variables, attn_batch)
-        n_plot       = min(n_attn_samples, attn_weights.shape[0])
+        # attn_weights: (num_layers, B, num_heads, N+1, N+1)
+        n_plot       = min(n_attn_samples, attn_weights.shape[1])
+
+        fig_mask = plot_attention_mask(
+            np.asarray(attn_batch['X']['station_mask'][0])
+        )
+        if output_dir is not None:
+            fig_mask.savefig(out / f'{split}_attn_mask.png',
+                             dpi=150, bbox_inches='tight')
 
         for i in range(n_plot):
             label_i = int(attn_batch['y'][i])
             title_i = CLASS_NAMES[label_i] if label_i < len(CLASS_NAMES) else str(label_i)
             fig_a   = plot_attention_geographic(
-                attn_weights, attn_batch,
+                attn_weights[-1][:, :, -1, :], attn_batch,  # last layer, query row
                 location_encoding=loc_enc,
                 fov_lat=fov_lat,
                 fov_lon=fov_lon,
@@ -350,8 +420,14 @@ def evaluate(
             )
             fig_a.suptitle(f'Sample {i} — true label: {title_i}', y=1.01,
                            fontsize=10)
+            fig_g = plot_attention_matrix_grid(
+                attn_weights, sample_idx=i,
+                title=f'Attention matrices — sample {i} (true: {title_i})',
+            )
             if output_dir is not None:
                 fig_a.savefig(out / f'{split}_attn_sample{i}.png',
+                              dpi=150, bbox_inches='tight')
+                fig_g.savefig(out / f'{split}_attn_grid_sample{i}.png',
                               dpi=150, bbox_inches='tight')
 
         if output_dir is not None:

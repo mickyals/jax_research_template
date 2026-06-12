@@ -10,7 +10,8 @@ never attend to the query; the query attends to all stations. The
 classification head reads the query token output.
 
 Two location encoding modes (config field location_encoding):
-  unit_circle  Learned query content only (no position). station_coords = [norm_dist, bearing_rad].
+  unit_circle  Learned query content only (no position). station_coords = [x, y]
+               storm-centred local map (norm_dist·sin(bearing), norm_dist·cos(bearing)).
   domain       Learned query content + pos_proj(Fourier(query_coords)). station_coords = [norm_lat, norm_lon].
                pos_proj is shared between station and query positional encoding.
 """
@@ -27,6 +28,50 @@ from core.nets.transformers import TransformerEncoder
 from core.embeddings import GaussianFourierEmbedding
 
 N_CLASSES = 11
+
+
+def build_attention_mask(station_mask: jax.Array) -> jax.Array:
+    """Build the asymmetric N+1-token attention mask from a station mask.
+
+    Single source of truth — used by TCClassifier's forward pass and by
+    the mask-visualisation figure (plotting.plot_attention_mask).
+
+    Convention: True = this (from, to) pair is allowed to attend;
+    False = blocked (-inf before softmax).
+
+    Pattern:
+        stations → stations: True   (stations contextualise each other)
+        query    → stations: True   (query reads the station network)
+        query    → self:     True   (query self-attention)
+        stations → query:    False  (stations never peek at the query)
+    plus a padding override: no token may attend to a padding station
+    column (station_mask False).
+
+    Parameters
+    ----------
+    station_mask : jax.Array
+        (B, N) bool, True = real station.
+
+    Returns
+    -------
+    jax.Array
+        (B, 1, N+1, N+1) bool — head dim is 1 so it broadcasts across
+        all attention heads.
+    """
+    B, N = station_mask.shape
+    attn_mask = jnp.zeros((B, 1, N + 1, N + 1), dtype=bool)
+    #                           [batch, head, from_token,  to_token ]
+    attn_mask = attn_mask.at[:, :,  :N, :N ].set(True)  # station_rows  → station_cols
+    attn_mask = attn_mask.at[:, :,   N, :N ].set(True)  # query_row     → station_cols
+    attn_mask = attn_mask.at[:, :,   N,  N ].set(True)  # query_row     → query_col (self)
+
+    # Padding override: block any column j where station_mask[b, j] == False.
+    # station_mask reshaped to (B, 1, 1, N) for broadcast over from-tokens.
+    pad_col   = station_mask[:, None, None, :]           # (B, 1, 1, N)
+    attn_mask = attn_mask.at[:, :, :, :N].set(
+        attn_mask[:, :, :, :N] & pad_col
+    )
+    return attn_mask
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +104,8 @@ class TCClassifier(nn.Module):
         Gaussian Fourier embedding output dim. Must be even. Default 64.
     fourier_scale : float
     location_encoding : str
-        'unit_circle' — learned query content only; station_coords = [norm_dist, bearing_rad].
+        'unit_circle' — learned query content only; station_coords = [x, y]
+                        storm-centred local map (norm_dist·sin/cos(bearing)).
         'domain'      — learned query content + shared pos_proj(Fourier(query_coords));
                         station_coords = [norm_lat, norm_lon].
     use_learned_mask : bool
@@ -169,15 +215,18 @@ class TCClassifier(nn.Module):
             Batch dict from TCDataModule.
         train : bool
         return_weights : bool
-            If True, also return attention weights from the last encoder layer,
-            query row only: shape (B, num_heads, N+1).
-            The last element is the query's self-attention weight — a useful
-            diagnostic (high = model relies on CLS prior; low = trusts stations).
+            If True, also return the full attention matrices from EVERY
+            encoder layer: shape (num_layers, B, num_heads, N+1, N+1).
+            The query row is [..., N, :] (equivalently [..., -1, :]); its
+            last element is the query's self-attention weight — a useful
+            diagnostic (high = model relies on CLS prior; low = trusts
+            stations).
 
         Returns
         -------
         jax.Array or tuple[jax.Array, jax.Array]
-            Logits (B, n_classes), and optionally weights (B, num_heads, N+1).
+            Logits (B, n_classes), and optionally weights
+            (num_layers, B, num_heads, N+1, N+1).
         """
         station_obs    = X['station_obs']     # (B, N, F)
         station_coords = X['station_coords']  # (B, N, 2)
@@ -227,40 +276,17 @@ class TCClassifier(nn.Module):
         # 4. Concatenate: station tokens then query token
         tokens = jnp.concatenate([station_tokens, query_token], axis=1) # (B, N+1, D)
 
-        # 5. Asymmetric attention mask
-        #
-        # Shape: (B=batch, 1=head_broadcast, N+1=from_tokens, N+1=to_tokens)
-        # Convention: True  = this (from, to) pair is allowed to attend.
-        #             False = blocked (treated as -inf before softmax).
-        #
-        # Desired pattern:
-        #   stations → stations: True   (stations contextualise each other)
-        #   query    → stations: True   (query reads the station network)
-        #   query    → self:     True   (query self-attention)
-        #   stations → query:    False  (stations never peek at the query)
-        #
-        # The head dim is 1 so it broadcasts across all attention heads.
-        attn_mask = jnp.zeros((B, 1, N + 1, N + 1), dtype=bool)
-        #                           [batch, head, from_token,  to_token ]
-        attn_mask = attn_mask.at[:, :,  :N, :N ].set(True)  # station_rows  → station_cols
-        attn_mask = attn_mask.at[:, :,   N, :N ].set(True)  # query_row     → station_cols
-        attn_mask = attn_mask.at[:, :,   N,  N ].set(True)  # query_row     → query_col (self)
-
-        # Padding override: block any column j where station_mask[b, j] == False.
-        # No token — station or query — should attend to a padding station.
-        # station_mask: (B, N) bool, True = real station.
-        # Reshape to (B=batch, 1=head, 1=from_broadcast, N=station_cols) for masking.
-        pad_col   = station_mask[:, None, None, :]           # (B, 1, 1, N)
-        attn_mask = attn_mask.at[:, :, :, :N].set(
-            attn_mask[:, :, :, :N] & pad_col
-        )
+        # 5. Asymmetric attention mask — see build_attention_mask for the
+        # full pattern (stations blocked from the query, padding columns
+        # blocked for everyone).
+        attn_mask = build_attention_mask(station_mask)       # (B, 1, N+1, N+1)
 
         # 6. Encoder
         encoder_out = self.encoder(
             tokens, mask=attn_mask, train=train, return_weights=return_weights,
         )
         if return_weights:
-            encoded, attn_weights = encoder_out  # (B, N+1, D), (B, H, N+1, N+1)
+            encoded, attn_weights = encoder_out  # (B, N+1, D), (L, B, H, N+1, N+1)
         else:
             encoded = encoder_out                # (B, N+1, D)
 
@@ -271,8 +297,7 @@ class TCClassifier(nn.Module):
 
         # 8. Return
         if return_weights:
-            # attn_weights[:, :, N, :] slices:
-            #   [batch, head, from_token=N (query row), to_token=0..N (all tokens)]
-            # This is the query's attention distribution over the N stations + itself.
-            return logits, attn_weights[:, :, N, :]                     # (B, H, N+1)
+            # Full per-layer matrices — consumers slice what they need:
+            # query row of layer l = attn_weights[l, :, :, N, :].
+            return logits, attn_weights                # (L, B, H, N+1, N+1)
         return logits

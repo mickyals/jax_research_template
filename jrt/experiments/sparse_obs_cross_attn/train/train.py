@@ -34,10 +34,15 @@ from experiments.sparse_obs_cross_attn.train.evaluate import (
 )
 from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_attention_geographic,
+    plot_attention_mask,
+    plot_attention_matrix_grid,
     plot_class_metrics,
     plot_confusion_matrix,
 )
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
+from experiments.sparse_obs_cross_attn.train.metrics import (
+    build_metrics_fns,
+    cross_entropy,
+)
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier
 from training.trainer import Trainer, TrainState
 from utils.jax_core.diagnostics import model_tabulate
@@ -75,7 +80,9 @@ def _make_attn_entropy_callback(
     def _attn(params):
         _, weights = model.apply({'params': params}, probe_X,
                                  train=False, return_weights=True)
-        return weights  # (B, H, N+1)
+        # Query row of the LAST layer — preserves the metric's original
+        # definition now that weights cover all layers.
+        return weights[-1][:, :, -1, :]  # (B, H, N+1)
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
         weights = np.asarray(_attn(state.params))          # (B, H, N+1)
@@ -97,10 +104,13 @@ def _make_attn_figure_callback(
     data_config: dict,
     fig_every:   int = 5,
 ) -> Callable[[TrainState, int, int], None]:
-    """Return an **epoch-level** callback that logs geographic attention maps.
+    """Return an **epoch-level** callback that logs attention figures.
+
+    Two figures per invocation, both from the fixed VAL probe batch:
+    ``val/attn_map`` (geographic query-row attention, last layer) and
+    ``val/attn_grid`` (layers × heads grid of full attention matrices).
 
     Intended for use with ``Trainer.fit(epoch_callbacks=[fn])``.
-    Uses ``step=epoch`` to align figures with the epoch-level val metrics.
 
     Parameters
     ----------
@@ -113,7 +123,7 @@ def _make_attn_figure_callback(
         The ``data:`` block from the YAML config — supplies location_encoding,
         fov_lat, fov_lon, radius_km for geographic rendering.
     fig_every : int
-        Log a figure every this many epochs. 0 = never. Default 5.
+        Log figures every this many epochs. 0 = never. Default 5.
     """
     probe_X   = probe_batch['X']
     loc_enc   = data_config.get('location_encoding', 'unit_circle')
@@ -125,14 +135,14 @@ def _make_attn_figure_callback(
     def _attn(params):
         _, weights = model.apply({'params': params}, probe_X,
                                  train=False, return_weights=True)
-        return weights  # (B, H, N+1)
+        return weights  # (L, B, H, N+1, N+1)
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
         if fig_every <= 0 or epoch % fig_every != 0:
             return
-        weights = np.asarray(_attn(state.params))
+        weights = np.asarray(_attn(state.params))   # (L, B, H, N+1, N+1)
         fig = plot_attention_geographic(
-            weights, probe_batch,
+            weights[-1][:, :, -1, :], probe_batch,   # last layer, query row
             location_encoding=loc_enc,
             fov_lat=fov_lat,
             fov_lon=fov_lon,
@@ -142,6 +152,71 @@ def _make_attn_figure_callback(
         # Use global_step so the map aligns with all other metrics in WandB.
         logger.log_figure('val/attn_map', fig, step=global_step)
 
+        fig_grid = plot_attention_matrix_grid(weights, sample_idx=0)
+        logger.log_figure('val/attn_grid', fig_grid, step=global_step)
+
+    return callback
+
+
+# ---------------------------------------------------------------------------
+# Gradient-flow callback (TRAIN probe only)
+# ---------------------------------------------------------------------------
+
+def _make_grad_flow_callback(
+    model:       TCClassifier,
+    probe_batch: dict,
+    logger,
+    every_n_epochs: int = 5,
+) -> Callable[[TrainState, int, int], None]:
+    """Return an epoch-level callback that logs per-layer gradient histograms.
+
+    Computes jax.grad of the cross-entropy loss on a fixed TRAIN probe
+    batch and pushes one histogram per parameter leaf, named by its tree
+    path (e.g. ``grad_flow/encoder/blocks_0/attn/query/kernel``), via
+    ``logger.log_histogram``. Vanishing/exploding layers show up as
+    histograms collapsing to 0 or blowing up across depth.
+
+    Call once manually with the freshly initialised state for the init
+    snapshot, then register as an epoch callback.
+
+    Parameters
+    ----------
+    model : TCClassifier
+    probe_batch : dict
+        A fixed TRAINING batch held in memory for the run duration
+        (gradient flow is a training diagnostic — never wired to val/test).
+    logger : experiment logger
+        Must expose ``log_histogram``.
+    every_n_epochs : int
+        Log every this many epochs. 0 = never. Default 5.
+    """
+    probe_X = probe_batch['X']
+    probe_y = probe_batch['y']
+
+    @jax.jit
+    def _grads(params):
+        def loss_fn(p):
+            logits = model.apply({'params': p}, probe_X, train=False)
+            return cross_entropy(logits, probe_y)
+        return jax.grad(loss_fn)(params)
+
+    def _log(params, step: int) -> None:
+        grads = _grads(params)
+        leaves = jax.tree_util.tree_flatten_with_path(grads)[0]
+        for path, leaf in leaves:
+            name = '/'.join(
+                getattr(k, 'key', getattr(k, 'name', str(k))) for k in path
+            )
+            logger.log_histogram(
+                f'grad_flow/{name}', np.asarray(leaf).ravel(), step=step,
+            )
+
+    def callback(state: TrainState, epoch: int, global_step: int) -> None:
+        if every_n_epochs <= 0 or epoch % every_n_epochs != 0:
+            return
+        _log(state.params, global_step)
+
+    callback.log_now = _log   # exposed for the init-time snapshot
     return callback
 
 
@@ -171,7 +246,7 @@ def _make_eval_plots_callback(
             return
 
         variables = {'params': state.params}
-        preds, labels, _ = collect_predictions(model, variables, val_loader)
+        preds, labels, _, _ = collect_predictions(model, variables, val_loader)
 
         cm  = confusion_matrix(preds, labels)
         pcm = per_class_metrics(cm)
@@ -294,13 +369,15 @@ def train(config_path: str | Path, resume: bool = False) -> None:
 
     # Print a per-layer shape + parameter count table before training.
     # Peek a small batch (4 samples) so Flax can trace all tensor shapes.
-    _peek  = next(iter(train_loader))
-    _exmp  = {k: v[:4] for k, v in _peek['X'].items()}
+    # train_probe_batch doubles as the fixed probe for the gradient-flow
+    # callback below (gradient flow is a TRAIN diagnostic).
+    train_probe_batch = next(iter(train_loader))
+    _exmp  = {k: v[:4] for k, v in train_probe_batch['X'].items()}
     print()
     print("─" * 58)
     print("Model  (TCClassifier)")
     model_tabulate(model, _exmp, False)   # args: X dict, train=False
-    del _peek, _exmp
+    del _exmp
 
     # ------------------------------------------------------------------
     # Trainer
@@ -341,13 +418,37 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # Runs a full val forward pass so keep infrequent for long runs.
     eval_plots_every = trainer_cfg.get('eval_plots_every_n_epochs', 1)
 
+    # Gradient-flow histograms — TRAIN probe batch only, logged at init
+    # and every grad_hist_every_n_epochs epochs.
+    grad_hist_every = trainer_cfg.get('grad_hist_every_n_epochs', 5)
+    grad_flow_cb    = _make_grad_flow_callback(
+        model, train_probe_batch, trainer.logger,
+        every_n_epochs=grad_hist_every,
+    )
+
     epoch_callbacks = [
         _make_attn_figure_callback(model, probe_batch, trainer.logger,
                                    data_config=config['data'],
                                    fig_every=fig_every),
         _make_eval_plots_callback(model, val_loader, trainer.logger,
                                   every_n_epochs=eval_plots_every),
+        grad_flow_cb,
     ]
+
+    # One-off static figures + init-time gradient snapshot.
+    # The mask figure documents the asymmetric attention pattern for this
+    # run's probe sample — it never changes during training.
+    mask_fig = plot_attention_mask(
+        np.asarray(probe_batch['X']['station_mask'][0])
+    )
+    trainer.logger.log_figure('val/attn_mask', mask_fig, step=0)
+
+    if grad_hist_every > 0:
+        # fit() re-creates the state with the same seed, so this initial
+        # state's gradients are the true step-0 snapshot.
+        init_state = trainer.init_state(train_probe_batch)
+        grad_flow_cb.log_now(init_state.params, step=0)
+        del init_state
 
     # ------------------------------------------------------------------
     # Train

@@ -822,7 +822,10 @@ class TransformerEncoder(nn.Module):
         train : bool
         return_weights : bool
             If True returns (output, attn_weights) where attn_weights are
-            from the last block only, shape (B, num_heads, T, T).
+            collected from EVERY block and stacked along a leading layer
+            axis: shape (num_layers, B, num_heads, T, T). Index [-1] for
+            the last block, or iterate the leading axis for per-layer
+            diagnostics (e.g. an attention-matrix grid).
 
         Returns
         -------
@@ -832,10 +835,11 @@ class TransformerEncoder(nn.Module):
             x = self.pos_enc(x)
 
         if return_weights:
-            for block in self.blocks[:-1]:
-                x = block(x, mask=mask, train=train)
-            x, weights = self.blocks[-1](x, mask=mask, train=train, return_weights=True)
-            return self.norm(x), weights
+            all_weights = []
+            for block in self.blocks:
+                x, w = block(x, mask=mask, train=train, return_weights=True)
+                all_weights.append(w)
+            return self.norm(x), jnp.stack(all_weights, axis=0)
 
         for block in self.blocks:
             x = block(x, mask=mask, train=train)

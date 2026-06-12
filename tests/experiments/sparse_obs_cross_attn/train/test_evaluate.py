@@ -27,6 +27,7 @@ from experiments.sparse_obs_cross_attn.train.evaluate import (
     collect_predictions,
     confusion_matrix,
     per_class_metrics,
+    per_storm_metrics,
 )
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
 
@@ -240,7 +241,7 @@ class TestCollectPredictions:
     def test_output_shapes(self, model_vars):
         model, variables = model_vars
         loader = _FakeLoader(n=2)
-        preds, labels, logits = collect_predictions(model, variables, loader)
+        preds, labels, logits, _ = collect_predictions(model, variables, loader)
         n_total = B * 2
         assert preds.shape  == (n_total,)
         assert labels.shape == (n_total,)
@@ -249,7 +250,7 @@ class TestCollectPredictions:
     def test_preds_are_argmax_of_logits(self, model_vars):
         model, variables = model_vars
         loader = _FakeLoader(n=1)
-        preds, _, logits = collect_predictions(model, variables, loader)
+        preds, _, logits, _ = collect_predictions(model, variables, loader)
         expected = logits.argmax(axis=-1)
         np.testing.assert_array_equal(preds, expected)
 
@@ -257,16 +258,69 @@ class TestCollectPredictions:
         model, variables = model_vars
         batch  = _fake_batch()
         loader = [batch]   # single-batch loader (plain list)
-        _, labels, _ = collect_predictions(model, variables, loader)
+        _, labels, _, _ = collect_predictions(model, variables, loader)
         np.testing.assert_array_equal(labels, np.asarray(batch['y']))
 
     def test_preds_in_valid_class_range(self, model_vars):
         model, variables = model_vars
-        preds, _, _ = collect_predictions(model, variables, _FakeLoader(n=2))
+        preds, _, _, _ = collect_predictions(model, variables, _FakeLoader(n=2))
         assert preds.min() >= 0
         assert preds.max() < N_CLASSES
 
     def test_logits_are_finite(self, model_vars):
         model, variables = model_vars
-        _, _, logits = collect_predictions(model, variables, _FakeLoader(n=2))
+        _, _, logits, _ = collect_predictions(model, variables, _FakeLoader(n=2))
         assert np.all(np.isfinite(logits))
+
+    def test_meta_none_without_meta_in_batches(self, model_vars):
+        model, variables = model_vars
+        _, _, _, meta = collect_predictions(model, variables, _FakeLoader(n=2))
+        assert meta is None
+
+    def test_meta_concatenated_across_batches(self, model_vars):
+        model, variables = model_vars
+        batches = []
+        for i in range(2):
+            b = _fake_batch()
+            b['meta'] = {
+                'sid':         [f'SID{i}'] * (B - 1) + [None],
+                'iso_time':    np.full(B, 100 + i, dtype=np.int64),
+                'query_lat':   np.full(B, 15.0, dtype=np.float32),
+                'query_lon':   np.full(B, -75.0, dtype=np.float32),
+                'n_available': np.full(B, 7, dtype=np.int32),
+                'n_used':      np.full(B, 5, dtype=np.int32),
+            }
+            batches.append(b)
+        _, _, _, meta = collect_predictions(model, variables, batches)
+        assert meta is not None
+        assert len(meta['sid']) == 2 * B
+        assert meta['sid'][0] == 'SID0' and meta['sid'][B] == 'SID1'
+        assert meta['sid'][B - 1] is None
+        assert meta['iso_time'].shape == (2 * B,)
+
+
+# ---------------------------------------------------------------------------
+# TestPerStormMetrics
+# ---------------------------------------------------------------------------
+
+class TestPerStormMetrics:
+
+    def test_groups_by_sid_and_skips_background(self):
+        preds  = np.array([5, 5, 0, 7, 0], dtype=np.int32)
+        labels = np.array([5, 6, 0, 7, 1], dtype=np.int32)
+        sids   = ['A', 'A', None, 'B', None]
+        out = per_storm_metrics(preds, labels, sids)
+        assert set(out.keys()) == {'A', 'B'}
+        assert out['A']['n'] == 2
+        assert out['A']['accuracy']  == pytest.approx(0.5)
+        assert out['A']['mae_class'] == pytest.approx(0.5)
+        assert out['B']['n'] == 1
+        assert out['B']['accuracy'] == pytest.approx(1.0)
+
+    def test_empty_when_all_background(self):
+        out = per_storm_metrics(
+            np.array([0, 0], dtype=np.int32),
+            np.array([0, 0], dtype=np.int32),
+            [None, None],
+        )
+        assert out == {}

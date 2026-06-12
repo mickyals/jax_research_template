@@ -5,6 +5,7 @@ import numpy as np
 
 from utils.sampling.coordinate import (
     sample_regional,
+    sample_regional_area_uniform,
     sample_sphere_uniform_area,
     sample_sphere_uniform_angle,
     sample_volume,
@@ -307,3 +308,46 @@ class TestLhsSampleVolume:
             key, 30, np.array(volume_bounds), optimization="random-cd"
         )
         assert coords.shape == (30, 3)
+
+# ---------------------------------------------------------------------------
+# sample_regional_area_uniform
+# ---------------------------------------------------------------------------
+
+class TestSampleRegionalAreaUniform:
+
+    def test_output_shapes(self, key, regional_bounds):
+        lon_b, lat_b = regional_bounds
+        lons, lats = sample_regional_area_uniform(key, 100, lon_b, lat_b)
+        assert lons.shape == (100,)
+        assert lats.shape == (100,)
+
+    def test_in_bounds(self, key, regional_bounds):
+        lon_b, lat_b = regional_bounds
+        lons, lats = sample_regional_area_uniform(key, 500, lon_b, lat_b)
+        assert jnp.all(lons >= lon_b[0]) and jnp.all(lons <= lon_b[1])
+        assert jnp.all(lats >= lat_b[0]) and jnp.all(lats <= lat_b[1])
+
+    def test_sin_lat_is_uniform(self, key, regional_bounds):
+        # Area-uniform ⇔ sin(lat) uniform in [sin(lat_min), sin(lat_max)]:
+        # the mean of sin(lat) should sit at the interval midpoint.
+        lon_b, lat_b = regional_bounds
+        _, lats = sample_regional_area_uniform(key, 20_000, lon_b, lat_b)
+        sin_lat = jnp.sin(jnp.deg2rad(lats))
+        mid = (jnp.sin(jnp.deg2rad(lat_b[0])) + jnp.sin(jnp.deg2rad(lat_b[1]))) / 2
+        assert abs(float(sin_lat.mean()) - float(mid)) < 0.01
+
+    def test_differs_from_degree_uniform(self, key, regional_bounds):
+        # Degree-uniform oversamples high latitudes relative to area —
+        # its mean latitude is higher than the area-uniform mean over 0–30°.
+        lon_b, lat_b = regional_bounds
+        _, lats_area = sample_regional_area_uniform(key, 20_000, lon_b, lat_b)
+        _, lats_deg  = sample_regional(key, 20_000, lon_b, lat_b)
+        assert float(lats_deg.mean()) > float(lats_area.mean())
+
+    def test_reproducibility(self, regional_bounds):
+        lon_b, lat_b = regional_bounds
+        k = jax.random.PRNGKey(7)
+        lons1, lats1 = sample_regional_area_uniform(k, 50, lon_b, lat_b)
+        lons2, lats2 = sample_regional_area_uniform(k, 50, lon_b, lat_b)
+        assert jnp.array_equal(lons1, lons2)
+        assert jnp.array_equal(lats1, lats2)

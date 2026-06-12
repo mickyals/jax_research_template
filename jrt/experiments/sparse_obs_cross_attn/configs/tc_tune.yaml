@@ -18,7 +18,8 @@
 seed: 42
 
 # Coordinate encoding -- set once here, injected into data: and model:.
-# unit_circle  station_coords = [norm_distance, bearing_rad] relative to query
+# unit_circle  station_coords = [x, y] storm-centred local map
+#              (norm_dist·sin(bearing), norm_dist·cos(bearing))
 # domain       station_coords = [norm_lat_rad, norm_lon_rad] absolute position
 location_encoding:  unit_circle
 
@@ -125,12 +126,14 @@ data:
   time_window_hours:      0.1
 
   # --- Observed variables ---
+  # wind_east/wind_north are DERIVED from wind_speed + wind_from_direction
+  # by TCDataset (see tc_classifier.yaml for rationale).
   obs_vars:
     - air_pressure_at_sea_level
     - air_temperature
     - dew_point_temperature
-    - wind_speed
-    - wind_from_direction
+    - wind_east
+    - wind_north
 
   # --- Observation normalisation ---
   obs_normalisation:      minmax_11
@@ -138,12 +141,15 @@ data:
     air_pressure_at_sea_level: [87000.0, 108400.0]
     air_temperature:           [193.0,   333.0]
     dew_point_temperature:     [193.0,   308.0]
-    wind_speed:                [0.0,     115.0]
-    wind_from_direction:       [0.0,     360.0]
+    wind_east:                 [-115.0,  115.0]
+    wind_north:                [-115.0,  115.0]
 
   # --- Token padding / truncation ---
   max_stations:           64
   min_stations:           1
+
+  # Train-loader station subsampling; val/test always 'nearest'.
+  station_selection:      random
 
   # --- Batch construction ---
   # batch_size is set in trainer: and propagated here by tune.py.

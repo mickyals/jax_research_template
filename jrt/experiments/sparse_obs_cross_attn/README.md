@@ -24,8 +24,14 @@ This is a binary + ordinal classification problem over 11 classes:
 - `air_pressure_at_sea_level` (Pa)
 - `air_temperature` (K)
 - `dew_point_temperature` (K)
-- `wind_speed` (m/s)
-- `wind_from_direction` (°)
+- `wind_east`, `wind_north` (m/s) — *derived*: `TCDataset` decomposes the raw
+  `wind_speed` + `wind_from_direction` columns into (u, v) velocity components
+  (meteorological FROM convention, `utils/geoscience/met_conversions.py`).
+  This removes the 0°/360° direction seam and shrinks low-speed direction noise
+  by magnitude. Calm reports (speed 0, direction missing) become an exact
+  (0, 0) vector rather than a missing value; non-calm speed without direction
+  stays missing. `obs_bounds` for the components are signed symmetric
+  (±115 m/s) so 0 m/s normalises to exactly 0 under `minmax_11`.
 
 **Splits:**
 - Train: IBTrACS seasons 2005–2020
@@ -33,7 +39,7 @@ This is a binary + ordinal classification problem over 11 classes:
 - Test: 2023–2025
 - Hard test: multi-storm timestamps (870 times when ≥2 storms were active simultaneously) — held out entirely
 
-**Batching:** each batch is 1:1 balanced — half TC samples (storm centre as query), half background samples (random domain point during non-TC periods).
+**Batching:** each batch is 1:1 balanced — half TC samples (storm centre as query), half background samples (domain point during non-TC periods). Train backgrounds are fresh uniform draws each step; val/test loaders use ONE frozen background set (Latin-Hypercube positions + fixed-seed synoptic timestamps) reused every epoch, plus deterministic nearest-N station selection, so eval differences are purely model change. Sequential (eval) epochs yield every valid TC sample — the final partial batch is flushed with proportionally fewer backgrounds.
 
 ---
 
@@ -81,7 +87,7 @@ Set in both `data.location_encoding` and `model.location_encoding` (they must ma
 
 | Mode | `station_coords` | `query_coords` |
 |------|-----------------|----------------|
-| `unit_circle` | `[norm_distance, bearing_rad]` relative to storm | `[0, 0]` sentinel; query uses `learned_query` only |
+| `unit_circle` | `[x, y]` storm-centred local map (`norm_dist·sin(bearing), norm_dist·cos(bearing)`), each in [-1, 1] | `[0, 0]` = storm position; query uses `learned_query` content only |
 | `domain` | `[norm_lat_rad, norm_lon_rad]` absolute | same encoding; adds `pos_proj(Fourier(...))` to query |
 
 `unit_circle` is rotation-equivariant (the storm is always "at the origin"). `domain` retains absolute geographic position.
@@ -138,10 +144,13 @@ sparse_obs_cross_attn/
 ├── plotting/
 │   └── plotting.py      Confusion matrix and class metrics (thin wrappers
 │                           over jrt/utils/plotting fields.plot_heatmap and
-│                           curves.plot_grouped_bars), and geographic
-│                           attention plots (unit_circle: bespoke polar
-│                           scatter via _value_scatter; domain: thin wrapper
-│                           over fields.plot_scatter_overlay)
+│                           curves.plot_grouped_bars), geographic
+│                           attention plots (unit_circle: storm-centred
+│                           local x-y scatter with km rings via
+│                           _value_scatter; domain: thin wrapper over
+│                           fields.plot_scatter_overlay), layers×heads
+│                           attention-matrix grid, and the static
+│                           asymmetric-mask figure
 └── train/
     ├── model.py         TCClassifier — unified Transformer encoder
     ├── metrics.py       cross_entropy, accuracy, binary_accuracy, mae_class
@@ -261,7 +270,9 @@ python -m experiments.sparse_obs_cross_attn.train.evaluate \
 Outputs:
 - Confusion matrix — row-normalised 11×11 and raw counts
 - Per-class precision / recall / F1 bar chart
-- Geographic attention maps — polar scatter (unit_circle) or lat/lon scatter (domain), coloured by mean attention weight. In domain mode, `plot_attention_geographic(..., geo=True)` draws the scatter on a PlateCarree map with coastlines/borders (requires cartopy, optional dependency; default stays cartopy-free)
+- Geographic attention maps — storm-centred local x-y scatter with km distance rings (unit_circle) or lat/lon scatter (domain), coloured by mean attention weight of the last layer's query row. In domain mode, `plot_attention_geographic(..., geo=True)` draws the scatter on a PlateCarree map with coastlines/borders (requires cartopy, optional dependency; default stays cartopy-free)
+- Attention-matrix grids — layers × heads panels of the full (N+1)×(N+1) matrices per sample (`plot_attention_matrix_grid`; plain imshow, no per-token labels, dashed lines mark the query row/column)
+- Attention-mask figure — the exact asymmetric boolean mask the model builds (`plot_attention_mask`, single source of truth: `model.build_attention_mask`)
 
 ### Hyperparameter search (CLI)
 
@@ -351,7 +362,7 @@ import numpy as np
 def attn_callback(state, epoch, global_step):
     _, w = model.apply({'params': state.params}, batch['X'],
                        train=False, return_weights=True)
-    w       = np.asarray(w)                          # (B, H, N+1)
+    w       = np.asarray(w)[-1][:, :, -1, :]   # last layer, query row → (B, H, N+1)
     entropy = float(-np.sum(w * np.log(w + 1e-12), axis=-1).mean())
     print(f'  epoch {epoch:3d}  val/attn_entropy = {entropy:.4f}')
 
@@ -362,7 +373,8 @@ best_state = trainer.fit(train_loader, val_loader,
 ```python
 # Cell 6 — evaluate on test split
 from experiments.sparse_obs_cross_attn.train.evaluate import (
-    collect_predictions, confusion_matrix, per_class_metrics, CLASS_NAMES,
+    collect_predictions, confusion_matrix, per_class_metrics,
+    per_storm_metrics, CLASS_NAMES,
 )
 from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_confusion_matrix, plot_class_metrics,
@@ -370,7 +382,10 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
 import matplotlib.pyplot as plt
 
 variables = {'params': best_state.params}
-preds, labels, logits = collect_predictions(model, variables, dm.test_loader())
+preds, labels, logits, meta = collect_predictions(model, variables, dm.test_loader())
+
+# Every prediction is attributable to a named storm (background → sid None)
+storm_metrics = per_storm_metrics(preds, labels, meta['sid'])
 
 cm  = confusion_matrix(preds, labels)
 pcm = per_class_metrics(cm)
@@ -380,23 +395,31 @@ plt.show()
 ```
 
 ```python
-# Cell 7 — geographic attention map
+# Cell 7 — attention figures
 from experiments.sparse_obs_cross_attn.plotting.plotting import (
     extract_attention_weights, plot_attention_geographic,
+    plot_attention_matrix_grid, plot_attention_mask,
 )
 
 attn_batch   = next(iter(val_loader))
 attn_weights = extract_attention_weights(model, variables, attn_batch)
-print('weights:', attn_weights.shape)   # (B, H, N+1)
+print('weights:', attn_weights.shape)   # (num_layers, B, H, N+1, N+1)
 
+# Geographic map — query row of the last layer
 fig = plot_attention_geographic(
-    attn_weights, attn_batch,
+    attn_weights[-1][:, :, -1, :], attn_batch,
     location_encoding = config['data']['location_encoding'],
     fov_lat           = config['data'].get('fov_lat'),
     fov_lon           = config['data'].get('fov_lon'),
     radius_km         = config['data'].get('radius_km', 500.0),
     sample_idx        = 0,
 )
+
+# Layers × heads grid of full (N+1)×(N+1) matrices
+fig_grid = plot_attention_matrix_grid(attn_weights, sample_idx=0)
+
+# Static asymmetric-mask figure (stations blocked from query, padding blocked)
+fig_mask = plot_attention_mask(np.asarray(attn_batch['X']['station_mask'][0]))
 plt.show()
 ```
 
@@ -411,7 +434,7 @@ plt.show()
 | `val/accuracy` | Top-1 accuracy over all 11 classes |
 | `val/binary_accuracy` | TC vs no-TC (class 0 vs class > 0); random chance = 0.5 |
 | `val/mae_class` | Mean \|predicted class − true class\| in class units |
-| `val/attn_entropy` | Entropy of query-row attention weights over N+1 positions — logged per epoch. A falling curve means the model is concentrating attention on specific stations. |
+| `val/attn_entropy` | Entropy of the LAST layer's query-row attention weights over N+1 positions. A falling curve means the model is concentrating attention on specific stations. |
 
 **Interpretation:**
 - A model that always predicts class 0 achieves `binary_accuracy = 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
@@ -427,9 +450,10 @@ Key fields in `tc_classifier.yaml`:
 |-----|---------|-------|
 | `seed` | 3678 | Single seed for model init, dropout, and data shuffle |
 | `data.radius_km` | 500 | Stations outside this radius are excluded |
-| `data.time_window_hours` | 0.1 | Temporal window for matching obs to TC timestamp |
+| `data.time_window_hours` | 0.1 | Temporal tolerance (±) for matching obs to the query time; each station contributes only its report nearest in time |
 | `data.max_stations` | 64 | Padding / truncation limit |
 | `data.min_stations` | 1 | Samples with fewer stations are dropped |
+| `data.station_selection` | `random` | TRAIN-loader station subsampling above `max_stations`: `random` (epoch-varying augmentation) or `nearest`. Val/test loaders always default to `nearest` (deterministic) |
 | `data.location_encoding` | `unit_circle` | `unit_circle` or `domain`; must match `model.location_encoding` |
 | `data.obs_normalisation` | `minmax_11` | `minmax_01` / `minmax_11` / `standardise` |
 | `model.location_encoding` | `unit_circle` | Must match `data.location_encoding` |
@@ -440,6 +464,8 @@ Key fields in `tc_classifier.yaml`:
 | `model.num_layers` | 4 | Total encoder depth (unified self-attention over all N+1 tokens) |
 | `model.fourier_dim` | 64 | `GaussianFourierEmbedding` output dim (must be even) |
 | `model.fourier_scale` | 1.0 | Std dev of frequency matrix; log-uniformly tuned in HP search [0.1, 10.0] |
+| `trainer.attn_fig_every_n_epochs` | 5 | Epoch cadence for `val/attn_map` + `val/attn_grid` figures (VAL probe batch); 0 = disabled |
+| `trainer.grad_hist_every_n_epochs` | 5 | Epoch cadence for `grad_flow/*` gradient histograms (TRAIN probe batch, also at init); 0 = disabled |
 | `trainer.patience_metric` | `val/cross_entropy` | |
 | `trainer.run_dir` | `runs/tc_classifier/run_01` | Change per run to avoid overwriting |
 | `trainer.log_backend` | `wandb` | `wandb` / `tensorboard` / `null` |
@@ -454,6 +480,12 @@ For WandB: set `log_backend: wandb`, add `project` / `name` / `tags` under `log_
 
 **`learned_query` param:** a single `(embed_dim,)` vector initialised with `normal(0.02)` — the standard ViT/BERT special-token init. In unit_circle mode it is the entire query token (absolute position is degenerate at [0,0]). In domain mode it contributes content while `pos_proj` contributes location.
 
-**Attention entropy callback** (`train.py`): a fixed validation probe batch is held in memory for the duration of training. After each validation epoch a JIT-compiled forward pass with `return_weights=True` computes mean entropy over all heads and all N+1 attention weights and logs it as `val/attn_entropy`. Every 5 epochs a geographic attention figure is also logged — the query self-attention weight is excluded from the map by slicing `weights[:, :, :N]` before applying the station mask.
+**Attention observability** (`train.py`): a fixed validation probe batch is held in memory for the duration of training. `return_weights=True` returns the full attention matrices from EVERY encoder layer, shape `(num_layers, B, H, N+1, N+1)`. The entropy callback computes mean entropy over the last layer's query row and logs it as `val/attn_entropy` (step cadence). Every `attn_fig_every_n_epochs` epochs two figures are logged from the same probe: `val/attn_map` (geographic query-row scatter — the query self-attention weight is dropped before the station mask is applied) and `val/attn_grid` (layers × heads grid of full matrices). The static `val/attn_mask` figure is logged once at step 0. Attention figures are VAL/TEST diagnostics — `evaluate.py` produces the same map + grid + mask figures for the test split; nothing attention-related runs on training batches.
+
+**Gradient-flow callback** (`train.py`): a fixed TRAINING probe batch; `jax.grad` of the cross-entropy loss, one histogram per parameter leaf named by its tree path (`grad_flow/encoder/blocks_0/...`), pushed via `logger.log_histogram` at init (step 0) and every `grad_hist_every_n_epochs` epochs. Train-only — vanishing/exploding layers show up as histograms collapsing or blowing up across depth.
 
 **Multi-storm exclusion:** IBTrACS timestamps with ≥2 active storms are not used during training or validation — the model sees only unambiguous single-storm or background samples. These timestamps form the `hard_test` split for post-training analysis.
+
+**Synoptic background pool:** background timestamps are restricted to the 3-hourly synoptic grid (00/03/…/21 UTC, exact) that best-track rows sit on, so time-of-day can never become a class shortcut. A handful of off-grid best-track special rows (landfall/peak inserts) remain on the TC side — known, accepted asymmetry.
+
+**Sample metadata:** every batch carries a `meta` entry alongside `X`/`y` — SID (None for background), ISO time, raw query lat/lon, and station counts (`n_available` post-dedup candidates, `n_used` after the `max_stations` cap). It is never part of the model inputs (the `Trainer` drops it before its jitted steps); `evaluate.py` uses it for per-storm attribution and `TCDataModule.summary()` reports station-count diagnostics from it.

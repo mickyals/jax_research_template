@@ -96,10 +96,15 @@ def _to_jax_batch(batch: dict) -> dict:
 
     Handles batch['X'] being either a plain array or a dict of arrays,
     supporting models whose __call__ accepts a structured dict input.
-    Non-array non-dict values are passed through unchanged.
+
+    The top-level key 'meta' is reserved for non-model sample metadata
+    (attribution strings, diagnostics) and is dropped here — it must never
+    reach the jitted train/eval steps, which trace every batch leaf.
     """
     result = {}
     for k, v in batch.items():
+        if k == 'meta':
+            continue
         if isinstance(v, dict):
             result[k] = {k2: jnp.asarray(v2) for k2, v2 in v.items()}
         else:
@@ -111,10 +116,13 @@ def _batch_head(batch: dict, n: int = 4) -> dict:
     """Return the first n rows from each value in a batch dict.
 
     Used to build a small example batch for model initialization.
-    Handles dict-valued X and list-valued metadata fields.
+    Handles dict-valued X and list-valued metadata fields. The reserved
+    'meta' key is dropped (see _to_jax_batch).
     """
     result = {}
     for k, v in batch.items():
+        if k == 'meta':
+            continue
         if isinstance(v, dict):
             result[k] = {k2: jnp.asarray(v2[:n]) for k2, v2 in v.items()}
         elif isinstance(v, list):

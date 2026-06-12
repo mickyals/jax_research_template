@@ -201,6 +201,44 @@ class TestGetObsNear:
 
 
 # ---------------------------------------------------------------------------
+# Per-station dedup — the window is a tolerance, one row per station
+# ---------------------------------------------------------------------------
+
+class TestGetObsNearDedup:
+
+    def test_one_row_per_station_in_wide_window(self, ds, paths):
+        _, _, base_ns, hour_ns = paths
+        # ±5 h window: each hourly station has 6 reports inside it,
+        # but every station must contribute exactly one row.
+        df = ds.get_obs_near(15.0, -75.0, base_ns, 800.0, 5 * hour_ns,
+                             DEFAULT_OBS_VARS)
+        counts = df['primary_station_id'].value_counts()
+        assert (counts == 1).all()
+        assert set(counts.index) == {'STA_A', 'STA_B', 'STA_C'}
+
+    def test_keeps_report_nearest_in_time(self, paths, ds):
+        obs_path, _, base_ns, hour_ns = paths
+        # Query 10 min after hour 2: candidates within ±1 h are hours 2
+        # and 3 — hour 2 (Δ=10 min) must win over hour 3 (Δ=50 min).
+        query_ts = base_ns + 2 * hour_ns + 10 * 60_000_000_000
+        df = ds.get_obs_near(15.0, -75.0, query_ts, 100.0, hour_ns,
+                             ['air_temperature'])
+        assert len(df) == 1   # only STA_A within 100 km
+
+        raw = np.load(obs_path, allow_pickle=True)
+        row = (raw['primary_station_id'] == 'STA_A') & \
+              (raw['report_timestamp'] == base_ns + 2 * hour_ns)
+        expected = float(raw['air_temperature'][row][0])
+        assert float(df['air_temperature'].iloc[0]) == pytest.approx(expected)
+
+    def test_still_sorted_by_distance_after_dedup(self, ds, paths):
+        _, _, base_ns, hour_ns = paths
+        df = ds.get_obs_near(15.0, -75.0, base_ns, 800.0, 5 * hour_ns,
+                             DEFAULT_OBS_VARS)
+        assert (df['distance_km'].diff().dropna() >= 0).all()
+
+
+# ---------------------------------------------------------------------------
 # Temporal filtering — filter_years
 # ---------------------------------------------------------------------------
 

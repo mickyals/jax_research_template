@@ -151,3 +151,113 @@ def components_to_bearing(sin_component, cos_component):
     return _np.degrees(_np.arctan2(
         _np.asarray(sin_component), _np.asarray(cos_component)
     )) % 360
+
+
+# ---------------------------------------------------------------------------
+# Wind vector decomposition (meteorological FROM convention)
+# ---------------------------------------------------------------------------
+
+def wind_to_components(speed, direction_deg):
+    """
+    Decompose wind speed + direction into (east, north) velocity components.
+
+    Uses the meteorological FROM convention: direction is the bearing the
+    wind blows FROM, clockwise from north in [0, 360). A wind from the
+    north (0°) therefore blows toward the south: u = 0, v = -speed.
+
+        u_east  = -speed * sin(direction)
+        v_north = -speed * cos(direction)
+
+    Calm rule: wherever speed == 0 the components are (0, 0) even if
+    direction is NaN — calm wind has no direction, but its velocity vector
+    is exactly zero. Non-zero speed with NaN direction propagates NaN
+    (genuinely unknown vector), as does NaN speed.
+
+    Parameters
+    ----------
+    speed : array-like
+        Wind speed(s), must be non-negative (any consistent unit,
+        typically m/s). A negative speed would silently flip the
+        direction by 180°, so the NumPy path rejects it. NaN = missing
+        and passes through.
+    direction_deg : array-like
+        Direction(s) the wind blows from, degrees clockwise from north.
+
+    Returns
+    -------
+    tuple
+        (u_east, v_north) in the same unit as speed.
+
+    Raises
+    ------
+    ValueError
+        If any element of speed is negative (NumPy path only — the JAX
+        path skips validation because value checks cannot run inside a
+        jit trace).
+    """
+
+    import numpy as _np
+
+    rad = direction_deg * (_np.pi / 180.0)
+    try:
+        import jax
+        import jax.numpy as _jnp
+        if isinstance(speed, jax.Array) or isinstance(direction_deg, jax.Array):
+            calm = speed == 0
+            u = _jnp.where(calm, 0.0, -speed * _jnp.sin(rad))
+            v = _jnp.where(calm, 0.0, -speed * _jnp.cos(rad))
+            return u, v
+    except ImportError:
+        pass
+    speed = _np.asarray(speed)
+    if _np.any(speed < 0):
+        raise ValueError(
+            "Wind speed must be non-negative — a negative speed flips the "
+            "FROM direction by 180°. Negative values are not physically "
+            "meaningful."
+        )
+    rad   = _np.asarray(rad)
+    calm  = speed == 0
+    u = _np.where(calm, 0.0, -speed * _np.sin(rad))
+    v = _np.where(calm, 0.0, -speed * _np.cos(rad))
+    return u, v
+
+
+def components_to_wind(u_east, v_north):
+    """
+    Recover wind speed + FROM direction from (east, north) components.
+
+        speed         = hypot(u_east, v_north)
+        direction_deg = degrees(arctan2(-u_east, -v_north)) % 360
+
+    Calm rule (inverse of ``wind_to_components``): wherever speed == 0 the
+    direction is NaN — a calm wind has no direction, and 0 would falsely
+    read as "from north".
+
+    Parameters
+    ----------
+    u_east, v_north : array-like
+        Wind velocity components as returned by ``wind_to_components``.
+
+    Returns
+    -------
+    tuple
+        (speed, direction_deg) with direction in [0, 360) or NaN at calm.
+    """
+    import numpy as _np
+    try:
+        import jax
+        import jax.numpy as _jnp
+        if isinstance(u_east, jax.Array) or isinstance(v_north, jax.Array):
+            speed = _jnp.hypot(u_east, v_north)
+            direction = _jnp.degrees(_jnp.arctan2(-u_east, -v_north)) % 360
+            direction = _jnp.where(speed == 0, _jnp.nan, direction)
+            return speed, direction
+    except ImportError:
+        pass
+    u_east  = _np.asarray(u_east)
+    v_north = _np.asarray(v_north)
+    speed = _np.hypot(u_east, v_north)
+    direction = _np.degrees(_np.arctan2(-u_east, -v_north)) % 360
+    direction = _np.where(speed == 0, _np.nan, direction)
+    return speed, direction

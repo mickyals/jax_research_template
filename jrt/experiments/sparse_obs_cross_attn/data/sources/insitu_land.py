@@ -186,7 +186,14 @@ class InsituLandDataset:
         window_ns:    int,
         obs_vars:     list[str],
     ) -> pd.DataFrame:
-        """Return station observations near a query point within a time window.
+        """Return one observation per station near a query point and time.
+
+        The time window is a tolerance, not a collection interval: within
+        ±window_ns each station contributes exactly ONE row — the report
+        closest in time to timestamp_ns. Without this dedup an hourly
+        station inside a wide window would appear as several near-duplicate
+        rows (same coords, different values), inflating candidate counts
+        and mixing report times within a sample.
 
         Parameters
         ----------
@@ -197,7 +204,8 @@ class InsituLandDataset:
         radius_km : float
             Spatial search radius in kilometres.
         window_ns : int
-            Half-width of the time window in nanoseconds (±window_ns).
+            Temporal tolerance in nanoseconds (±window_ns around
+            timestamp_ns).
         obs_vars : list[str]
             Observation variables to include. Must be a subset of ALL_OBS_VARS.
 
@@ -205,8 +213,8 @@ class InsituLandDataset:
         -------
         pd.DataFrame
             Columns: latitude, longitude, primary_station_id, distance_km,
-            + all obs_vars.  Sorted by distance_km ascending.
-            Empty DataFrame if no rows match.
+            + all obs_vars.  One row per station, sorted by distance_km
+            ascending.  Empty DataFrame if no rows match.
         """
         # 1. Time window via binary search — O(log N)
         lo = int(np.searchsorted(self._timestamps, timestamp_ns - window_ns, side='left'))
@@ -226,13 +234,23 @@ class InsituLandDataset:
         if not np.any(spatial_mask):
             return _empty_df(obs_vars)
 
-        # 3. Build output DataFrame
+        # 3. Per-station dedup — keep the single report nearest in time
         abs_idx = np.arange(lo, hi)[spatial_mask]
+        dist    = dist_km[spatial_mask]
+        tdiff   = np.abs(self._timestamps[abs_idx] - timestamp_ns)
+        st_int  = self._obs_station_int[abs_idx]
+        order   = np.lexsort((tdiff, st_int))   # by station, then |Δt|
+        _, first = np.unique(st_int[order], return_index=True)
+        keep    = order[first]
+        abs_idx = abs_idx[keep]
+        dist    = dist[keep]
+
+        # 4. Build output DataFrame
         rows: dict[str, np.ndarray] = {
             'latitude':           self._obs['latitude'][abs_idx],
             'longitude':          self._obs['longitude'][abs_idx],
             'primary_station_id': self._obs['primary_station_id'][abs_idx],
-            'distance_km':        dist_km[spatial_mask],
+            'distance_km':        dist,
         }
         for var in obs_vars:
             rows[var] = self._obs[var][abs_idx]

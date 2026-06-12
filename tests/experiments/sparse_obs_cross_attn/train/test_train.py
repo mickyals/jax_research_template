@@ -375,3 +375,122 @@ class TestLossVariation:
 
         # Best val CE seen during training must be strictly better than untrained
         assert trainer._best_metric_value < initial_ce
+
+
+# ---------------------------------------------------------------------------
+# Observability callbacks (attention figures — VAL probe; gradient flow — TRAIN)
+# ---------------------------------------------------------------------------
+
+import matplotlib
+matplotlib.use('Agg')   # headless — set before train.py pulls in pyplot
+
+from experiments.sparse_obs_cross_attn.train.train import (   # noqa: E402
+    _make_attn_entropy_callback,
+    _make_attn_figure_callback,
+    _make_grad_flow_callback,
+)
+
+
+class _RecordingLogger:
+    """Captures log_* calls for assertion."""
+
+    def __init__(self):
+        self.metrics:    list[tuple[dict, int]]      = []
+        self.figures:    list[tuple[str, int]]       = []
+        self.histograms: list[tuple[str, int, int]]  = []
+
+    def log_metrics(self, metrics, step):
+        self.metrics.append((metrics, step))
+
+    def log_figure(self, tag, fig, step):
+        import matplotlib.pyplot as plt
+        self.figures.append((tag, step))
+        plt.close(fig)
+
+    def log_histogram(self, tag, values, step):
+        self.histograms.append((tag, int(np.asarray(values).size), step))
+
+
+class _FakeState:
+    def __init__(self, params):
+        self.params = params
+
+
+class TestObservabilityCallbacks:
+
+    def _model_state_batch(self):
+        model = _make_model()
+        batch = _fake_batch()
+        vs    = model.init(jax.random.PRNGKey(0), batch['X'], train=False)
+        return model, _FakeState(vs['params']), batch
+
+    def test_entropy_callback_logs_scalar(self):
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        cb = _make_attn_entropy_callback(model, batch, logger)
+        cb(state, epoch=1, global_step=42)
+        assert len(logger.metrics) == 1
+        metrics, step = logger.metrics[0]
+        assert step == 42
+        assert 'val/attn_entropy' in metrics
+        assert np.isfinite(metrics['val/attn_entropy'])
+
+    def test_attn_figure_callback_logs_map_and_grid(self):
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        cb = _make_attn_figure_callback(
+            model, batch, logger,
+            data_config={'location_encoding': 'unit_circle',
+                         'radius_km': 500.0},
+            fig_every=2,
+        )
+        cb(state, epoch=2, global_step=10)
+        tags = [t for t, _ in logger.figures]
+        assert tags == ['val/attn_map', 'val/attn_grid']
+
+    def test_attn_figure_callback_respects_cadence(self):
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        cb = _make_attn_figure_callback(
+            model, batch, logger,
+            data_config={'location_encoding': 'unit_circle'},
+            fig_every=5,
+        )
+        cb(state, epoch=3, global_step=10)   # off-cadence
+        assert logger.figures == []
+        cb(state, epoch=5, global_step=20)   # on-cadence
+        assert len(logger.figures) == 2
+
+    def test_grad_flow_callback_logs_named_histograms(self):
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        cb = _make_grad_flow_callback(model, batch, logger, every_n_epochs=1)
+        cb(state, epoch=1, global_step=7)
+        assert len(logger.histograms) > 0
+        tags = [t for t, _, _ in logger.histograms]
+        # Named by tree path under the grad_flow/ prefix
+        assert all(t.startswith('grad_flow/') for t in tags)
+        assert any('encoder' in t for t in tags)
+        assert any(t.endswith('kernel') for t in tags)
+        # One histogram per parameter leaf
+        n_leaves = len(jax.tree_util.tree_leaves(state.params))
+        assert len(tags) == n_leaves
+        # All logged at the given step
+        assert all(s == 7 for _, _, s in logger.histograms)
+
+    def test_grad_flow_callback_respects_cadence(self):
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        cb = _make_grad_flow_callback(model, batch, logger, every_n_epochs=3)
+        cb(state, epoch=2, global_step=1)
+        assert logger.histograms == []
+        cb(state, epoch=3, global_step=2)
+        assert len(logger.histograms) > 0
+
+    def test_grad_flow_log_now_gives_init_snapshot(self):
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        cb = _make_grad_flow_callback(model, batch, logger, every_n_epochs=5)
+        cb.log_now(state.params, step=0)
+        assert len(logger.histograms) > 0
+        assert all(s == 0 for _, _, s in logger.histograms)

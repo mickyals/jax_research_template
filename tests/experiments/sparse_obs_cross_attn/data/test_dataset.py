@@ -150,16 +150,51 @@ class TestTCSample:
         s = tc_dataset.get_tc_sample(0)
         assert s is not None
         expected = {'query_coords', 'station_obs', 'station_coords',
-                    'station_mask', 'obs_mask', 'label', 'n_stations'}
+                    'station_mask', 'obs_mask', 'label', 'n_stations',
+                    'sid', 'iso_time', 'query_lat', 'query_lon',
+                    'n_available'}
         assert expected.issubset(s.keys())
-        # old keys should not be present
-        assert 'query_lat' not in s
-        assert 'query_lon' not in s
 
     def test_tc_sample_label(self, tc_dataset):
         s = tc_dataset.get_tc_sample(0)
         assert s is not None
         assert int(s['label']) == SSHS_TO_CLASS[2]   # SSHS=2 → class 7
+
+
+# ---------------------------------------------------------------------------
+# Sample metadata (decision 13) + post-dedup n_available (decisions 9/10)
+# ---------------------------------------------------------------------------
+
+class TestSampleMetadata:
+
+    def test_tc_sample_metadata_values(self, tc_dataset):
+        base_ns = 1567296000_000_000_000
+        s = tc_dataset.get_tc_sample(0)
+        assert s['sid'] == '2019001N15276'
+        assert int(s['iso_time']) == base_ns
+        assert float(s['query_lat']) == pytest.approx(15.0)
+        assert float(s['query_lon']) == pytest.approx(-75.0)
+
+    def test_n_available_is_post_dedup_station_count(self, tc_dataset):
+        # ±3 h window over hourly stations: several reports per station in
+        # the window, but only STA_A and STA_B lie within 300 km — after
+        # per-station dedup exactly 2 candidates remain.
+        s = tc_dataset.get_tc_sample(0)
+        assert int(s['n_available']) == 2
+        assert int(s['n_available']) >= int(s['n_stations'])
+
+    def test_background_sample_has_null_sid(self, tc_dataset):
+        base_ns = 1567296000_000_000_000
+        hour_ns = 3_600_000_000_000
+        # Pure assembly: position and timestamp are arguments
+        s = tc_dataset.get_background_sample(
+            15.5, -75.0, base_ns + 2 * hour_ns,
+        )
+        assert s is not None
+        assert s['sid'] is None
+        assert int(s['iso_time']) == base_ns + 2 * hour_ns
+        assert float(s['query_lat']) == pytest.approx(15.5)
+        assert float(s['query_lon']) == pytest.approx(-75.0)
 
     def test_tc_sample_shapes(self, tc_dataset):
         s = tc_dataset.get_tc_sample(0)
@@ -217,36 +252,29 @@ class TestTCSample:
 class TestBackgroundSample:
 
     def test_background_label_is_zero(self, tc_dataset):
-        rng = np.random.default_rng(0)
-        s   = None
-        for _ in range(20):
-            s = tc_dataset.get_background_sample(rng)
-            if s is not None:
-                break
-        # Background pool timestamp may be far in future so s could be None
-        # Just verify type if returned
-        if s is not None:
-            assert int(s['label']) == 0
+        base_ns = int(tc_dataset.ibtracs['ISO_TIME'][0])
+        s = tc_dataset.get_background_sample(15.0, -75.0, base_ns)
+        assert s is not None
+        assert int(s['label']) == 0
 
-    def test_background_raises_without_pool(self, tmp_path):
+    def test_background_is_pure_assembly_without_pool(self, tmp_path):
+        # Pool checks belong to the loader — the dataset assembles a
+        # sample from explicit (lat, lon, ts) even with no pool attached.
         ib_path, ms_path, base_ns = _make_ibtracs(tmp_path)
         obs_path, meta_path = _make_insitu(tmp_path, base_ns)
         ibtracs = IBTrACSDataset(ib_path, ms_path)
         insitu  = InsituLandDataset(obs_path, meta_path)
-        ds  = TCDataset(ibtracs, insitu, background_timestamps=None)
-        rng = np.random.default_rng(0)
-        with pytest.raises(RuntimeError, match='background_timestamps'):
-            ds.get_background_sample(rng)
+        ds = TCDataset(ibtracs, insitu, radius_km=300.0,
+                       time_window_hours=3.0, background_timestamps=None)
+        s  = ds.get_background_sample(15.0, -75.0, base_ns)
+        assert s is not None
+        assert s['sid'] is None
 
     def test_background_shapes_match_tc(self, tc_dataset):
-        rng = np.random.default_rng(1)
-        tc  = tc_dataset.get_tc_sample(0)
-        # Add a pool timestamp that aligns with the obs data
+        tc      = tc_dataset.get_tc_sample(0)
         base_ns = int(tc_dataset.ibtracs['ISO_TIME'][0])
-        tc_dataset.background_timestamps = np.array([base_ns], dtype=np.int64)
-        bg = tc_dataset.get_background_sample(rng)
-        if bg is None:
-            pytest.skip("No stations found for background sample in test domain")
+        bg = tc_dataset.get_background_sample(15.0, -75.0, base_ns)
+        assert bg is not None
         for k in ('station_obs', 'station_coords', 'station_mask', 'obs_mask'):
             assert bg[k].shape == tc[k].shape
 
@@ -279,22 +307,32 @@ class TestLocationEncoding:
         assert s is not None
         assert (s['query_coords'] == 0.0).all()
 
-    def test_unit_circle_norm_dist_in_range(self, tmp_path):
+    def test_unit_circle_coords_within_unit_disk(self, tmp_path):
         ds = self._make_ds(tmp_path, 'unit_circle')
         s  = ds.get_tc_sample(0)
         assert s is not None
         n_real = int(s['n_stations'])
-        norm_dist = s['station_coords'][:n_real, 0]
-        assert np.all(norm_dist >= 0.0)
-        assert np.all(norm_dist <= 1.0)
+        xy = s['station_coords'][:n_real]              # local (x, y)
+        assert np.all(np.isfinite(xy))
+        assert np.all(np.hypot(xy[:, 0], xy[:, 1]) <= 1.0 + 1e-5)
 
-    def test_unit_circle_bearing_is_finite(self, tmp_path):
+    def test_unit_circle_xy_matches_distance(self, tmp_path):
+        # hypot(x, y) recovers the normalised haversine distance
         ds = self._make_ds(tmp_path, 'unit_circle')
         s  = ds.get_tc_sample(0)
         assert s is not None
         n_real = int(s['n_stations'])
-        bearing = s['station_coords'][:n_real, 1]
-        assert np.all(np.isfinite(bearing))
+        xy = s['station_coords'][:n_real]
+        df = ds.insitu.get_obs_near(
+            query_lat=15.0, query_lon=-75.0,
+            timestamp_ns=int(ds.ibtracs['ISO_TIME'][0]),
+            radius_km=300.0, window_ns=ds.window_ns,
+            obs_vars=ds._fetch_vars,
+        )
+        expected = np.clip(
+            df['distance_km'].to_numpy()[:n_real] / 300.0, 0.0, 1.0
+        )
+        assert np.allclose(np.hypot(xy[:, 0], xy[:, 1]), expected, atol=1e-3)
 
     def test_domain_query_coords_nonzero(self, tmp_path):
         # Storm at (15, -75), FOV lat [0, 30] lon [-100, -45] — query is inside domain
@@ -403,6 +441,99 @@ class TestObsNormalisation:
     def test_invalid_obs_normalisation_raises(self, tmp_path):
         with pytest.raises(ValueError, match="obs_normalisation"):
             self._make_ds(tmp_path, obs_normalisation='zscore')
+
+
+# ---------------------------------------------------------------------------
+# Derived wind components (decision 18)
+# ---------------------------------------------------------------------------
+
+class TestWindDecomposition:
+
+    _WIND_VARS = ['air_pressure_at_sea_level', 'wind_east', 'wind_north']
+    _BOUNDS = {
+        'air_pressure_at_sea_level': (87000.0, 108400.0),
+        'wind_east':                 (-115.0,  115.0),
+        'wind_north':                (-115.0,  115.0),
+    }
+
+    def _make_ds(self, tmp_path, wind_speed, wind_dir, **kwargs):
+        """TCDataset over a fixture with controlled wind values on every row."""
+        ib_path, ms_path, base_ns = _make_ibtracs(tmp_path)
+        obs_path, meta_path = _make_insitu(tmp_path, base_ns)
+        # Overwrite the wind columns with controlled values
+        raw = dict(np.load(obs_path, allow_pickle=True))
+        n = len(raw['wind_speed'])
+        raw['wind_speed']          = np.full(n, wind_speed, dtype=np.float32)
+        raw['wind_from_direction'] = np.full(n, wind_dir,   dtype=np.float32)
+        np.savez(obs_path, **raw)
+
+        ibtracs = IBTrACSDataset(ib_path, ms_path)
+        insitu  = InsituLandDataset(obs_path, meta_path)
+        return TCDataset(
+            ibtracs=ibtracs,
+            insitu=insitu,
+            radius_km=300.0,
+            time_window_hours=3.0,
+            max_stations=8,
+            min_stations=1,
+            obs_vars=self._WIND_VARS,
+            **kwargs,
+        )
+
+    def test_fetch_vars_expand_derived_names(self, tmp_path):
+        ds = self._make_ds(tmp_path, 10.0, 90.0)
+        assert ds._fetch_vars == [
+            'air_pressure_at_sea_level', 'wind_speed', 'wind_from_direction'
+        ]
+        assert ds.obs_vars == self._WIND_VARS
+
+    def test_components_match_decomposition(self, tmp_path):
+        # Wind 10 m/s FROM east → u = -10, v = 0
+        ds = self._make_ds(tmp_path, 10.0, 90.0)
+        s  = ds.get_tc_sample(0)
+        assert s is not None
+        n_real = int(s['n_stations'])
+        u = s['station_obs'][:n_real, self._WIND_VARS.index('wind_east')]
+        v = s['station_obs'][:n_real, self._WIND_VARS.index('wind_north')]
+        assert np.allclose(u, -10.0, atol=1e-4)
+        assert np.allclose(v, 0.0, atol=1e-4)
+        assert s['obs_mask'][:n_real].all()
+
+    def test_components_normalised_minmax_11(self, tmp_path):
+        # u = -10 m/s over [-115, 115] → -10/115 in minmax_11
+        ds = self._make_ds(tmp_path, 10.0, 90.0,
+                           obs_bounds=self._BOUNDS, obs_normalisation='minmax_11')
+        s  = ds.get_tc_sample(0)
+        assert s is not None
+        n_real = int(s['n_stations'])
+        u = s['station_obs'][:n_real, self._WIND_VARS.index('wind_east')]
+        v = s['station_obs'][:n_real, self._WIND_VARS.index('wind_north')]
+        assert np.allclose(u, -10.0 / 115.0, atol=1e-4)
+        assert np.allclose(v, 0.0, atol=1e-4)
+
+    def test_calm_with_missing_direction_kept_as_zero_vector(self, tmp_path):
+        # speed 0 + NaN direction must NOT become missing — calm rule
+        ds = self._make_ds(tmp_path, 0.0, np.nan,
+                           obs_bounds=self._BOUNDS, obs_normalisation='minmax_11')
+        s  = ds.get_tc_sample(0)
+        assert s is not None
+        n_real = int(s['n_stations'])
+        for var in ('wind_east', 'wind_north'):
+            col = self._WIND_VARS.index(var)
+            assert s['obs_mask'][:n_real, col].all()
+            # symmetric bounds → 0 m/s normalises to exactly 0
+            assert np.allclose(s['station_obs'][:n_real, col], 0.0, atol=1e-7)
+
+    def test_noncalm_missing_direction_becomes_missing(self, tmp_path):
+        # speed 5 + NaN direction → unknown vector → masked out
+        ds = self._make_ds(tmp_path, 5.0, np.nan)
+        s  = ds.get_tc_sample(0)
+        assert s is not None
+        n_real = int(s['n_stations'])
+        for var in ('wind_east', 'wind_north'):
+            col = self._WIND_VARS.index(var)
+            assert not s['obs_mask'][:n_real, col].any()
+            assert (s['station_obs'][:n_real, col] == 0.0).all()
 
 
 # ---------------------------------------------------------------------------

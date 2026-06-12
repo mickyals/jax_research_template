@@ -94,7 +94,8 @@
         "obs_vars": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string" }
+          "items": { "type": "string" },
+          "description": "Source columns or derived names (wind_east/wind_north, computed by TCDataset from wind_speed + wind_from_direction)."
         },
 
         "radius_km":              { "type": "number", "exclusiveMinimum": 0 },
@@ -117,9 +118,15 @@
           "enum": ["minmax_01", "minmax_11", "standardise"]
         },
 
+        "station_selection": {
+          "type": "string",
+          "enum": ["random", "nearest"],
+          "description": "Train-loader station subsampling when candidates exceed max_stations. Val/test loaders always default to 'nearest' (deterministic)."
+        },
+
         "obs_bounds": {
           "type": "object",
-          "description": "Per-variable [min, max] for minmax or [mean, std] for standardise. Keys must match obs_vars.",
+          "description": "Per-variable [min, max] for minmax or [mean, std] for standardise. Keys must match obs_vars as listed (derived names included); use signed symmetric bounds for wind components.",
           "additionalProperties": {
             "type": "array",
             "minItems": 2,

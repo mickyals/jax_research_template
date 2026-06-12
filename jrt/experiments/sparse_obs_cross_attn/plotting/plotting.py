@@ -13,6 +13,7 @@ import numpy as np
 import jax
 import matplotlib.pyplot as plt
 
+from experiments.sparse_obs_cross_attn.data.encoding import decode_domain
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier
 from utils.plotting._style import _value_scatter
 from utils.plotting.curves import plot_grouped_bars
@@ -102,10 +103,11 @@ def extract_attention_weights(
 
     Returns
     -------
-    np.ndarray float32 (B, num_heads, N+1)
-        Self-attention weights (query row) from the last encoder layer.
-        N = max_stations; the N+1-th element is the query's self-attention
-        weight; padding positions have weight ≈ 0.
+    np.ndarray float32 (num_layers, B, num_heads, N+1, N+1)
+        Full attention matrices from every encoder layer.
+        N = max_stations; token N (the last) is the query. The query row
+        of layer l is ``weights[l, :, :, -1, :]`` — its last element is
+        the query's self-attention weight; padding positions carry ≈ 0.
     """
     apply_fn = jax.jit(
         lambda X: model.apply(variables, X, train=False, return_weights=True)
@@ -114,42 +116,119 @@ def extract_attention_weights(
     return np.asarray(weights, dtype=np.float32)
 
 
-def _decode_domain_coords(
-    coords:       np.ndarray,
-    query_coords: np.ndarray,
-    fov_lat:      tuple[float, float],
-    fov_lon:      tuple[float, float],
-) -> tuple[np.ndarray, np.ndarray, float, float]:
-    """Decode normalised domain-encoded coordinates to lon/lat degrees.
+def plot_attention_matrix_grid(
+    weights:    np.ndarray,
+    sample_idx: int = 0,
+    cmap:       str = 'viridis',
+    title:      Optional[str] = None,
+) -> plt.Figure:
+    """Layers × heads grid of full (N+1)×(N+1) attention matrices.
+
+    One panel per (layer, head) for a single sample, plain ``imshow`` with
+    NO per-token tick labels (unreadable at N+1 = 65) and a shared colour
+    scale. The query row/column (last token) is marked with dashed lines —
+    the all-False stations→query column should read as an empty last
+    column, and padding stations as empty trailing rows/columns.
 
     Parameters
     ----------
-    coords : np.ndarray (n, 2)
-        Normalised station coordinates, columns (lat, lon) each in
-        [-pi/2, pi/2].
-    query_coords : np.ndarray (2,)
-        Normalised query coordinate, (lat, lon).
-    fov_lat, fov_lon : tuple[float, float]
-        (min, max) field-of-view bounds in degrees.
+    weights : np.ndarray (num_layers, B, num_heads, N+1, N+1)
+        From extract_attention_weights().
+    sample_idx : int
+        Which sample in the batch to visualise.
+    cmap : str
+    title : str, optional
+        Figure suptitle. Default names the sample.
 
     Returns
     -------
-    lons, lats : np.ndarray (n,)
-        Decoded station longitudes/latitudes in degrees.
-    q_lon, q_lat : float
-        Decoded query longitude/latitude in degrees.
+    plt.Figure
     """
-    half_pi = float(np.pi / 2)
-    lat_min, lat_max = fov_lat
-    lon_min, lon_max = fov_lon
-    lat_span = lat_max - lat_min
-    lon_span = lon_max - lon_min
+    w = np.asarray(weights)[:, sample_idx]          # (L, H, T, T)
+    L, H, T, _ = w.shape
+    vmax = float(w.max()) if w.max() > 0 else 1.0
 
-    lats = (coords[:, 0] / half_pi + 1) / 2 * lat_span + lat_min
-    lons = (coords[:, 1] / half_pi + 1) / 2 * lon_span + lon_min
-    q_lat = (query_coords[0] / half_pi + 1) / 2 * lat_span + lat_min
-    q_lon = (query_coords[1] / half_pi + 1) / 2 * lon_span + lon_min
-    return lons, lats, q_lon, q_lat
+    fig, axes = plt.subplots(
+        L, H, figsize=(2.2 * H + 1.2, 2.2 * L),
+        squeeze=False, sharex=True, sharey=True,
+    )
+    for l in range(L):
+        for h in range(H):
+            ax = axes[l, h]
+            im = ax.imshow(w[l, h], cmap=cmap, vmin=0.0, vmax=vmax,
+                           origin='upper', aspect='equal',
+                           interpolation='nearest')
+            # Query token = last row/column
+            ax.axhline(T - 1.5, color='w', linewidth=0.6, linestyle='--')
+            ax.axvline(T - 1.5, color='w', linewidth=0.6, linestyle='--')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if l == 0:
+                ax.set_title(f'head {h}', fontsize=8)
+            if h == 0:
+                ax.set_ylabel(f'layer {l}', fontsize=8)
+
+    fig.colorbar(im, ax=axes, label='Attention weight',
+                 shrink=0.85, pad=0.02)
+    fig.suptitle(
+        title if title is not None
+        else f'Attention matrices — sample {sample_idx} '
+             f'(rows attend to columns; dashed = query token)',
+        fontsize=10,
+    )
+    return fig
+
+
+def plot_attention_mask(station_mask: np.ndarray) -> plt.Figure:
+    """Static figure of the asymmetric (N+1)×(N+1) attention mask.
+
+    Renders the exact boolean mask the model builds (single source of
+    truth: model.build_attention_mask) for one sample's station_mask:
+    stations are blocked from attending to the query (empty last column
+    except the query's own self-attention cell), and padding-station
+    columns are blocked for every token. Plain imshow, no per-token tick
+    labels; the query row/column is marked with dashed lines.
+
+    Parameters
+    ----------
+    station_mask : np.ndarray
+        (N,) bool — True = real station, False = padding.
+
+    Returns
+    -------
+    plt.Figure
+    """
+    from experiments.sparse_obs_cross_attn.train.model import (
+        build_attention_mask,
+    )
+    import jax.numpy as jnp
+
+    station_mask = np.asarray(station_mask, dtype=bool)
+    mask = np.asarray(
+        build_attention_mask(jnp.asarray(station_mask[None, :]))
+    )[0, 0]                                          # (N+1, N+1)
+    T = mask.shape[0]
+    n_real = int(station_mask.sum())
+
+    fig, ax = plt.subplots(figsize=(6.5, 6))
+    im = ax.imshow(mask.astype(float), cmap='Greys_r', vmin=0.0, vmax=1.0,
+                   origin='upper', aspect='equal', interpolation='nearest')
+    ax.axhline(T - 1.5, color='red', linewidth=0.8, linestyle='--')
+    ax.axvline(T - 1.5, color='red', linewidth=0.8, linestyle='--')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_xlabel('to token (last = query)')
+    ax.set_ylabel('from token (last = query)')
+    ax.set_title(
+        f'Attention mask — white = allowed, black = blocked\n'
+        f'stations cannot attend to the query; '
+        f'{T - 1 - n_real} padding columns blocked',
+        fontsize=10,
+    )
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, ticks=[0, 1])
+    cbar.ax.set_yticklabels(['blocked', 'allowed'])
+    fig.tight_layout()
+    return fig
 
 
 def plot_attention_geographic(
@@ -165,10 +244,11 @@ def plot_attention_geographic(
 ) -> plt.Figure:
     """Plot per-station attention weight for one sample.
 
-    For ``unit_circle`` encoding: polar axes — radius = normalised distance
-    from storm centre, angle = bearing.  The storm is at the origin.
-    Compass conventions and km-scaled radial ticks are bespoke to this
-    plot, so it composes ``_value_scatter`` directly.
+    For ``unit_circle`` encoding: the station coords ARE a storm-centred
+    local map (x = east, y = north, storm at the origin) — scatter them
+    directly on equal-aspect Cartesian axes, with distance rings at
+    0.25/0.5/0.75/1.0 of radius_km. Bespoke to this plot, so it composes
+    ``_value_scatter`` directly.
 
     For ``domain`` encoding: Cartesian axes — decoded lat/lon from the
     normalised coord representation.  Query position marked with a star.
@@ -176,8 +256,10 @@ def plot_attention_geographic(
 
     Parameters
     ----------
-    weights : np.ndarray (B, H, N)
-        From extract_attention_weights().
+    weights : np.ndarray (B, H, N+1)
+        Query-row attention of ONE layer — slice the output of
+        extract_attention_weights(), e.g. ``all_w[-1][:, :, -1, :]`` for
+        the last layer's query row.
     batch : dict
         Raw batch dict (contains 'X' with station_coords, station_mask,
         query_coords).
@@ -208,28 +290,38 @@ def plot_attention_geographic(
     w_real = w_station[mask]                                      # (n_real,)
 
     if location_encoding == 'unit_circle':
-        norm_dist   = coords[mask, 0]          # [0, 1]
-        bearing_rad = coords[mask, 1]          # [0, 2π)
+        x = coords[mask, 0]                    # east offset,  [-1, 1]
+        y = coords[mask, 1]                    # north offset, [-1, 1]
 
-        fig, ax = plt.subplots(figsize=(7, 7), subplot_kw={'projection': 'polar'})
+        fig, ax = plt.subplots(figsize=(7, 7))
         sc = _value_scatter(
-            ax, bearing_rad, norm_dist, values=w_real,
+            ax, x, y, values=w_real,
             cmap='YlOrRd', size_range=(30, 280),
             alpha=0.85, edgecolors='k', linewidths=0.4, zorder=3,
         )
-        # Storm centre
+        # Storm centre — query position (0, 0) on the local map
         ax.scatter([0], [0], marker='*', s=200, color='royalblue',
                    zorder=5, label='Storm centre')
 
-        ax.set_theta_zero_location('N')   # North at top
-        ax.set_theta_direction(-1)        # Clockwise (compass convention)
-        ax.set_rlim(0, 1)
-        ax.set_rticks([0.25, 0.5, 0.75, 1.0])
-        ax.set_rlabel_position(45)
-        ax.yaxis.set_tick_params(labelsize=7)
-        tick_labels = [f'{r * radius_km:.0f} km' for r in [0.25, 0.5, 0.75, 1.0]]
-        ax.set_yticklabels(tick_labels, fontsize=7)
-        ax.set_title('Self-attention weights (query row)\n(polar: distance × bearing from storm)',
+        # Distance rings with km labels (north-up: +y = north)
+        for r in (0.25, 0.5, 0.75, 1.0):
+            ax.add_patch(plt.Circle(
+                (0, 0), r, fill=False, color='grey',
+                linewidth=0.6, linestyle='--', zorder=2,
+            ))
+            ax.annotate(
+                f'{r * radius_km:.0f} km',
+                xy=(r / np.sqrt(2), r / np.sqrt(2)),
+                fontsize=7, color='grey', ha='left', va='bottom',
+            )
+
+        ax.set_xlim(-1.08, 1.08)
+        ax.set_ylim(-1.08, 1.08)
+        ax.set_aspect('equal')
+        ax.set_xlabel('East offset (× radius)')
+        ax.set_ylabel('North offset (× radius)')
+        ax.set_title('Self-attention weights (query row)\n'
+                     '(storm-centred local map, north up)',
                      pad=15, fontsize=10)
         fig.colorbar(sc, ax=ax, label='Attention weight', shrink=0.7, pad=0.1)
         fig.tight_layout()
@@ -239,8 +331,11 @@ def plot_attention_geographic(
     if fov_lat is None or fov_lon is None:
         raise ValueError("fov_lat and fov_lon required for domain encoding.")
 
-    lons, lats, q_lon, q_lat = _decode_domain_coords(
-        coords[mask], query_coords, fov_lat, fov_lon,
+    lats, lons = decode_domain(
+        coords[mask, 0], coords[mask, 1], fov_lat, fov_lon,
+    )
+    q_lat, q_lon = decode_domain(
+        query_coords[0], query_coords[1], fov_lat, fov_lon,
     )
     lat_min, lat_max = fov_lat
     lon_min, lon_max = fov_lon

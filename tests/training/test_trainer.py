@@ -999,3 +999,57 @@ class TestStepCallbacks:
 
         assert len(step_calls)  > 0
         assert epoch_calls == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# Reserved 'meta' batch key — dropped before the jitted steps
+# ---------------------------------------------------------------------------
+
+class TestMetaBatchKey:
+    """Loaders may attach non-array sample metadata under batch['meta'];
+    the Trainer must drop it (string leaves cannot be traced by jit)."""
+
+    def test_to_jax_batch_drops_meta(self):
+        from training.trainer import _to_jax_batch
+        batch = {
+            'X':    {'a': np.zeros((2, 3), dtype=np.float32)},
+            'y':    np.zeros(2, dtype=np.int32),
+            'meta': {'sid': ['STORM1', None]},
+        }
+        out = _to_jax_batch(batch)
+        assert 'meta' not in out
+        assert set(out.keys()) == {'X', 'y'}
+
+    def test_batch_head_drops_meta(self):
+        from training.trainer import _batch_head
+        batch = {
+            'X':    {'a': np.zeros((8, 3), dtype=np.float32)},
+            'y':    np.zeros(8, dtype=np.int32),
+            'meta': {'sid': ['S'] * 8},
+        }
+        out = _batch_head(batch, n=4)
+        assert 'meta' not in out
+        assert out['X']['a'].shape == (4, 3)
+
+    def test_fit_with_meta_in_batches(self, tmp_path, train_arrs, val_arrs):
+        """End-to-end: a loader yielding 'meta' trains without error."""
+
+        class _MetaLoader:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __iter__(self):
+                for batch in self._inner:
+                    b = dict(batch)
+                    n = b['y'].shape[0]
+                    b['meta'] = {'sid': ['STORM'] * (n - 1) + [None]}
+                    yield b
+
+            def __len__(self):
+                return len(self._inner)
+
+        cfg    = _base_config(tmp_path, num_epochs=1, patience=10)
+        tl     = _MetaLoader(_make_loader(train_arrs))
+        vl     = _MetaLoader(_make_loader(val_arrs, shuffle=False))
+        result = Trainer(_TinyMLP(), _METRICS, cfg).fit(tl, vl)
+        assert isinstance(result, TrainState)

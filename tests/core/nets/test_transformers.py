@@ -537,6 +537,51 @@ class TestTransformerEncoder:
         for w in maps:
             check_shape(w, (BATCH, NUM_HEADS, SEQ, SEQ), 'attention map')
 
+    # --- return_weights: ALL blocks, stacked along leading layer axis ---
+
+    def test_return_weights_all_layers_shape(self):
+        x   = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+        enc = TransformerEncoder(num_layers=3, embed_dim=EMBED,
+                                 num_heads=NUM_HEADS, mlp_ratio=MLP_RATIO,
+                                 add_pos_encoding=False)
+        variables = enc.init(KEY, x, train=False)
+        out, w = enc.apply(variables, x, train=False, return_weights=True)
+        check_shape(out, (BATCH, SEQ, EMBED))
+        check_shape(w, (3, BATCH, NUM_HEADS, SEQ, SEQ), 'all-layer weights')
+        check_finite(w, 'all-layer weights')
+
+    def test_return_weights_rows_sum_to_one_every_layer(self):
+        x   = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+        enc = TransformerEncoder(num_layers=2, embed_dim=EMBED,
+                                 num_heads=NUM_HEADS, mlp_ratio=MLP_RATIO,
+                                 add_pos_encoding=False)
+        variables = enc.init(KEY, x, train=False)
+        _, w = enc.apply(variables, x, train=False, return_weights=True)
+        row_sums = w.sum(axis=-1)
+        assert jnp.allclose(row_sums, jnp.ones_like(row_sums), atol=1e-5)
+
+    def test_return_weights_matches_get_attention_maps(self):
+        x   = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+        enc = TransformerEncoder(num_layers=2, embed_dim=EMBED,
+                                 num_heads=NUM_HEADS, mlp_ratio=MLP_RATIO,
+                                 add_pos_encoding=False)
+        variables = enc.init(KEY, x, train=False)
+        _, w = enc.apply(variables, x, train=False, return_weights=True)
+        maps = enc.apply(variables, x, train=False,
+                         method=enc.get_attention_maps)
+        for i, m in enumerate(maps):
+            assert jnp.allclose(w[i], m, atol=1e-6)
+
+    def test_return_weights_output_matches_plain_forward(self):
+        x   = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
+        enc = TransformerEncoder(num_layers=2, embed_dim=EMBED,
+                                 num_heads=NUM_HEADS, mlp_ratio=MLP_RATIO,
+                                 add_pos_encoding=False)
+        variables = enc.init(KEY, x, train=False)
+        out_plain  = enc.apply(variables, x, train=False)
+        out_w, _   = enc.apply(variables, x, train=False, return_weights=True)
+        assert jnp.allclose(out_plain, out_w, atol=1e-6)
+
     def test_backward(self):
         x   = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
         enc = TransformerEncoder(num_layers=2, embed_dim=EMBED,

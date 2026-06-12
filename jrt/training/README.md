@@ -73,7 +73,7 @@ test_metrics = trainer.test(dm.test_loader())
     └── wandb/             Local WandB cache
 ```
 
-**Loader contract:** any iterable that yields `{"X": array_or_dict, "y": array}` dicts. `batch["X"]` may itself be a dict for models with structured inputs — the Trainer handles both.
+**Loader contract:** any iterable that yields `{"X": array_or_dict, "y": array}` dicts. `batch["X"]` may itself be a dict for models with structured inputs — the Trainer handles both. The top-level key `"meta"` is reserved for non-model sample metadata (attribution strings, diagnostics): the Trainer drops it before its jitted train/eval steps, so loaders may attach it freely.
 
 ---
 

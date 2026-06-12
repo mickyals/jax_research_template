@@ -10,11 +10,16 @@ observations to the same sample structure via TCDataset.
 
 Batch format
 ------------
-    {'X': dict_of_jnp_arrays, 'y': jnp.int32_array}
+    {'X': dict_of_jnp_arrays, 'y': jnp.int32_array, 'meta': dict}
 
-    X keys: query_lat, query_lon, station_obs, station_coords,
+    X keys: query_coords, station_obs, station_coords,
             station_mask, obs_mask
     y     : (B,) int32 ordinal class labels
+    meta  : non-model sample attribution + diagnostics, NEVER part of X —
+            sid (list[str | None], None = background), iso_time (int64),
+            query_lat / query_lon (float32 degrees), n_available /
+            n_used (int32). The Trainer drops 'meta' before its jitted
+            steps; evaluate.py uses it for per-storm attribution.
 
 Class balance
 -------------
@@ -26,6 +31,7 @@ timestamps).
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import Iterator, Optional
 
@@ -35,6 +41,7 @@ import numpy as np
 
 from datasets.datamodule import BaseDataModule
 from utils.jax_core.helpers import create_rng
+from utils.sampling.coordinate import _key_to_seed, lhs_sample_regional
 
 from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDataset
 from experiments.sparse_obs_cross_attn.data.sources.insitu_land import InsituLandDataset
@@ -46,13 +53,25 @@ from experiments.sparse_obs_cross_attn.data.splits import resolve_splits
 # Background pool construction
 # ---------------------------------------------------------------------------
 
+# Best-track rows sit on the 3-hourly synoptic grid (00/03/…/21 UTC, exact
+# minutes/seconds). Background timestamps are restricted to the same grid so
+# time-of-day can never become a class shortcut once time is encoded. A
+# handful of off-grid best-track special rows (landfall/peak inserts) remain
+# on the TC side — accepted asymmetry.
+SYNOPTIC_STEP_NS: int = 3 * 3600 * 1_000_000_000
+
+
 def _build_background_pool(
     insitu:              InsituLandDataset,
     ibtracs:             IBTrACSDataset,
     exclude_multi_times: Optional[np.ndarray] = None,
     buffer_hours:        float = 6.0,
 ) -> np.ndarray:
-    """Return InsituLand timestamps that are clear of any active TC observation.
+    """Return synoptic-hour InsituLand timestamps clear of any active TC.
+
+    Only timestamps on the 3-hourly synoptic grid survive (see
+    SYNOPTIC_STEP_NS); within those, any timestamp within buffer_hours of
+    an IBTrACS observation (or in the multi-storm blackout set) is removed.
 
     Parameters
     ----------
@@ -81,7 +100,10 @@ def _build_background_pool(
     else:
         in_multi = np.zeros(len(all_ts), dtype=bool)
 
-    pool = all_ts[~near_tc & ~in_multi]
+    # Unix epoch is 00:00 UTC, so grid membership is a plain modulo.
+    on_grid = (all_ts % SYNOPTIC_STEP_NS) == 0
+
+    pool = all_ts[~near_tc & ~in_multi & on_grid]
     if len(pool) == 0:
         warnings.warn(
             "Background timestamp pool is empty after filtering. "
@@ -97,7 +119,12 @@ def _build_background_pool(
 # ---------------------------------------------------------------------------
 
 def _collate(samples: list[dict]) -> dict:
-    """Stack a list of sample dicts into {'X': dict_of_jnp_arrays, 'y': jnp.array}."""
+    """Stack sample dicts into {'X': dict_of_jnp_arrays, 'y': jnp.array, 'meta': dict}.
+
+    'meta' carries sample attribution and diagnostics (SID, timestamp, raw
+    query position, station counts) OUTSIDE the model inputs — batch['X']
+    contains exactly the model-facing arrays and nothing else.
+    """
     X = {
         k: jnp.array(np.stack([s[k] for s in samples], axis=0))
         for k in (
@@ -110,7 +137,15 @@ def _collate(samples: list[dict]) -> dict:
         np.stack([s['label'] for s in samples], axis=0),
         dtype=jnp.int32,
     )
-    return {'X': X, 'y': y}
+    meta = {
+        'sid':         [s['sid'] for s in samples],   # str | None (background)
+        'iso_time':    np.array([s['iso_time']    for s in samples], dtype=np.int64),
+        'query_lat':   np.array([s['query_lat']   for s in samples], dtype=np.float32),
+        'query_lon':   np.array([s['query_lon']   for s in samples], dtype=np.float32),
+        'n_available': np.array([s['n_available'] for s in samples], dtype=np.int32),
+        'n_used':      np.array([s['n_stations']  for s in samples], dtype=np.int32),
+    }
+    return {'X': X, 'y': y, 'meta': meta}
 
 
 # ---------------------------------------------------------------------------
@@ -118,17 +153,22 @@ def _collate(samples: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 class TCLoader:
-    """Re-iterable loader producing balanced {'X': dict, 'y': labels} batches.
+    """Re-iterable loader producing balanced {'X', 'y', 'meta'} batches.
 
     Each batch contains tc_fraction * batch_size TC samples interleaved
-    with background samples drawn on-the-fly from the background pool.
+    with background samples. Background sampling POLICY lives here — the
+    dataset's get_background_sample is pure assembly given (lat, lon, ts).
+    'meta' carries per-sample attribution (SID/time/position) and station
+    counts outside the model inputs — see _collate.
 
     Two iteration modes, selected by ``steps_per_epoch``:
 
     **Sequential mode** (``steps_per_epoch=None``, default — val/test)
         Iterates through all TC samples in the dataset once per epoch,
-        in shuffled or fixed order.  Epoch length = dataset size / tc_half.
-        Each TC sample is seen exactly once.
+        in shuffled or fixed order. Every valid TC sample is yielded —
+        the final partial buffer is flushed as a smaller batch with
+        proportionally fewer backgrounds (one jit recompile for the odd
+        shape is accepted; the Trainer accumulates per-sample).
 
     **Random mode** (``steps_per_epoch=N`` — training)
         Draws TC samples uniformly at random *with replacement* for exactly
@@ -136,8 +176,8 @@ class TCLoader:
         steps; each reuse receives a fresh background sample and (when
         more stations are available than max_stations) a different random
         station subset, providing implicit augmentation.  Background
-        samples are drawn fresh every step from the large background pool,
-        giving maximum diversity.
+        samples are drawn fresh every step (uniform position + random
+        pool timestamp), giving maximum diversity.
 
     Parameters
     ----------
@@ -149,44 +189,89 @@ class TCLoader:
         Reshuffle TC order in sequential mode. Ignored in random mode.
     seed : int
     fov_lat, fov_lon : tuple[float, float]
-        Field-of-view bounds for random background query positions.
+        Field-of-view bounds for background query positions.
     steps_per_epoch : int or None
         If set, enables random mode and controls epoch length exactly.
         If None, sequential mode is used.
+    station_selection : {'random', 'nearest'}
+        How stations are chosen when a sample has more candidates than
+        max_stations. 'random' = epoch-varying random subset (train
+        augmentation); 'nearest' = deterministic nearest-N by distance
+        (deployment policy — eval default).
+    freeze_backgrounds : bool
+        If True (val/test), ONE background set is pre-drawn on first
+        iteration — positions via Latin Hypercube, timestamps fixed-seed
+        from the synoptic pool — assembled once and reused every epoch,
+        so eval differences are purely model change. If False (train),
+        backgrounds are drawn fresh each step.
     """
+
+    # fold_in constant separating the frozen-background key stream from
+    # the per-epoch stream (which folds in 0, 1, 2, ...).
+    _FROZEN_BG_FOLD = 0x0F0F
 
     def __init__(
         self,
-        dataset:          TCDataset,
-        batch_size:       int,
-        tc_fraction:      float = 0.5,
-        shuffle:          bool  = True,
-        seed:             int   = 0,
-        fov_lat:          tuple[float, float] = (0.0, 30.0),
-        fov_lon:          tuple[float, float] = (-100.0, -45.0),
-        steps_per_epoch:  Optional[int] = None,
+        dataset:            TCDataset,
+        batch_size:         int,
+        tc_fraction:        float = 0.5,
+        shuffle:            bool  = True,
+        seed:               int   = 0,
+        fov_lat:            tuple[float, float] = (0.0, 30.0),
+        fov_lon:            tuple[float, float] = (-100.0, -45.0),
+        steps_per_epoch:    Optional[int] = None,
+        station_selection:  str   = 'random',
+        freeze_backgrounds: bool  = False,
     ) -> None:
         if not (0.0 < tc_fraction < 1.0):
             raise ValueError(f"tc_fraction must be in (0, 1), got {tc_fraction}")
-        self._dataset          = dataset
-        self._batch_size       = batch_size
-        self._tc_half          = max(1, round(batch_size * tc_fraction))
-        self._bg_half          = batch_size - self._tc_half
-        self._shuffle          = shuffle
-        self._base_seed        = seed
-        self._fov_lat          = fov_lat
-        self._fov_lon          = fov_lon
-        self._steps_per_epoch  = steps_per_epoch
-        self._epoch            = 0
+        if station_selection not in ('random', 'nearest'):
+            raise ValueError(
+                f"station_selection must be 'random' or 'nearest', "
+                f"got '{station_selection}'."
+            )
+        self._dataset            = dataset
+        self._batch_size         = batch_size
+        self._tc_half            = max(1, round(batch_size * tc_fraction))
+        self._bg_half            = batch_size - self._tc_half
+        self._shuffle            = shuffle
+        self._base_seed          = seed
+        self._fov_lat            = fov_lat
+        self._fov_lon            = fov_lon
+        self._steps_per_epoch    = steps_per_epoch
+        self._station_selection  = station_selection
+        self._freeze_backgrounds = freeze_backgrounds
+        self._frozen_bg: Optional[list[dict]] = None
+        self._epoch              = 0
 
     # ------------------------------------------------------------------
     # Helpers shared by both modes
     # ------------------------------------------------------------------
 
+    def _station_rng(
+        self, rng: np.random.Generator
+    ) -> Optional[np.random.Generator]:
+        """Epoch rng for 'random' station selection, None for 'nearest'."""
+        return rng if self._station_selection == 'random' else None
+
+    def _background_pool(self) -> np.ndarray:
+        pool = self._dataset.background_timestamps
+        if pool is None or len(pool) == 0:
+            raise RuntimeError(
+                "background_timestamps pool is empty. "
+                "Build it via TCDataModule.setup()."
+            )
+        return pool
+
     def _draw_background(
         self, rng: np.random.Generator
     ) -> tuple[list[dict], bool]:
-        """Draw self._bg_half background samples. Returns (buf, success)."""
+        """Draw self._bg_half fresh background samples. Returns (buf, success).
+
+        Position policy: uniform in the FOV box; timestamp drawn randomly
+        from the synoptic background pool.
+        """
+        pool     = self._background_pool()
         bg_buf   = []
         bg_tries = 0
         while len(bg_buf) < self._bg_half:
@@ -199,12 +284,71 @@ class TCLoader:
                     stacklevel=2,
                 )
                 return bg_buf, False
-            bg = self._dataset.get_background_sample(
-                rng, self._fov_lat, self._fov_lon,
+            lat = float(rng.uniform(self._fov_lat[0], self._fov_lat[1]))
+            lon = float(rng.uniform(self._fov_lon[0], self._fov_lon[1]))
+            ts  = int(rng.choice(pool))
+            bg  = self._dataset.get_background_sample(
+                lat, lon, ts, rng=self._station_rng(rng),
             )
             if bg is not None:
                 bg_buf.append(bg)
         return bg_buf, True
+
+    # ------------------------------------------------------------------
+    # Frozen eval backgrounds (decisions 5 + 9)
+    # ------------------------------------------------------------------
+
+    def _build_frozen_backgrounds(self) -> list[dict]:
+        """Pre-assemble ONE background sample set, reused every epoch.
+
+        Positions come from a Latin Hypercube over the FOV (space-filling,
+        low-variance eval metrics); timestamps from a fixed-seed draw over
+        the synoptic pool. Positions that yield < min_stations are skipped
+        during the over-drawn walk. Station selection uses the
+        deterministic nearest-N path so the assembled samples are
+        reproducible from (seed, dataset) alone.
+        """
+        pool      = self._background_pool()
+        n_batches = max(1, math.ceil(len(self._dataset) / self._tc_half))
+        n_needed  = (n_batches + 1) * self._bg_half   # +1 covers the flush
+
+        key    = jax.random.fold_in(create_rng(self._base_seed),
+                                    self._FROZEN_BG_FOLD)
+        n_draw = max(2 * n_needed, 16)                # over-draw for rejection
+        lons, lats = lhs_sample_regional(
+            key, n_draw, lon_bounds=self._fov_lon, lat_bounds=self._fov_lat,
+        )
+        ts_rng = np.random.default_rng(_key_to_seed(jax.random.fold_in(key, 1)))
+        tss    = ts_rng.choice(pool, size=n_draw)
+
+        frozen: list[dict] = []
+        for lat, lon, ts in zip(np.asarray(lats), np.asarray(lons), tss):
+            if len(frozen) == n_needed:
+                break
+            bg = self._dataset.get_background_sample(
+                float(lat), float(lon), int(ts), rng=None,
+            )
+            if bg is not None:
+                frozen.append(bg)
+        if len(frozen) < n_needed:
+            warnings.warn(
+                f"Frozen background set has {len(frozen)} samples but "
+                f"{n_needed} are needed per epoch — samples will repeat "
+                f"within an epoch (cyclic reuse).",
+                UserWarning,
+                stacklevel=2,
+            )
+        if not frozen:
+            raise RuntimeError(
+                "Could not assemble any frozen background samples — every "
+                "LHS position/timestamp yielded < min_stations stations."
+            )
+        return frozen
+
+    def _frozen_slice(self, start: int, count: int) -> list[dict]:
+        """count frozen samples starting at start, wrapping cyclically."""
+        n = len(self._frozen_bg)
+        return [self._frozen_bg[(start + i) % n] for i in range(count)]
 
     # ------------------------------------------------------------------
     # Iteration
@@ -233,7 +377,8 @@ class TCLoader:
             tc_buf: list[dict] = []
             while len(tc_buf) < self._tc_half:
                 idx    = int(rng.integers(0, n_tc))
-                sample = self._dataset.get_tc_sample(idx, rng=rng)
+                sample = self._dataset.get_tc_sample(
+                    idx, rng=self._station_rng(rng))
                 if sample is not None:
                     tc_buf.append(sample)
 
@@ -246,29 +391,57 @@ class TCLoader:
             step += 1
 
     def _iter_sequential(self, rng: np.random.Generator) -> Iterator[dict]:
-        """Sequential mode: iterate all TC samples once (val/test)."""
+        """Sequential mode: iterate all TC samples once (val/test).
+
+        Every valid TC sample is yielded: the final partial buffer is
+        flushed as a smaller batch with proportionally fewer backgrounds,
+        and a failed fresh background draw no longer discards the TC
+        buffer (the batch is yielded with however many backgrounds were
+        obtained). With freeze_backgrounds the background set is the same
+        every epoch and a draw can never fail.
+        """
+        if self._freeze_backgrounds and self._frozen_bg is None:
+            self._frozen_bg = self._build_frozen_backgrounds()
+
         indices = np.arange(len(self._dataset))
         if self._shuffle:
             rng.shuffle(indices)
 
         tc_buf: list[dict] = []
+        bg_cursor = 0
+
+        def _backgrounds(n_bg: int) -> list[dict]:
+            nonlocal bg_cursor
+            if self._freeze_backgrounds:
+                buf = self._frozen_slice(bg_cursor, n_bg)
+                bg_cursor += n_bg
+                return buf
+            buf, _ = self._draw_background(rng)
+            return buf[:n_bg]
 
         for idx in indices:
-            sample = self._dataset.get_tc_sample(int(idx), rng=rng)
+            sample = self._dataset.get_tc_sample(
+                int(idx), rng=self._station_rng(rng))
             if sample is None:
                 continue
             tc_buf.append(sample)
 
             if len(tc_buf) == self._tc_half:
-                bg_buf, ok = self._draw_background(rng)
-                if ok:
-                    yield _collate(tc_buf + bg_buf)
+                yield _collate(tc_buf + _backgrounds(self._bg_half))
                 tc_buf = []
 
+        # Flush the final partial batch (decision 9 — previously dropped)
+        if tc_buf:
+            n_bg = round(len(tc_buf) * self._bg_half / self._tc_half)
+            yield _collate(tc_buf + _backgrounds(n_bg))
+
     def __len__(self) -> int:
+        """Random mode: exact. Sequential mode: upper-bound estimate
+        (rows yielding None shrink the true count; the flushed partial
+        batch is included via ceil)."""
         if self._steps_per_epoch is not None:
             return self._steps_per_epoch
-        return max(1, len(self._dataset) // max(1, self._tc_half))
+        return max(1, math.ceil(len(self._dataset) / max(1, self._tc_half)))
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +477,10 @@ class TCDataModule(BaseDataModule):
         fov_lat                  list  default [0.0, 30.0]
         fov_lon                  list  default [-100.0, -45.0]
         background_buffer_hours  float default 6.0
+        station_selection        str   default 'random' ('random'|'nearest') —
+                                        TRAIN loader station subsampling;
+                                        val/test loaders are 'nearest' by
+                                        default regardless (decision 9)
         location_encoding        str   default 'unit_circle' ('unit_circle'|'domain')
         obs_normalisation        str   default 'minmax_01'
                                         ('minmax_01'|'minmax_11'|'standardise')
@@ -351,6 +528,9 @@ class TCDataModule(BaseDataModule):
         buf_hours         = float(config.get('background_buffer_hours', 6.0))
         location_encoding = config.get('location_encoding', 'unit_circle')
         obs_normalisation = config.get('obs_normalisation', 'minmax_01')
+        # Train-loader station selection; eval loaders are always 'nearest'
+        # by default (deterministic deployment policy, decision 9).
+        self._station_selection = config.get('station_selection', 'random')
 
         # obs_bounds: dict[var, [min, max]] or dict[var, [mean, std]] for standardise
         obs_bounds_raw = config.get('obs_bounds', None)
@@ -420,15 +600,26 @@ class TCDataModule(BaseDataModule):
         return TCLoader(
             self._train_ds,
             batch_size or self._batch_size,
-            tc_fraction     = self._tc_fraction,
-            shuffle         = shuffle,
-            seed            = seed,
-            fov_lat         = self._fov_lat,
-            fov_lon         = self._fov_lon,
-            steps_per_epoch = steps_per_epoch,
+            tc_fraction        = self._tc_fraction,
+            shuffle            = shuffle,
+            seed               = seed,
+            fov_lat            = self._fov_lat,
+            fov_lon            = self._fov_lon,
+            steps_per_epoch    = steps_per_epoch,
+            station_selection  = self._station_selection,
+            freeze_backgrounds = False,
         )
 
-    def val_loader(self, batch_size: Optional[int] = None, shuffle: bool = False) -> TCLoader:
+    def val_loader(
+        self,
+        batch_size:        Optional[int] = None,
+        shuffle:           bool = False,
+        station_selection: str  = 'nearest',
+    ) -> TCLoader:
+        """Deterministic eval loader: nearest-N stations + frozen
+        backgrounds, so two iterations yield identical batches.
+        station_selection='random' override exists for the
+        nearest-vs-random comparison runs (decision 13)."""
         return TCLoader(
             self._val_ds,
             batch_size or self._batch_size,
@@ -437,9 +628,17 @@ class TCDataModule(BaseDataModule):
             seed=0,
             fov_lat=self._fov_lat,
             fov_lon=self._fov_lon,
+            station_selection=station_selection,
+            freeze_backgrounds=True,
         )
 
-    def test_loader(self, batch_size: Optional[int] = None, shuffle: bool = False) -> TCLoader:
+    def test_loader(
+        self,
+        batch_size:        Optional[int] = None,
+        shuffle:           bool = False,
+        station_selection: str  = 'nearest',
+    ) -> TCLoader:
+        """Deterministic eval loader — see val_loader."""
         return TCLoader(
             self._test_ds,
             batch_size or self._batch_size,
@@ -448,6 +647,8 @@ class TCDataModule(BaseDataModule):
             seed=0,
             fov_lat=self._fov_lat,
             fov_lon=self._fov_lon,
+            station_selection=station_selection,
+            freeze_backgrounds=True,
         )
 
     # ------------------------------------------------------------------
@@ -459,10 +660,63 @@ class TCDataModule(BaseDataModule):
         return self._manifest
 
     # ------------------------------------------------------------------
+    # Station-count diagnostics
+    # ------------------------------------------------------------------
+
+    def station_diagnostics(
+        self,
+        split:       str = 'train',
+        max_samples: int = 256,
+    ) -> Optional[dict]:
+        """Station-count statistics over TC samples of one split (decision 9).
+
+        Assembles up to max_samples TC samples (evenly spaced rows,
+        deterministic nearest-N station path) and reports avg/min/max of
+        n_available (post-dedup candidate stations) and n_used (stations
+        in the sample after trimming to max_stations), plus the fraction
+        of samples capped at max_stations.
+
+        Returns None when the split is empty or no row yields a sample.
+        """
+        ds = getattr(self, f'_{split}_ds')
+        n  = len(ds)
+        if n == 0:
+            return None
+
+        idx   = np.unique(np.linspace(0, n - 1, min(n, max_samples)).astype(int))
+        avail = []
+        used  = []
+        for i in idx:
+            s = ds.get_tc_sample(int(i), rng=None)
+            if s is None:
+                continue
+            avail.append(int(s['n_available']))
+            used.append(int(s['n_stations']))
+        if not avail:
+            return None
+
+        avail_a = np.array(avail)
+        used_a  = np.array(used)
+        return {
+            'n_samples':   len(avail),
+            'n_available': {'avg': float(avail_a.mean()),
+                            'min': int(avail_a.min()),
+                            'max': int(avail_a.max())},
+            'n_used':      {'avg': float(used_a.mean()),
+                            'min': int(used_a.min()),
+                            'max': int(used_a.max())},
+            'frac_capped': float((avail_a >= self._max_stations).mean()),
+        }
+
+    # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
 
-    def summary(self, steps_per_epoch: Optional[int] = None) -> None:
+    def summary(
+        self,
+        steps_per_epoch: Optional[int] = None,
+        diagnostics:     bool = True,
+    ) -> None:
         """Print a formatted data summary to stdout.
 
         Parameters
@@ -470,6 +724,9 @@ class TCDataModule(BaseDataModule):
         steps_per_epoch : int or None
             When set (random training mode), the train row shows this exact
             value instead of the TC-count-based estimate.
+        diagnostics : bool
+            Also assemble a subset of TC samples per split and print
+            station-count statistics (see station_diagnostics). Default True.
         """
         tc_half = max(1, round(self._batch_size * self._tc_fraction))
 
@@ -515,5 +772,19 @@ class TCDataModule(BaseDataModule):
             f"max_stations={self._max_stations}  "
             f"tc_fraction={self._tc_fraction}"
         )
+        if diagnostics:
+            print(f"  {'─'*6}  {'─'*20}  {'─'*20}  {'─'*6}")
+            print(f"  {'split':<6}  {'n_avail avg/min/max':>20}  "
+                  f"{'n_used avg/min/max':>20}  {'capped':>6}")
+            for name in ('train', 'val', 'test'):
+                d = self.station_diagnostics(name)
+                if d is None:
+                    print(f"  {name:<6}  {'(no TC samples)':>20}")
+                    continue
+                na, nu = d['n_available'], d['n_used']
+                print(f"  {name:<6}  "
+                      f"{na['avg']:>10.1f} /{na['min']:>3} /{na['max']:>4}  "
+                      f"{nu['avg']:>10.1f} /{nu['min']:>3} /{nu['max']:>4}  "
+                      f"{d['frac_capped']:>5.0%}")
         print("─" * 58)
         print()

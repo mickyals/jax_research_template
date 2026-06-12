@@ -15,16 +15,26 @@ Sample dict
     station_mask   : np.bool_   (N,)      True = real station, False = padding
     obs_mask       : np.bool_   (N, F)    True = measurement was present
     label          : np.int32             0 = no storm, 1–10 = SSHS+offset
-    n_stations     : np.int32
+    n_stations     : np.int32             stations actually used (≤ N)
 
-Location encoding modes
+Metadata keys (attribution/diagnostics — collated OUTSIDE the model inputs,
+never part of batch['X']):
+    sid            : str | None           IBTrACS SID; None for background
+    iso_time       : np.int64             query timestamp, Unix-ns
+    query_lat      : np.float32           raw query latitude, degrees
+    query_lon      : np.float32           raw query longitude, degrees
+    n_available    : np.int32             post-dedup candidate stations
+                                          before trimming to max_stations
+
+Location encoding modes (see data/encoding.py for the encode/decode pairs)
 -----------------------
     'unit_circle'
-        station_coords : [normalised_distance, bearing_radians]
-            normalised_distance = haversine_km / radius_km  in [0, 1]
-            bearing_radians     = bearing from storm to station in [0, 2π)
-        query_coords   : [0.0, 0.0]  — sentinel; model replaces with a
-                         learned centre token.
+        station_coords : [x, y] local storm-centred map, each in [-1, 1]
+            x = norm_dist · sin(bearing)   (east)
+            y = norm_dist · cos(bearing)   (north)
+            norm_dist = haversine_km / radius_km in [0, 1]
+        query_coords   : [0.0, 0.0] — the storm position on the local map;
+                         model adds a learned content token for the query.
 
     'domain'
         station_coords : [norm_lat_rad, norm_lon_rad]
@@ -46,12 +56,24 @@ from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
 from experiments.sparse_obs_cross_attn.data.sources.insitu_land import (
     InsituLandDataset, DEFAULT_OBS_VARS,
 )
+from experiments.sparse_obs_cross_attn.data.encoding import (
+    encode_domain, encode_unit_circle,
+)
 from utils.geoscience.geodesic import vincenty_np
+from utils.geoscience.met_conversions import wind_to_components
 
 if TYPE_CHECKING:
     import pandas as pd
 
-_HALF_PI = np.float32(np.pi / 2.0)
+# Derived obs variables: names that may appear in obs_vars but are computed
+# by TCDataset from source columns rather than fetched from InsituLandDataset.
+# wind_east/wind_north are the (u, v) decomposition of speed + FROM-direction
+# (meteorological convention, see utils.geoscience.met_conversions) — kills
+# the 0/360 direction seam and shrinks low-speed direction noise by magnitude.
+DERIVED_OBS_VARS: dict[str, tuple[str, ...]] = {
+    'wind_east':  ('wind_speed', 'wind_from_direction'),
+    'wind_north': ('wind_speed', 'wind_from_direction'),
+}
 
 
 class TCDataset:
@@ -66,7 +88,9 @@ class TCDataset:
     radius_km : float
         Spatial radius for station search.
     time_window_hours : float
-        Half-width of the temporal search window (±).
+        Temporal tolerance (±) when matching station reports to the query
+        time. Each station contributes at most one report — the one
+        nearest in time (see InsituLandDataset.get_obs_near).
     max_stations : int
         Fixed sample size for batching — real stations are padded or subsampled
         to exactly this count.
@@ -74,9 +98,16 @@ class TCDataset:
         Samples with fewer matching stations return None.
     obs_vars : list[str] or None
         Observation variables to include. None → DEFAULT_OBS_VARS.
+        May contain derived names (see DERIVED_OBS_VARS): 'wind_east' /
+        'wind_north' are computed from wind_speed + wind_from_direction
+        (meteorological FROM convention; calm speed==0 → components (0, 0)
+        even when direction is missing). Source columns are fetched
+        automatically; obs_bounds keys must match obs_vars as listed.
     background_timestamps : np.ndarray or None
         Pool of int64 Unix-ns timestamps for background sample draws.
-        Required before calling get_background_sample.
+        Carried for the loader's benefit — TCLoader draws timestamps from
+        it; get_background_sample itself takes the timestamp as an
+        argument (pure assembly).
     location_encoding : {'unit_circle', 'domain'}
         Coordinate representation fed to the model. Default 'unit_circle'.
     fov_lat : (lat_min, lat_max)
@@ -130,6 +161,14 @@ class TCDataset:
         self.max_stations          = int(max_stations)
         self.min_stations          = int(min_stations)
         self.obs_vars              = list(obs_vars) if obs_vars is not None else list(DEFAULT_OBS_VARS)
+        # Columns actually fetched from InsituLandDataset: derived names are
+        # replaced by their source columns (order-preserving, deduped).
+        fetch: list[str] = []
+        for v in self.obs_vars:
+            for src in DERIVED_OBS_VARS.get(v, (v,)):
+                if src not in fetch:
+                    fetch.append(src)
+        self._fetch_vars = fetch
         self.background_timestamps = background_timestamps
         self.location_encoding     = location_encoding
         self.fov_lat               = tuple(fov_lat)
@@ -154,6 +193,7 @@ class TCDataset:
         self._lon  = ibtracs['LON'].astype(np.float32)
         self._time = ibtracs['ISO_TIME']                    # int64 Unix-ns
         self._sshs = ibtracs['USA_SSHS'].astype(np.float32)
+        self._sid  = ibtracs['SID']
 
     def __len__(self) -> int:
         return len(self.ibtracs)
@@ -207,12 +247,13 @@ class TCDataset:
             timestamp_ns=ts,
             radius_km=self.radius_km,
             window_ns=self.window_ns,
-            obs_vars=self.obs_vars,
+            obs_vars=self._fetch_vars,
         )
         if len(df) < self.min_stations:
             return None
 
-        return self._build_sample(df, lat, lon, label, rng)
+        return self._build_sample(df, lat, lon, label, rng,
+                                  sid=str(self._sid[idx]), iso_time=ts)
 
     # ------------------------------------------------------------------
     # Background sample
@@ -220,38 +261,35 @@ class TCDataset:
 
     def get_background_sample(
         self,
-        rng:     np.random.Generator,
-        fov_lat: Optional[tuple[float, float]] = None,
-        fov_lon: Optional[tuple[float, float]] = None,
+        lat:          float,
+        lon:          float,
+        timestamp_ns: int,
+        rng:          Optional[np.random.Generator] = None,
     ) -> Optional[dict]:
-        """Assemble one background (no-storm) sample.
+        """Assemble one background (no-storm) sample at a given point/time.
 
-        A random timestamp is drawn from the background pool and a random
-        query position from within the field-of-view bounds.
+        Pure assembly: the query position and timestamp are ARGUMENTS —
+        sampling policy (uniform vs LHS positions, pool draws, frozen eval
+        sets) lives in the loader (TCLoader), not here.
 
         Parameters
         ----------
-        rng : np.random.Generator
-        fov_lat : (lat_min, lat_max) or None
-            Defaults to self.fov_lat.
-        fov_lon : (lon_min, lon_max) or None
-            Defaults to self.fov_lon.
+        lat, lon : float
+            Query position in decimal degrees.
+        timestamp_ns : int
+            Query timestamp, Unix-ns (typically drawn from the loader's
+            background pool).
+        rng : np.random.Generator, optional
+            Station subsampling rng — same semantics as get_tc_sample
+            (None = deterministic nearest-N).
 
         Returns
         -------
-        dict | None — None when no stations are found.
+        dict | None — None when matching stations < min_stations.
         """
-        if self.background_timestamps is None or len(self.background_timestamps) == 0:
-            raise RuntimeError(
-                "background_timestamps pool is empty. "
-                "Build it via TCDataModule.setup()."
-            )
-
-        fov_lat = fov_lat if fov_lat is not None else self.fov_lat
-        fov_lon = fov_lon if fov_lon is not None else self.fov_lon
-        lat = float(rng.uniform(fov_lat[0], fov_lat[1]))
-        lon = float(rng.uniform(fov_lon[0], fov_lon[1]))
-        ts  = int(rng.choice(self.background_timestamps))
+        lat = float(lat)
+        lon = float(lon)
+        ts  = int(timestamp_ns)
 
         df = self.insitu.get_obs_near(
             query_lat=lat,
@@ -259,12 +297,12 @@ class TCDataset:
             timestamp_ns=ts,
             radius_km=self.radius_km,
             window_ns=self.window_ns,
-            obs_vars=self.obs_vars,
+            obs_vars=self._fetch_vars,
         )
         if len(df) < self.min_stations:
             return None
 
-        return self._build_sample(df, lat, lon, 0, rng)
+        return self._build_sample(df, lat, lon, 0, rng, sid=None, iso_time=ts)
 
     # ------------------------------------------------------------------
     # Shared sample builder
@@ -277,7 +315,18 @@ class TCDataset:
         query_lon: float,
         label:     int,
         rng:       Optional[np.random.Generator],
+        sid:       Optional[str],
+        iso_time:  int,
     ) -> dict:
+        # Compute derived obs columns (e.g. wind_east/wind_north from
+        # speed + direction) so df[self.obs_vars] below resolves directly.
+        if 'wind_east' in self.obs_vars or 'wind_north' in self.obs_vars:
+            u, v = wind_to_components(
+                df['wind_speed'].to_numpy(dtype=np.float32),
+                df['wind_from_direction'].to_numpy(dtype=np.float32),
+            )
+            df = df.assign(wind_east=u, wind_north=v)
+
         n_available = len(df)
         F = len(self.obs_vars)
 
@@ -327,21 +376,21 @@ class TCDataset:
             # NaN from near-coincident points → bearing 0.0
             bearing_rad = np.where(np.isfinite(bearing_rad), bearing_rad, 0.0)
 
-            encoded_coords = np.stack([norm_dist, bearing_rad], axis=-1)  # (n_real, 2)
-            query_coords   = np.zeros(2, dtype=np.float32)  # sentinel; model uses learned token
+            x, y = encode_unit_circle(norm_dist, bearing_rad)
+            encoded_coords = np.stack([x, y], axis=-1)  # (n_real, 2)
+            # (0, 0) = the storm position on the local map; the model adds a
+            # learned content token for the query.
+            query_coords   = np.zeros(2, dtype=np.float32)
 
         else:  # domain
-            lat_min, lat_max = self.fov_lat
-            lon_min, lon_max = self.fov_lon
-            lat_span = lat_max - lat_min
-            lon_span = lon_max - lon_min
-
-            norm_lat = ((raw_lats - lat_min) / (lat_span + 1e-12) * 2.0 - 1.0) * _HALF_PI
-            norm_lon = ((raw_lons - lon_min) / (lon_span + 1e-12) * 2.0 - 1.0) * _HALF_PI
+            norm_lat, norm_lon = encode_domain(
+                raw_lats, raw_lons, self.fov_lat, self.fov_lon,
+            )
             encoded_coords = np.stack([norm_lat, norm_lon], axis=-1)  # (n_real, 2)
 
-            q_norm_lat = ((query_lat - lat_min) / (lat_span + 1e-12) * 2.0 - 1.0) * float(_HALF_PI)
-            q_norm_lon = ((query_lon - lon_min) / (lon_span + 1e-12) * 2.0 - 1.0) * float(_HALF_PI)
+            q_norm_lat, q_norm_lon = encode_domain(
+                query_lat, query_lon, self.fov_lat, self.fov_lon,
+            )
             query_coords = np.array([q_norm_lat, q_norm_lon], dtype=np.float32)
 
         # Allocate padded arrays
@@ -363,4 +412,10 @@ class TCDataset:
             'obs_mask':       obs_mask_pad,
             'label':          np.int32(label),
             'n_stations':     np.int32(n_real),
+            # Metadata — kept outside batch['X'] by _collate (decision 13)
+            'sid':            sid,
+            'iso_time':       np.int64(iso_time),
+            'query_lat':      np.float32(query_lat),
+            'query_lon':      np.float32(query_lon),
+            'n_available':    np.int32(n_available),
         }
