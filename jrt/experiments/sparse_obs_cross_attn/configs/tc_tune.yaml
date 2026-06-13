@@ -177,6 +177,7 @@ model:
   # --- Fixed across all trials ---
   use_learned_mask:     true
   missing_value:        -10.0
+  full_self_attention:  false   # false = asymmetric mask; true = complete self-attention
   n_obs_features:       5
   n_classes:            11
   mlp_ratio:            4.0

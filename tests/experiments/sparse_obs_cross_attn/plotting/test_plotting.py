@@ -327,3 +327,14 @@ class TestPlotAttentionMask:
         # padding column blocked for everyone
         assert not img[:, 2].any()
         plt.close('all')
+
+    def test_full_self_attention_opens_query_column(self):
+        station_mask = np.array([True, True, False, True])
+        fig = plot_attention_mask(station_mask, full_self_attention=True)
+        img = fig.axes[0].images[0].get_array().data
+        N_t = 4
+        # real stations now attend to the query column
+        assert img[0, N_t] == 1.0 and img[1, N_t] == 1.0 and img[3, N_t] == 1.0
+        # padding column still blocked
+        assert not img[:, 2].any()
+        plt.close('all')

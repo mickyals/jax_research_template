@@ -146,13 +146,30 @@ class BaseLogger(ABC):
         Parameters
         ----------
         status : str
-            'success' or 'failed'.
+            Run outcome. Only the explicit failure words
+            ('failed'/'failure'/'crashed'/'error', case-insensitive) mark the
+            run as failed; any other value (e.g. 'success', 'completed') is
+            treated as a clean finish. See ``_is_failure_status``.
         """
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+_FAILURE_STATUSES = frozenset({"failed", "failure", "crashed", "error"})
+
+
+def _is_failure_status(status: str) -> bool:
+    """True only for explicit failure words (case-insensitive).
+
+    Failure is the special case, so any positive/neutral status — 'success',
+    'completed', 'done', … — is treated as a clean finish. This avoids
+    silently marking a successful run as failed just because the caller
+    passed a synonym of 'success'.
+    """
+    return str(status).strip().lower() in _FAILURE_STATUSES
+
 
 def _to_hwc_uint8(image: np.ndarray) -> np.ndarray:
     """Coerce an image array to HWC uint8, handling greyscale and float32."""
@@ -308,7 +325,7 @@ class WandbLogger(BaseLogger):
         )
 
     def finalize(self, status: str = "success") -> None:
-        self._run.finish(exit_code=0 if status == "success" else 1)
+        self._run.finish(exit_code=1 if _is_failure_status(status) else 0)
 
 
 # ---------------------------------------------------------------------------

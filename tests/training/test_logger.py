@@ -377,3 +377,41 @@ class TestLogArtifact:
         artifact = logger._wandb.Artifact.return_value
         artifact.add_file.assert_called_once_with(str(f))
         artifact.add_dir.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# finalize status → exit code (regression: 'completed' must NOT mark failed)
+# ---------------------------------------------------------------------------
+
+class TestFinalizeStatus:
+
+    def test_is_failure_status(self):
+        from training.logger import _is_failure_status
+        for ok in ("success", "completed", "done", "finished", "SUCCESS", ""):
+            assert not _is_failure_status(ok), ok
+        for bad in ("failed", "FAILED", "failure", "crashed", "error", " Crashed "):
+            assert _is_failure_status(bad), bad
+
+    def _wandb_logger(self):
+        from unittest.mock import MagicMock
+        logger = object.__new__(WandbLogger)
+        logger._wandb = MagicMock()
+        logger._run   = MagicMock()
+        return logger
+
+    def test_completed_marks_success(self):
+        # The exact string train.py passes — must be exit_code 0.
+        logger = self._wandb_logger()
+        logger.finalize("completed")
+        logger._run.finish.assert_called_once_with(exit_code=0)
+
+    def test_success_marks_success(self):
+        logger = self._wandb_logger()
+        logger.finalize("success")
+        logger._run.finish.assert_called_once_with(exit_code=0)
+
+    def test_failure_words_mark_failed(self):
+        for status in ("failed", "crashed", "error"):
+            logger = self._wandb_logger()
+            logger.finalize(status)
+            logger._run.finish.assert_called_once_with(exit_code=1)

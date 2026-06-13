@@ -57,6 +57,9 @@ pip install --upgrade "jax[cuda12]"   # CUDA 12.x
 # Edit data paths in the config
 jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
 
+# Put jrt/ on the Python path once (packages are rooted there):
+#   export PYTHONPATH=jrt        (bash)   |   $env:PYTHONPATH="jrt"   (PowerShell)
+
 # Train
 python -m experiments.sparse_obs_cross_attn.train.train \
     jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml

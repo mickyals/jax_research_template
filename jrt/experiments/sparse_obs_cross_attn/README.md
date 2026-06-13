@@ -81,6 +81,8 @@ query      │      ✓              ✓        ✓    ← query reads everythin
 
 Padding stations (where `station_mask = False`) have their entire column blocked — no token can attend to a padding position.
 
+Set `model.full_self_attention: true` to open the `stations → query` block (the `✗` column above), giving complete self-attention over all N+1 tokens — the standard unrestricted Transformer pattern. Default `false` keeps the asymmetric mask. Both paths go through `build_attention_mask` (the single source of truth, also used by `plot_attention_mask`).
+
 ### Location encoding modes
 
 Set in both `data.location_encoding` and `model.location_encoding` (they must match):
@@ -224,8 +226,21 @@ The only required edits before a first run are the five `data:` paths. Key flags
 
 ### CLI quick reference
 
-All commands run from the **repository root**. `CFG` below is the config path
-(positional argument for every entry point):
+All commands run from the **repository root** with **`jrt/` on the Python
+path** — the packages are rooted at `jrt/` (no `jrt.` import prefix), so a bare
+`python -m experiments...` from the repo root fails with
+`No module named 'experiments'`. Set `PYTHONPATH` once per shell:
+
+```bash
+# bash / zsh
+export PYTHONPATH=jrt
+```
+```powershell
+# PowerShell
+$env:PYTHONPATH = "jrt"
+```
+
+`CFG` below is the config path (positional argument for every entry point):
 
 ```bash
 CFG=jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
@@ -273,7 +288,8 @@ to `<run_dir>/logs/profile` — view with `tensorboard --logdir <that dir>`.
 
 ### Training (CLI)
 
-Run from the **repository root** so Python module imports resolve:
+Run from the **repository root** with `PYTHONPATH=jrt` set (see the CLI quick
+reference above):
 
 ```bash
 # First run
@@ -512,6 +528,7 @@ Key fields in `tc_classifier.yaml`:
 | `data.obs_normalisation` | `minmax_11` | `minmax_01` / `minmax_11` / `standardise` |
 | `model.location_encoding` | `unit_circle` | Must match `data.location_encoding` |
 | `model.use_learned_mask` | `true` | `true` = trainable mask token, normal(0.02) init; `false` = fixed constant sentinel |
+| `model.full_self_attention` | `false` | `false` = asymmetric mask (stations never attend to the query); `true` = complete self-attention over all N+1 tokens |
 | `model.missing_value` | −10.0 | Only used when `use_learned_mask: false`. Fixed sentinel value for missing obs. |
 | `model.embed_dim` | 128 | Token dimensionality |
 | `model.num_heads` | 4 | Attention heads (`embed_dim` must be divisible) |

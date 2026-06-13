@@ -445,10 +445,11 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     ]
 
     # One-off static figures + init-time gradient snapshot.
-    # The mask figure documents the asymmetric attention pattern for this
-    # run's probe sample — it never changes during training.
+    # The mask figure documents the attention pattern for this run's probe
+    # sample — it never changes during training.
     mask_fig = plot_attention_mask(
-        np.asarray(probe_batch['X']['station_mask'][0])
+        np.asarray(probe_batch['X']['station_mask'][0]),
+        full_self_attention=config['model'].get('full_self_attention', False),
     )
     trainer.logger.log_figure('val/attn_mask', mask_fig, step=0)
 

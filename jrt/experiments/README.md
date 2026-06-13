@@ -49,7 +49,9 @@ experiment/train.py
 ## Running an experiment
 
 ```bash
-# Train (run from repo root so imports resolve)
+# Run from repo root with jrt/ on the path (packages are rooted at jrt/):
+#   export PYTHONPATH=jrt        (bash)   |   $env:PYTHONPATH="jrt"   (PowerShell)
+# Train
 python -m experiments.my_experiment.train configs/my_config.yaml
 
 # Resume

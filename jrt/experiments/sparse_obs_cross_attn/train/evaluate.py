@@ -425,7 +425,8 @@ def evaluate(
             return f"{who} — true: {true_c}, pred: {pred_c}"
 
         fig_mask = plot_attention_mask(
-            np.asarray(attn_batch['X']['station_mask'][0])
+            np.asarray(attn_batch['X']['station_mask'][0]),
+            full_self_attention=config['model'].get('full_self_attention', False),
         )
         if output_dir is not None:
             fig_mask.savefig(out / f'{split}_attn_mask.png',

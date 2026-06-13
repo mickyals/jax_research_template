@@ -179,20 +179,27 @@ def plot_attention_matrix_grid(
     return fig
 
 
-def plot_attention_mask(station_mask: np.ndarray) -> plt.Figure:
-    """Static figure of the asymmetric (N+1)×(N+1) attention mask.
+def plot_attention_mask(
+    station_mask: np.ndarray,
+    full_self_attention: bool = False,
+) -> plt.Figure:
+    """Static figure of the (N+1)×(N+1) attention mask.
 
     Renders the exact boolean mask the model builds (single source of
-    truth: model.build_attention_mask) for one sample's station_mask:
-    stations are blocked from attending to the query (empty last column
-    except the query's own self-attention cell), and padding-station
-    columns are blocked for every token. Plain imshow, no per-token tick
-    labels; the query row/column is marked with dashed lines.
+    truth: model.build_attention_mask) for one sample's station_mask.
+    Default: stations are blocked from attending to the query (empty last
+    column except the query's own self-attention cell); with
+    ``full_self_attention=True`` that block opens (complete self-attention).
+    Padding-station columns are blocked for every token. Plain imshow, no
+    per-token tick labels; the query row/column is marked with dashed lines.
 
     Parameters
     ----------
     station_mask : np.ndarray
         (N,) bool — True = real station, False = padding.
+    full_self_attention : bool
+        Match the model's flag so the figure shows the actual pattern in
+        use. Default False (asymmetric).
 
     Returns
     -------
@@ -205,10 +212,14 @@ def plot_attention_mask(station_mask: np.ndarray) -> plt.Figure:
 
     station_mask = np.asarray(station_mask, dtype=bool)
     mask = np.asarray(
-        build_attention_mask(jnp.asarray(station_mask[None, :]))
+        build_attention_mask(
+            jnp.asarray(station_mask[None, :]), full_self_attention)
     )[0, 0]                                          # (N+1, N+1)
     T = mask.shape[0]
     n_real = int(station_mask.sum())
+    _desc = ('complete self-attention'
+             if full_self_attention
+             else 'stations cannot attend to the query')
 
     fig, ax = plt.subplots(figsize=(6.5, 6))
     im = ax.imshow(mask.astype(float), cmap='Greys_r', vmin=0.0, vmax=1.0,
@@ -221,8 +232,7 @@ def plot_attention_mask(station_mask: np.ndarray) -> plt.Figure:
     ax.set_ylabel('from token (last = query)')
     ax.set_title(
         f'Attention mask — white = allowed, black = blocked\n'
-        f'stations cannot attend to the query; '
-        f'{T - 1 - n_real} padding columns blocked',
+        f'{_desc}; {T - 1 - n_real} padding columns blocked',
         fontsize=10,
     )
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, ticks=[0, 1])

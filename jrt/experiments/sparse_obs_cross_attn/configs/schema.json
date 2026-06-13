@@ -154,6 +154,11 @@
           "description": "True = learned mask token for missing obs; False = constant sentinel."
         },
 
+        "full_self_attention": {
+          "type": "boolean",
+          "description": "False (default) = asymmetric mask (stations never attend to the query). True = complete self-attention over all N+1 tokens."
+        },
+
         "embed_dim":  { "type": "integer", "minimum": 1 },
         "num_heads":  { "type": "integer", "minimum": 1 },
         "num_layers": { "type": "integer", "minimum": 1, "description": "Total encoder layers (unified self-attention)." },

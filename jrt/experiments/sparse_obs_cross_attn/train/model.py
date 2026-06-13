@@ -30,8 +30,11 @@ from core.embeddings import GaussianFourierEmbedding
 N_CLASSES = 11
 
 
-def build_attention_mask(station_mask: jax.Array) -> jax.Array:
-    """Build the asymmetric N+1-token attention mask from a station mask.
+def build_attention_mask(
+    station_mask: jax.Array,
+    full_self_attention: bool = False,
+) -> jax.Array:
+    """Build the N+1-token attention mask from a station mask.
 
     Single source of truth — used by TCClassifier's forward pass and by
     the mask-visualisation figure (plotting.plot_attention_mask).
@@ -39,18 +42,24 @@ def build_attention_mask(station_mask: jax.Array) -> jax.Array:
     Convention: True = this (from, to) pair is allowed to attend;
     False = blocked (-inf before softmax).
 
-    Pattern:
+    Default (asymmetric) pattern:
         stations → stations: True   (stations contextualise each other)
         query    → stations: True   (query reads the station network)
         query    → self:     True   (query self-attention)
         stations → query:    False  (stations never peek at the query)
-    plus a padding override: no token may attend to a padding station
-    column (station_mask False).
+    With ``full_self_attention=True`` the stations → query block also opens,
+    making it complete self-attention (every token attends to every other) —
+    the standard unrestricted Transformer pattern.
+    A padding override always applies on top: no token may attend to a
+    padding station column (station_mask False).
 
     Parameters
     ----------
     station_mask : jax.Array
         (B, N) bool, True = real station.
+    full_self_attention : bool
+        If True, stations may also attend to the query token (symmetric /
+        complete self-attention). Default False = asymmetric.
 
     Returns
     -------
@@ -64,6 +73,8 @@ def build_attention_mask(station_mask: jax.Array) -> jax.Array:
     attn_mask = attn_mask.at[:, :,  :N, :N ].set(True)  # station_rows  → station_cols
     attn_mask = attn_mask.at[:, :,   N, :N ].set(True)  # query_row     → station_cols
     attn_mask = attn_mask.at[:, :,   N,  N ].set(True)  # query_row     → query_col (self)
+    if full_self_attention:
+        attn_mask = attn_mask.at[:, :, :N, N].set(True)  # station_rows → query_col
 
     # Padding override: block any column j where station_mask[b, j] == False.
     # station_mask reshaped to (B, 1, 1, N) for broadcast over from-tokens.
@@ -123,6 +134,12 @@ class TCClassifier(nn.Module):
         observation. Should be clearly outside the normalised obs range (e.g. -10.0
         for minmax_11 data in [-1, 1]) but not extreme enough to cause gradient
         pathology. Default -10.0.
+    full_self_attention : bool
+        False (default) = asymmetric mask: stations contextualise each other
+        and the query reads them, but stations never attend to the query.
+        True = complete self-attention over all N+1 tokens (every token attends
+        to every other, modulo padding) — i.e. the standard, unrestricted
+        Transformer pattern.
 
     Notes
     -----
@@ -159,6 +176,7 @@ class TCClassifier(nn.Module):
     n_obs_features:    int   = 5
     n_classes:         int   = N_CLASSES
     missing_value:     float = -10.0
+    full_self_attention: bool = False
 
     def setup(self):
         self.coord_embedding = GaussianFourierEmbedding(
@@ -276,10 +294,12 @@ class TCClassifier(nn.Module):
         # 4. Concatenate: station tokens then query token
         tokens = jnp.concatenate([station_tokens, query_token], axis=1) # (B, N+1, D)
 
-        # 5. Asymmetric attention mask — see build_attention_mask for the
-        # full pattern (stations blocked from the query, padding columns
-        # blocked for everyone).
-        attn_mask = build_attention_mask(station_mask)       # (B, 1, N+1, N+1)
+        # 5. Attention mask — see build_attention_mask. Default is asymmetric
+        # (stations blocked from the query); full_self_attention=True opens
+        # that block for complete self-attention. Padding columns always
+        # blocked for everyone.
+        attn_mask = build_attention_mask(
+            station_mask, self.full_self_attention)          # (B, 1, N+1, N+1)
 
         # 6. Encoder
         encoder_out = self.encoder(

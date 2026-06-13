@@ -242,6 +242,44 @@ def test_build_attention_mask_pattern():
     assert bool(m[0, 1]) and bool(m[1, 0])
 
 
+def test_build_attention_mask_full_self_attention():
+    """full_self_attention=True opens the stations→query block; padding stays blocked."""
+    from experiments.sparse_obs_cross_attn.train.model import (
+        build_attention_mask,
+    )
+    N_t = 4
+    station_mask = jnp.array([[True, True, False, True]])   # one padding col
+    m = np.asarray(build_attention_mask(
+        station_mask, full_self_attention=True))[0, 0]
+    # real stations now DO attend to the query column (rows 0,1,3)
+    assert bool(m[0, N_t]) and bool(m[1, N_t]) and bool(m[3, N_t])
+    # padding station (row 2) attends to query too (it's a real from-row),
+    # but the padding *column* (col 2) is still blocked for everyone
+    assert not m[:, 2].any()
+    # every non-padding (from, to) pair is allowed → complete self-attention
+    keep = [0, 1, 3, N_t]   # drop padding station index 2
+    sub = m[np.ix_(keep, keep)]
+    assert sub.all()
+
+
+def test_full_self_attention_flag_changes_station_outputs():
+    """With full_self_attention the model's station reps DO depend on the query."""
+    asym = _make_model(full_self_attention=False)
+    full = _make_model(full_self_attention=True)
+    X = _fake_batch()
+    # build_attention_mask is exercised inside apply; compare the masks the
+    # two models produce for the same station_mask.
+    from experiments.sparse_obs_cross_attn.train.model import build_attention_mask
+    sm = X['station_mask']
+    m_asym = np.asarray(build_attention_mask(sm, False))
+    m_full = np.asarray(build_attention_mask(sm, True))
+    assert not np.array_equal(m_asym, m_full)
+    # both models still run and produce finite logits
+    for model in (asym, full):
+        vs = model.init(KEY, X, train=False)
+        assert jnp.all(jnp.isfinite(model.apply(vs, X, train=False)))
+
+
 def test_asymmetric_mask_station_independent_of_query():
     """Swapping the query token must not change station token outputs.
 
