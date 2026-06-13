@@ -108,7 +108,10 @@ data:
   insitu_meta_path:       E:/sparse_obs/insitu-land/insitu_land_station_meta.npz
 
   # --- Train/val/test split ---
-  # Must match tc_classifier.yaml — see data/splits.py (season strategy).
+  # Independent of tc_classifier.yaml's split (this one currently differs:
+  # earlier edge years for a quicker, lower-variance search). Same 'season'
+  # strategy — see data/splits.py. Re-tune or re-train the chosen config at
+  # full length once the split policy is finalised.
   split:
     strategy: season
     train:
@@ -237,7 +240,9 @@ trainer:
   # --- Logging ---
   # NullLogger during tuning -- no remote logging overhead per trial.
   # Scalar metrics are printed to stdout; figures saved to disk.
-  log_backend:          null
+  # NOTE: quoted "null" — create_logger expects the string, not YAML null
+  # (which parses to None and would crash backend.lower()).
+  log_backend:          "null"
   log_every_n_steps:    50
   log_kwargs:           {}
 

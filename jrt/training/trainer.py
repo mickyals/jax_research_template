@@ -451,14 +451,20 @@ class Trainer:
 
     def _stop_profile(self) -> None:
         """Finish the JAX profiler trace (loss floats above already forced
-        device sync, so the traced steps are fully captured)."""
+        device sync, so the traced steps are fully captured).
+
+        The trace is handed to the logger as an artifact — WandB uploads
+        it to the run's artifact store; TensorBoard/Null leave it on disk
+        and print where it lives (with the viewer hint where it applies).
+        """
         jax.profiler.stop_trace()
         self._profile_active = False
         self._profile_done   = True
         print(
-            f"[profiler] trace of {self._profile_steps} training steps "
-            f"written to {self._profile_dir} — view with: "
-            f"tensorboard --logdir {self._profile_dir}"
+            f"[profiler] traced training steps written to {self._profile_dir}"
+        )
+        self._logger.log_artifact(
+            "profile-trace", self._profile_dir, artifact_type="profile",
         )
 
     def _eval_model(

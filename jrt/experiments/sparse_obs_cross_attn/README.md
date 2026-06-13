@@ -131,7 +131,11 @@ sparse_obs_cross_attn/
 │   ├── dataset.py       TCDataset — joins IBTrACS + InsituLand per sample,
 │   │                       coordinate encoding, obs normalisation
 │   ├── datamodule.py    TCDataModule + TCLoader — balanced TC/background
-│   │                       batches, re-iterable with per-epoch seed
+│   │                       batches, station_selection (nearest/random),
+│   │                       frozen LHS eval backgrounds, partial-batch flush
+│   ├── encoding.py      encode/decode pairs (unit_circle local x-y,
+│   │                       domain FOV-normalised) — exact inverses shared
+│   │                       by dataset + plotting
 │   ├── splits.py        resolve_splits — data.split config → per-split
 │   │                       datasets + run manifest ('season' and 'sid'
 │   │                       strategies)
@@ -154,7 +158,8 @@ sparse_obs_cross_attn/
 └── train/
     ├── model.py         TCClassifier — unified Transformer encoder
     ├── metrics.py       cross_entropy, accuracy, binary_accuracy, mae_class
-    ├── train.py         CLI entry point + attention entropy epoch callback
+    ├── train.py         CLI entry point + observability callbacks
+    │                       (attention entropy/map/grid, gradient flow)
     ├── evaluate.py      Evaluation pipeline (metrics + predictions)
     └── tune.py          Optuna hyperparameter search entry point
 ```
@@ -513,6 +518,8 @@ Key fields in `tc_classifier.yaml`:
 | `model.num_layers` | 4 | Total encoder depth (unified self-attention over all N+1 tokens) |
 | `model.fourier_dim` | 64 | `GaussianFourierEmbedding` output dim (must be even) |
 | `model.fourier_scale` | 1.0 | Std dev of frequency matrix; log-uniformly tuned in HP search [0.1, 10.0] |
+| `trainer.steps_per_epoch` | 500 | Random TC-sampling mode: gradient steps per epoch. Omit/`null` = sequential mode (one pass over TC data) |
+| `trainer.profile` | `false` | Trace the first `profile_steps` training steps (JAX profiler) → `<run_dir>/logs/profile`; WandB uploads it as an artifact, TensorBoard/Null leave it on disk |
 | `trainer.attn_fig_every_n_epochs` | 5 | Epoch cadence for `val/attn_map` + `val/attn_grid` figures (VAL probe batch); 0 = disabled |
 | `trainer.grad_hist_every_n_epochs` | 5 | Epoch cadence for `grad_flow/*` gradient histograms (TRAIN probe batch, also at init); 0 = disabled |
 | `trainer.patience_metric` | `val/cross_entropy` | |

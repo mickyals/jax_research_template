@@ -12,6 +12,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import matplotlib
+matplotlib.use("Agg")   # headless — no display required
 import matplotlib.pyplot as plt
 
 from training.logger import (
@@ -30,6 +32,7 @@ _REQUIRED_METHODS = [
     "log_figure",
     "log_image",
     "log_histogram",
+    "log_artifact",
     "finalize",
     "log_dir",
 ]
@@ -323,3 +326,54 @@ class TestCreateLogger:
         logger.log_metrics({"loss": 0.5}, step=1)
         out = capsys.readouterr().out
         assert "loss" in out
+
+
+# ---------------------------------------------------------------------------
+# log_artifact
+# ---------------------------------------------------------------------------
+
+class TestLogArtifact:
+
+    def test_null_silent_by_default(self, null_logger, tmp_path, capsys):
+        null_logger.log_artifact("trace", tmp_path)
+        assert capsys.readouterr().out == ""
+
+    def test_null_verbose_prints_path(self, null_logger_verbose, tmp_path, capsys):
+        null_logger_verbose.log_artifact("trace", tmp_path / "profile")
+        out = capsys.readouterr().out
+        assert "trace" in out and "profile" in out
+
+    def test_wandb_uploads_dir_as_artifact(self, tmp_path):
+        from unittest.mock import MagicMock
+        # Build a WandbLogger without running __init__ (no wandb account
+        # in CI) and inject mocks for the wandb module + run.
+        logger = object.__new__(WandbLogger)
+        logger._wandb = MagicMock()
+        logger._run   = MagicMock()
+        artifact_dir  = tmp_path / "profile"
+        artifact_dir.mkdir()
+        (artifact_dir / "trace.pb").write_bytes(b"x")
+
+        logger.log_artifact("profile-trace", artifact_dir,
+                            artifact_type="profile")
+
+        logger._wandb.Artifact.assert_called_once_with(
+            "profile-trace", type="profile")
+        artifact = logger._wandb.Artifact.return_value
+        artifact.add_dir.assert_called_once_with(str(artifact_dir))
+        artifact.add_file.assert_not_called()
+        logger._run.log_artifact.assert_called_once_with(artifact)
+
+    def test_wandb_uploads_single_file(self, tmp_path):
+        from unittest.mock import MagicMock
+        logger = object.__new__(WandbLogger)
+        logger._wandb = MagicMock()
+        logger._run   = MagicMock()
+        f = tmp_path / "manifest.json"
+        f.write_text("{}")
+
+        logger.log_artifact("manifest", f, artifact_type="manifest")
+
+        artifact = logger._wandb.Artifact.return_value
+        artifact.add_file.assert_called_once_with(str(f))
+        artifact.add_dir.assert_not_called()

@@ -57,7 +57,7 @@ test_metrics = trainer.test(dm.test_loader())
 | `log_kwargs` | `{}` | forwarded to the logger constructor |
 | `seed` | 42 | model init and dropout RNG |
 | `use_tqdm` | true | progress bars |
-| `profile` | false | JAX-profiler trace of the first `profile_steps` training steps → `<log_dir>/profile`; view with TensorBoard's Profile plugin (WandB cannot render XLA traces — attach the dir as an artifact instead). First traced step includes jit compilation; read later steps for steady-state timing |
+| `profile` | false | JAX-profiler trace of the first `profile_steps` training steps → `<log_dir>/profile`, then handed to the logger via `log_artifact`: WandB uploads it to the run's artifact store; TensorBoard/Null leave it on disk and print the path (TensorBoard backend prints the `--logdir` viewer hint). Viewing always uses TensorBoard's Profile plugin — WandB stores but cannot render XLA traces. First traced step includes jit compilation; read later steps for steady-state timing |
 | `profile_steps` | 5 | steps to trace when `profile: true` |
 
 **Run directory layout** (when `run_dir` is set):
@@ -158,6 +158,7 @@ All three share the same interface:
 | `log_figure(key, fig, step)` | Matplotlib figure |
 | `log_image(key, image, step)` | NumPy image array |
 | `log_histogram(key, values, step)` | Scalar distribution |
+| `log_artifact(name, path, artifact_type)` | File/dir attached to the run — WandB uploads to its artifact store; TensorBoard/Null leave it on disk and print the path |
 | `finalize(status)` | Called at end of training |
 
 `NullLogger` saves figures to `log_dir/figures/` as PNG files. `WandbLogger` streams everything remotely. Set `WANDB_API_KEY` as an environment variable — never put it in config files.

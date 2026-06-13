@@ -15,6 +15,7 @@ Shared interface
     log_figure(tag, figure, step)       -- matplotlib Figure
     log_image(tag, image, step)         -- numpy/jax HWC array
     log_histogram(tag, values, step)    -- 1-D array -> distribution
+    log_artifact(name, path, type)      -- file/dir artifact (backend-specific)
     finalize(status)                    -- 'success' | 'failed'
     log_dir                             -- pathlib.Path to run directory
 
@@ -113,6 +114,30 @@ class BaseLogger(ABC):
             Values to histogram. Any shape — will be flattened.
         step : int
         """
+
+    def log_artifact(
+        self,
+        name: str,
+        path: str | Path,
+        artifact_type: str = "profile",
+    ) -> None:
+        """Attach a file or directory to the run as an artifact.
+
+        Backend-specific: WandB uploads it as a run artifact (the point of
+        WandB is to store run outputs); TensorBoard and Null leave it on
+        disk and print where it lives. Not abstract — backends that have
+        no artifact store inherit the default, which prints the path.
+
+        Parameters
+        ----------
+        name : str
+            Artifact name (e.g. 'profile-trace').
+        path : str or Path
+            File or directory to attach.
+        artifact_type : str
+            Artifact category (e.g. 'profile', 'manifest').
+        """
+        print(f"[logger] artifact '{name}' ({artifact_type}) at: {path}")
 
     @abstractmethod
     def finalize(self, status: str = "success") -> None:
@@ -262,6 +287,26 @@ class WandbLogger(BaseLogger):
             step=step,
         )
 
+    def log_artifact(
+        self,
+        name: str,
+        path: str | Path,
+        artifact_type: str = "profile",
+    ) -> None:
+        artifact = self._wandb.Artifact(name, type=artifact_type)
+        path = Path(path)
+        if path.is_dir():
+            artifact.add_dir(str(path))
+        else:
+            artifact.add_file(str(path))
+        self._run.log_artifact(artifact)
+        print(
+            f"[logger] '{name}' uploaded to WandB as a '{artifact_type}' "
+            f"artifact. (XLA traces need TensorBoard's Profile plugin to "
+            f"view — download the artifact and run tensorboard --logdir "
+            f"on it.)"
+        )
+
     def finalize(self, status: str = "success") -> None:
         self._run.finish(exit_code=0 if status == "success" else 1)
 
@@ -351,6 +396,20 @@ class TensorBoardLogger(BaseLogger):
     def log_histogram(self, tag: str, values: np.ndarray, step: int) -> None:
         self._writer.add_histogram(
             tag, np.asarray(values).ravel(), global_step=step
+        )
+
+    def log_artifact(
+        self,
+        name: str,
+        path: str | Path,
+        artifact_type: str = "profile",
+    ) -> None:
+        # TensorBoard has no artifact store — the files stay on disk.
+        # XLA profile traces are viewable directly in this backend's UI.
+        print(
+            f"[logger] artifact '{name}' ({artifact_type}) at: {path}"
+            + (f" — view with: tensorboard --logdir {path}"
+               if artifact_type == "profile" else "")
         )
 
     def finalize(self, status: str = "success") -> None:
@@ -450,6 +509,15 @@ class NullLogger(BaseLogger):
                 f"mean={v.mean():.4f}  std={v.std():.4f}  "
                 f"min={v.min():.4f}  max={v.max():.4f}"
             )
+
+    def log_artifact(
+        self,
+        name: str,
+        path: str | Path,
+        artifact_type: str = "profile",
+    ) -> None:
+        if self._verbose:
+            print(f"[logger] artifact '{name}' ({artifact_type}) at: {path}")
 
     def finalize(self, status: str = "success") -> None:
         if self._verbose:

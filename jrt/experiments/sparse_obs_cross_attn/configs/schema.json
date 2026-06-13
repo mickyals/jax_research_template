@@ -201,8 +201,10 @@
         "optimizer_kwargs":     { "type": "object" },
         "scheduler":            { "type": "string" },
         "scheduler_kwargs":     { "type": "object" },
+        "loss_key":             { "type": "string", "description": "Which metric is the training loss / differentiated. Defaults to the first metric (cross_entropy)." },
         "num_epochs":           { "type": "integer", "minimum": 1 },
         "num_steps":            { "type": "number",  "minimum": 1 },
+        "steps_per_epoch":      { "type": "integer", "minimum": 1, "description": "Random TC-sampling mode: gradient steps per epoch. Omit/null = sequential mode (one pass over TC data). Read by train.py/tune.py." },
         "patience":             { "type": "integer", "minimum": 1 },
         "patience_metric":      { "type": "string" },
         "patience_direction":   {
