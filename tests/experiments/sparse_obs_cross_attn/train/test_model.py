@@ -81,7 +81,6 @@ def _make_model(**kwargs) -> TCClassifier:
         num_layers=LAYERS,
         fourier_dim=16,
         n_obs_features=F,
-        use_learned_mask=True,
     )
     defaults.update(kwargs)
     return TCClassifier(**defaults)
@@ -91,73 +90,67 @@ def _make_model(**kwargs) -> TCClassifier:
 # TCClassifier — fake data
 # ---------------------------------------------------------------------------
 
-# Two encoding modes — the single unified architecture handles both
-_CONFIGS = [
-    dict(location_encoding='unit_circle'),
-    dict(location_encoding='domain'),
-]
-
-_CONFIG_IDS = [
-    'unit_circle',
-    'domain',
-]
+# Two coordinate conventions — the single coordinate-agnostic architecture
+# handles both; the only difference is the query_coords the datamodule supplies
+# (zeros for unit_circle, varied for domain).
+_LOCATIONS = ['unit_circle', 'domain']
 
 
-@pytest.mark.parametrize('cfg', _CONFIGS, ids=_CONFIG_IDS)
+@pytest.mark.parametrize('loc', _LOCATIONS, ids=_LOCATIONS)
 class TestTCClassifierFakeData:
 
-    def _init(self, cfg, **extra):
-        model = _make_model(**cfg, **extra)
-        X     = _fake_batch(location_encoding=cfg['location_encoding'])
+    def _init(self, loc, **extra):
+        model = _make_model(**extra)
+        X     = _fake_batch(location_encoding=loc)
         vs    = model.init(KEY, X, train=False)
         return model, vs, X
 
-    def test_output_shape(self, cfg):
-        model, vs, X = self._init(cfg)
+    def test_output_shape(self, loc):
+        model, vs, X = self._init(loc)
         logits = model.apply(vs, X, train=False)
         assert logits.shape == (B, N_CLASSES)
 
-    def test_output_finite(self, cfg):
-        model, vs, X = self._init(cfg)
+    def test_output_finite(self, loc):
+        model, vs, X = self._init(loc)
         logits = model.apply(vs, X, train=False)
         assert jnp.all(jnp.isfinite(logits)), "logits contain NaN or inf"
 
-    def test_missing_obs_changes_output(self, cfg):
-        model = _make_model(**cfg)
-        X_present = _fake_batch(location_encoding=cfg['location_encoding'], all_present=True)
-        X_missing = _fake_batch(location_encoding=cfg['location_encoding'], all_present=False)
+    def test_missing_obs_changes_output(self, loc):
+        model = _make_model()
+        X_present = _fake_batch(location_encoding=loc, all_present=True)
+        X_missing = _fake_batch(location_encoding=loc, all_present=False)
         vs = model.init(KEY, X_present, train=False)
         out_present = model.apply(vs, X_present, train=False)
         out_missing = model.apply(vs, X_missing, train=False)
         assert not jnp.allclose(out_present, out_missing)
 
-    def test_padding_changes_output(self, cfg):
-        model = _make_model(**cfg)
-        X_full = _fake_batch(location_encoding=cfg['location_encoding'], n_real=N)
-        X_half = _fake_batch(location_encoding=cfg['location_encoding'], n_real=N // 2)
+    def test_padding_changes_output(self, loc):
+        model = _make_model()
+        X_full = _fake_batch(location_encoding=loc, n_real=N)
+        X_half = _fake_batch(location_encoding=loc, n_real=N // 2)
         vs = model.init(KEY, X_full, train=False)
         out_full = model.apply(vs, X_full, train=False)
         out_half = model.apply(vs, X_half, train=False)
         assert not jnp.allclose(out_full, out_half)
 
-    def test_single_head(self, cfg):
-        model = _make_model(**cfg, num_heads=1)
-        X     = _fake_batch(location_encoding=cfg['location_encoding'])
+    def test_single_head(self, loc):
+        model = _make_model(num_heads=1)
+        X     = _fake_batch(location_encoding=loc)
         vs    = model.init(KEY, X, train=False)
         logits = model.apply(vs, X, train=False)
         assert logits.shape == (B, N_CLASSES)
         assert jnp.all(jnp.isfinite(logits))
 
-    def test_multi_layers(self, cfg):
-        model = _make_model(**cfg, num_layers=3)
-        X     = _fake_batch(location_encoding=cfg['location_encoding'])
+    def test_multi_layers(self, loc):
+        model = _make_model(num_layers=3)
+        X     = _fake_batch(location_encoding=loc)
         vs    = model.init(KEY, X, train=False)
         logits = model.apply(vs, X, train=False)
         assert logits.shape == (B, N_CLASSES)
         assert jnp.all(jnp.isfinite(logits))
 
-    def test_return_weights_shape(self, cfg):
-        model, vs, X = self._init(cfg)
+    def test_return_weights_shape(self, loc):
+        model, vs, X = self._init(loc)
         logits, weights = model.apply(vs, X, train=False, return_weights=True)
         assert logits.shape  == (B, N_CLASSES)
         # Full attention matrices from every layer (leading axis = LAYERS)
@@ -168,17 +161,17 @@ class TestTCClassifierFakeData:
         q_row = weights[-1][:, :, -1, :]
         assert q_row.shape == (B, HEADS, N + 1)
 
-    def test_return_weights_stations_blocked_from_query(self, cfg):
+    def test_return_weights_stations_blocked_from_query(self, loc):
         # Station rows must place ZERO weight on the query column (token N)
-        model, vs, X = self._init(cfg)
+        model, vs, X = self._init(loc)
         _, weights = model.apply(vs, X, train=False, return_weights=True)
         station_rows_query_col = weights[:, :, :, :N, N]
         assert jnp.allclose(station_rows_query_col, 0.0, atol=1e-6)
 
-    def test_gradient_flows(self, cfg):
+    def test_gradient_flows(self, loc):
         """Loss gradient w.r.t. all parameters must be non-None and finite."""
-        model = _make_model(**cfg)
-        X     = _fake_batch(location_encoding=cfg['location_encoding'])
+        model = _make_model()
+        X     = _fake_batch(location_encoding=loc)
         vs    = model.init(KEY, X, train=False)
         labels = jnp.zeros(B, dtype=jnp.int32)
 
@@ -195,10 +188,10 @@ class TestTCClassifierFakeData:
         assert any(jnp.any(g != 0) for g in leaves), \
             "all gradients are zero — no gradient flow"
 
-    def test_train_vs_eval_differ_with_dropout(self, cfg):
+    def test_train_vs_eval_differ_with_dropout(self, loc):
         """With dropout, train and eval outputs should differ."""
-        model = _make_model(**cfg, dropout_rate=0.5)
-        X     = _fake_batch(location_encoding=cfg['location_encoding'])
+        model = _make_model(dropout_rate=0.5)
+        X     = _fake_batch(location_encoding=loc)
         vs    = model.init({'params': KEY, 'dropout': KEY}, X, train=True)
         out_eval  = model.apply(vs, X, train=False)
         out_train = model.apply(
@@ -212,63 +205,54 @@ class TestTCClassifierFakeData:
 # Standalone tests
 # ---------------------------------------------------------------------------
 
-def test_missingness_indicator_disambiguates_sentinel_collision():
-    """A missing feature must produce a different token than a real obs
-    that happens to equal the sentinel value (use_learned_mask=False)."""
-    missing_value = -10.0
-    model = _make_model(
-        use_learned_mask=False,
-        missing_value=missing_value,
-        missingness_indicator=True,
-    )
+def test_missingness_indicator_disambiguates_observed_zero():
+    """A missing feature (filled with 0) must produce a different token than a
+    real observation that equals 0, when missingness_indicator=True — the mask
+    channel carries the disambiguation."""
+    model = _make_model(missingness_indicator=True)
     X = _fake_batch(all_present=True)
 
-    # A real observation that happens to equal the sentinel.
-    X_real_eq_sentinel = dict(X)
-    X_real_eq_sentinel['station_obs'] = jnp.full_like(X['station_obs'], missing_value)
-    X_real_eq_sentinel['obs_mask']    = jnp.ones_like(X['obs_mask'])
+    # A real observation that happens to be exactly 0 everywhere.
+    X_real_zero = dict(X)
+    X_real_zero['station_obs'] = jnp.zeros_like(X['station_obs'])
+    X_real_zero['obs_mask']    = jnp.ones_like(X['obs_mask'])
 
-    # A genuinely missing feature — obs_fixed collapses to the same sentinel.
+    # A genuinely missing feature — also fills to 0, but obs_mask=False.
     X_missing = dict(X)
-    X_missing['station_obs'] = jnp.zeros_like(X['station_obs'])  # ignored where obs_mask=False
+    X_missing['station_obs'] = jnp.zeros_like(X['station_obs'])
     X_missing['obs_mask']    = jnp.zeros_like(X['obs_mask'])
 
-    vs = model.init(KEY, X_real_eq_sentinel, train=False)
-    out_real    = model.apply(vs, X_real_eq_sentinel, train=False)
+    vs = model.init(KEY, X_real_zero, train=False)
+    out_real    = model.apply(vs, X_real_zero, train=False)
     out_missing = model.apply(vs, X_missing, train=False)
     assert not jnp.allclose(out_real, out_missing), \
-        "missingness_indicator=True should disambiguate sentinel collisions"
+        "missingness_indicator=True should distinguish observed-0 from absent"
 
 
-def test_missingness_indicator_false_aliases_sentinel_collision():
-    """Without the indicator, a missing feature IS aliased with a real obs
-    equal to the sentinel — documents the bug the indicator fixes."""
-    missing_value = -10.0
-    model = _make_model(
-        use_learned_mask=False,
-        missing_value=missing_value,
-        missingness_indicator=False,
-    )
+def test_missingness_indicator_false_aliases_observed_zero():
+    """Without the mask channel, a missing feature (filled 0) IS aliased with a
+    real observation equal to 0 — documents the aliasing the indicator fixes."""
+    model = _make_model(missingness_indicator=False)
     X = _fake_batch(all_present=True)
 
-    X_real_eq_sentinel = dict(X)
-    X_real_eq_sentinel['station_obs'] = jnp.full_like(X['station_obs'], missing_value)
-    X_real_eq_sentinel['obs_mask']    = jnp.ones_like(X['obs_mask'])
+    X_real_zero = dict(X)
+    X_real_zero['station_obs'] = jnp.zeros_like(X['station_obs'])
+    X_real_zero['obs_mask']    = jnp.ones_like(X['obs_mask'])
 
     X_missing = dict(X)
     X_missing['station_obs'] = jnp.zeros_like(X['station_obs'])
     X_missing['obs_mask']    = jnp.zeros_like(X['obs_mask'])
 
-    vs = model.init(KEY, X_real_eq_sentinel, train=False)
-    out_real    = model.apply(vs, X_real_eq_sentinel, train=False)
+    vs = model.init(KEY, X_real_zero, train=False)
+    out_real    = model.apply(vs, X_real_zero, train=False)
     out_missing = model.apply(vs, X_missing, train=False)
     assert jnp.allclose(out_real, out_missing), \
-        "missingness_indicator=False should alias sentinel collisions (legacy behaviour)"
+        "missingness_indicator=False should alias observed-0 with absent (legacy behaviour)"
 
 
-def test_use_learned_mask_false():
-    """Constant sentinel path (use_learned_mask=False) produces finite output."""
-    model  = _make_model(use_learned_mask=False)
+def test_missingness_indicator_false_runs():
+    """missingness_indicator=False (no mask channel) produces finite output."""
+    model  = _make_model(missingness_indicator=False)
     X      = _fake_batch(all_present=False)   # some missing obs
     vs     = model.init(KEY, X, train=False)
     logits = model.apply(vs, X, train=False)
@@ -437,7 +421,7 @@ class TestTCClassifierRealData:
         batch = next(iter(loader))
         X, y  = batch['X'], batch['y']
 
-        model  = _make_model(location_encoding='unit_circle')
+        model  = _make_model()
         vs     = model.init(KEY, X, train=False)
         logits = model.apply(vs, X, train=False)
 

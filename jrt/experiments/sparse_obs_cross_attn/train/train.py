@@ -39,13 +39,13 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_class_metrics,
     plot_confusion_matrix,
 )
-from experiments.sparse_obs_cross_attn.train.metrics import (
-    build_metrics_fns,
+from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
+from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from training.metrics import (
     cross_entropy,
     expected_calibration_error,
     quadratic_weighted_kappa,
 )
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
 from training.trainer import Trainer, TrainState
 from utils.jax_core.diagnostics import model_tabulate
 
@@ -343,12 +343,11 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # batch_size lives in trainer: (training hyperparam); data loader reads it here.
     config['data']['batch_size'] = trainer_cfg['batch_size']
 
-    # location_encoding is an experiment-design choice that affects both data
-    # preprocessing (coordinate encoding) and model architecture (query token
-    # construction).  Defined once at the top level; injected into both blocks.
+    # location_encoding picks the coordinate convention for the datamodule's
+    # encoder. The model is coordinate-agnostic (Senseiver single projection of
+    # whatever coords it is handed), so it is injected into the data block only.
     loc_enc = config.get('location_encoding', 'unit_circle')
     config['data']['location_encoding']  = loc_enc
-    config['model']['location_encoding'] = loc_enc
 
     # ------------------------------------------------------------------
     # Resolve run_dir relative to the experiment root (two levels up from

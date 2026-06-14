@@ -143,25 +143,10 @@ model:
   fourier_scale:        1.0           # frequency spread; HP-tuned over log-uniform [0.1, 10.0]
 
   # --- Missing observation handling ---
-  # true  (recommended)
-  #   A trainable (F, ) vector — one value per obs feature — initialised N(0, 0.02).
-  #   The optimiser learns what "absent" looks like for each variable.
-  #   missing_value is ignored in this mode.
-  #
-  # false
-  #   Every missing entry is replaced at inference time by the fixed scalar
-  #   missing_value.  Nothing is learned; the sentinel never changes.
-  use_learned_mask:     true
-
-  # Only active when use_learned_mask: false.
-  # Should sit clearly outside the normalized obs range ([-1, 1] for minmax_11)
-  # without being extreme enough to cause gradient issues.
-  missing_value:        -10.0
-
-  # true (recommended): concatenate obs_mask to the obs values before
-  # station_proj, so a missing feature (sentinel) is distinguishable from a
-  # real observation that happens to equal the sentinel. false reproduces
-  # the old aliased behaviour (ablation only).
+  # Missing obs are filled with 0. true (recommended): concatenate obs_mask as
+  # its own channel in the shared token projection, so a missing feature is
+  # distinguishable from a real observation equal to 0. false drops the mask
+  # channel (missing == observed-zero — ablation only).
   missingness_indicator: true
 
   # --- Output ---

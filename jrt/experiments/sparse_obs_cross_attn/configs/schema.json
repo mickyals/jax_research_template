@@ -143,17 +143,6 @@
       "additionalProperties": false,
       "properties": {
 
-        "location_encoding": {
-          "type": "string",
-          "enum": ["unit_circle", "domain"],
-          "description": "Must match data.location_encoding."
-        },
-
-        "use_learned_mask": {
-          "type": "boolean",
-          "description": "True = learned mask token for missing obs; False = constant sentinel."
-        },
-
         "full_self_attention": {
           "type": "boolean",
           "description": "False (default) = asymmetric mask (stations never attend to the query). True = complete self-attention over all N+1 tokens."
@@ -161,7 +150,7 @@
 
         "missingness_indicator": {
           "type": "boolean",
-          "description": "True (default) = concatenate obs_mask to the obs values before station_proj, so a missing feature is distinguishable from a real observation equal to the sentinel. False reproduces the old aliased behaviour."
+          "description": "True (default) = concatenate obs_mask as its own channel in the shared token-projection input, so a missing feature (filled with 0) is distinguishable from a real observation equal to 0. False drops the mask channel (missing == observed-zero)."
         },
 
         "embed_dim":  { "type": "integer", "minimum": 1 },
@@ -187,11 +176,7 @@
           "minimum": 1,
           "description": "Must match len(data.obs_vars)."
         },
-        "n_classes":        { "type": "integer", "minimum": 2 },
-        "missing_value":    {
-          "type": "number",
-          "description": "Finite sentinel for missing obs. Do not use -Inf."
-        }
+        "n_classes":        { "type": "integer", "minimum": 2 }
       }
     },
 

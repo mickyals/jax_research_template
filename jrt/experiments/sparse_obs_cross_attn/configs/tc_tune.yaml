@@ -172,12 +172,8 @@ data:
 # -----------------------------------------------------------------------------
 model:
 
-  # location_encoding is set at top level -- propagated here by tune.py.
-
   # --- Fixed across all trials ---
-  use_learned_mask:     true
-  missing_value:        -10.0
-  missingness_indicator: true  # concat obs_mask to obs values before station_proj
+  missingness_indicator: true  # concat obs_mask as its own channel (missing obs filled 0)
   full_self_attention:  true   # false = asymmetric mask; true = complete self-attention
   n_obs_features:       5
   n_classes:            11

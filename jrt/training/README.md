@@ -95,6 +95,8 @@ Scalar loss functions for JAX/Flax training. All functions have the signature `(
 | `ordinal_predict(logits)` | Predicted class from ordinal logits |
 | `ordinal_probs(logits)` | Per-class probabilities from ordinal logits |
 | `squared_emd_loss(logits, labels, n_classes)` | Squared Earth Mover's Distance over ordinal class CDFs — penalises far misses more than near misses, no model change |
+| `weighted_cross_entropy_loss(logits, labels, class_weights)` | Cross-entropy with a per-class sample weight (`class_weights[labels[i]]`), weighted mean |
+| `weighted_squared_emd_loss(logits, labels, class_weights, n_classes)` | `squared_emd_loss` with a per-class sample weight |
 
 Masked variants derive the mask from `jnp.isfinite(target)` when no mask is passed — NaN targets are excluded automatically. They return `0.0` when no valid positions exist.
 
@@ -110,6 +112,8 @@ loss_fn = get_loss("squared_emd", n_classes=11)   # (logits, labels) -> scalar
 |------|-------------|
 | `cross_entropy` | Softmax cross-entropy with integer labels |
 | `squared_emd` | Squared EMD over ordinal class CDFs (kwarg: `n_classes`, default 11) |
+| `weighted_cross_entropy` | Cross-entropy with a per-class sample weight (kwarg: `class_weights`, list of length `n_classes`) |
+| `weighted_squared_emd` | Squared EMD with a per-class sample weight (kwargs: `class_weights`, `n_classes` default 11) |
 
 Convention for classification experiments: a `trainer.loss` (+ `trainer.loss_kwargs`) config key selects the entry resolved via `get_loss` and bound to the `metrics_fns['loss']` key (which `loss_key` defaults to), so the training objective is configured the same way as `trainer.optimizer`/`trainer.scheduler`.
 
@@ -185,7 +189,23 @@ Access the logger from anywhere in a training script via `trainer.logger` (read-
 
 ## `metrics.py`
 
-Metric functions used in experiment `metrics.py` files. Contains accuracy, classification metrics, and regression metrics built on JAX/NumPy. These are scalar functions with signature `(pred, target) -> float` suitable for passing to `Trainer`.
+Generic, dataset-agnostic evaluation metrics, reusable across experiments. Experiment `metrics.py` files hold only experiment-specific glue (e.g. `build_metrics_fns` wiring, label-name maps) and import from here.
+
+Per-batch metrics share the signature `(logits, labels) -> scalar` and slot directly into the Trainer's `metrics_fns` dict:
+
+| Function | Description |
+|----------|-------------|
+| `cross_entropy(logits, labels)` | Mean softmax cross-entropy |
+| `accuracy(logits, labels)` | Top-1 accuracy |
+| `binary_accuracy(logits, labels, threshold=1)` | Binary accuracy from a thresholded ordinal class index (e.g. class 0 vs. class > 0) |
+| `mae_class(logits, labels)` | Mean absolute error in class units (ordinal distance) |
+
+Full-set metrics — computed over accumulated predictions, not per-batch (too noisy on a single batch):
+
+| Function | Description |
+|----------|-------------|
+| `quadratic_weighted_kappa(cm)` | Cohen's kappa with quadratic class-distance weights, from a confusion matrix |
+| `expected_calibration_error(probs, labels, n_bins=15)` | ECE — confidence vs. accuracy calibration gap |
 
 ---
 

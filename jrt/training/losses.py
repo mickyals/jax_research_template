@@ -369,6 +369,67 @@ def squared_emd_loss(
     return jnp.mean(jnp.sum(cdf_diff ** 2, axis=-1))
 
 
+def weighted_cross_entropy_loss(
+    logits:        jax.Array,
+    labels:        jax.Array,
+    class_weights: jax.Array,
+) -> jax.Array:
+    """Softmax cross-entropy with a per-class sample weight.
+
+    Each sample's CE term is weighted by ``class_weights[labels[i]]`` before
+    averaging, so rarer classes contribute more to the gradient. The result
+    is a weighted mean (sum of weighted losses / sum of weights), so the
+    overall loss scale stays comparable to plain cross-entropy regardless of
+    the weight magnitudes.
+
+    Parameters
+    ----------
+    logits : jax.Array  shape (B, n_classes)
+    labels : jax.Array  shape (B,)  integer class indices
+    class_weights : jax.Array  shape (n_classes,)
+        Per-class weight, indexed by class label.
+
+    Returns
+    -------
+    jax.Array  scalar
+    """
+    ce = _optax.softmax_cross_entropy_with_integer_labels(logits, labels)
+    w  = jnp.asarray(class_weights)[labels]
+    return jnp.sum(w * ce) / jnp.sum(w)
+
+
+def weighted_squared_emd_loss(
+    logits:        jax.Array,
+    labels:        jax.Array,
+    class_weights: jax.Array,
+    n_classes:     int = 11,
+) -> jax.Array:
+    """Squared EMD loss (see `squared_emd_loss`) with a per-class sample weight.
+
+    Each sample's squared-EMD term is weighted by
+    ``class_weights[labels[i]]`` before averaging, combining ordinal-distance
+    awareness with within-class rebalancing.
+
+    Parameters
+    ----------
+    logits : jax.Array  shape (B, n_classes)
+    labels : jax.Array  shape (B,)  integer class indices in {0, ..., n_classes-1}
+    class_weights : jax.Array  shape (n_classes,)
+        Per-class weight, indexed by class label.
+    n_classes : int
+
+    Returns
+    -------
+    jax.Array  scalar
+    """
+    probs      = jax.nn.softmax(logits, axis=-1)
+    target     = jax.nn.one_hot(labels, n_classes)
+    cdf_diff   = jnp.cumsum(probs, axis=-1) - jnp.cumsum(target, axis=-1)
+    per_sample = jnp.sum(cdf_diff ** 2, axis=-1)
+    w          = jnp.asarray(class_weights)[labels]
+    return jnp.sum(w * per_sample) / jnp.sum(w)
+
+
 def ordinal_probs(logits: jax.Array) -> jax.Array:
     """Convert ordinal logits to a class probability distribution.
 
@@ -542,4 +603,41 @@ def _cross_entropy_loss() -> Callable[[jax.Array, jax.Array], jax.Array]:
 def _squared_emd_loss(n_classes: int = 11) -> Callable[[jax.Array, jax.Array], jax.Array]:
     def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
         return squared_emd_loss(logits, labels, n_classes=n_classes)
+    return loss_fn
+
+
+@register_loss(
+    "weighted_cross_entropy",
+    description=(
+        "Softmax cross-entropy with a per-class sample weight "
+        "(kwarg: class_weights, list of length n_classes)."
+    ),
+)
+def _weighted_cross_entropy_loss(
+    class_weights: list,
+) -> Callable[[jax.Array, jax.Array], jax.Array]:
+    cw = jnp.asarray(class_weights)
+
+    def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
+        return weighted_cross_entropy_loss(logits, labels, class_weights=cw)
+    return loss_fn
+
+
+@register_loss(
+    "weighted_squared_emd",
+    description=(
+        "Squared EMD over ordinal class CDFs with a per-class sample weight "
+        "(kwargs: class_weights list of length n_classes, n_classes)."
+    ),
+)
+def _weighted_squared_emd_loss(
+    class_weights: list,
+    n_classes:     int = 11,
+) -> Callable[[jax.Array, jax.Array], jax.Array]:
+    cw = jnp.asarray(class_weights)
+
+    def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
+        return weighted_squared_emd_loss(
+            logits, labels, class_weights=cw, n_classes=n_classes
+        )
     return loss_fn

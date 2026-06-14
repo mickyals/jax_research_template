@@ -106,9 +106,10 @@ def tune(
     # Single source of truth: propagate top-level shared values down.
     base_config["data"]["batch_size"] = base_config["trainer"]["batch_size"]
 
+    # Model is coordinate-agnostic; location_encoding only configures the
+    # datamodule's coordinate convention.
     loc_enc = base_config.get("location_encoding", "unit_circle")
     base_config["data"]["location_encoding"]  = loc_enc
-    base_config["model"]["location_encoding"] = loc_enc
 
     # Resolve run_dir relative to the experiment root (two levels up from
     # this script, which lives in train/), NOT the config file directory

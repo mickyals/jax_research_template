@@ -9,16 +9,32 @@ token appended at position N). An asymmetric attention mask ensures stations
 never attend to the query; the query attends to all stations. The
 classification head reads the query token output.
 
-Two location encoding modes (config field location_encoding):
-  unit_circle  Learned query content only (no position). station_coords = [x, y]
-               storm-centred local map (norm_dist·sin(bearing), norm_dist·cos(bearing)).
-  domain       Learned query content + pos_proj(Fourier(query_coords)). station_coords = [norm_lat, norm_lon].
-               pos_proj is shared between station and query positional encoding.
+Senseiver-style single projection (2023): a station token is one linear map
+over the concatenation [observations; (missingness mask); Fourier(position)] --
+observations and position are projected jointly, once, rather than through
+separate obs/position layers that are then summed. The query/CLS token passes
+through the SAME projection, with a learned stand-in occupying the obs/mask
+slots and Fourier(query_coords) supplying the position slots.
+
+The model is agnostic to the coordinate convention: whatever station_coords /
+query_coords the datamodule supplies (storm-centred local x-y for unit_circle,
+normalised lat/lon for domain) are Fourier-embedded and projected the same way.
+For unit_circle the query sits at (0,0), so its position features are constant
+and the learned obs-slot stand-in carries the query identity.
+
+Missingness: missing observations are filled with 0 and the boolean mask is
+concatenated as its own channel (missingness_indicator). The mask channel --
+not the fill value -- disambiguates "observed 0" from "absent", so no learned
+or constant sentinel is needed.
+
+Coordinate conventions (set by the datamodule via data.location_encoding; the
+model treats both identically -- it just projects whatever coords it receives):
+  unit_circle  station_coords = [x, y] storm-centred local map
+               (norm_dist*sin(bearing), norm_dist*cos(bearing)); query at (0,0).
+  domain       station_coords = [norm_lat, norm_lon] absolute; query at encoded pos.
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -114,26 +130,10 @@ class TCClassifier(nn.Module):
     fourier_dim : int
         Gaussian Fourier embedding output dim. Must be even. Default 64.
     fourier_scale : float
-    location_encoding : str
-        'unit_circle' — learned query content only; station_coords = [x, y]
-                        storm-centred local map (norm_dist·sin/cos(bearing)).
-        'domain'      — learned query content + shared pos_proj(Fourier(query_coords));
-                        station_coords = [norm_lat, norm_lon].
-    use_learned_mask : bool
-        True  = learned mask token, initialised with normal(stddev=0.02). The token
-                is a trainable (F,) parameter updated by the optimizer; missing_value
-                is ignored.
-        False = fixed scalar sentinel: missing obs are replaced with missing_value
-                at every forward pass and the value never changes.
     n_obs_features : int
         F, number of observation variables. Default 5.
     n_classes : int
         Output classes. Default 11.
-    missing_value : float
-        Used only when use_learned_mask=False. Substituted for every missing
-        observation. Should be clearly outside the normalised obs range (e.g. -10.0
-        for minmax_11 data in [-1, 1]) but not extreme enough to cause gradient
-        pathology. Default -10.0.
     full_self_attention : bool
         False (default) = asymmetric mask: stations contextualise each other
         and the query reads them, but stations never attend to the query.
@@ -141,14 +141,11 @@ class TCClassifier(nn.Module):
         to every other, modulo padding) — i.e. the standard, unrestricted
         Transformer pattern.
     missingness_indicator : bool
-        True (default) = concatenate obs_mask (as 0./1.) to the obs values
-        before station_proj, so station_proj sees 2*n_obs_features inputs.
-        Without this, a missing feature (replaced by the mask_token /
-        missing_value sentinel) is indistinguishable from a real observation
-        that happens to equal the sentinel value — the indicator makes
-        "missing" an explicit, separate signal rather than relying on the
-        sentinel's position in feature space. False reproduces the old
-        aliased behaviour.
+        True (default) = concatenate obs_mask (as 0./1.) as its own channel in
+        the token-projection input, so a missing feature (filled with 0) is
+        distinguishable from a real observation that equals 0. False drops the
+        mask channel, reproducing the aliased behaviour where missing == 0 ==
+        observed-zero.
 
     Notes
     -----
@@ -157,7 +154,7 @@ class TCClassifier(nn.Module):
         station_coords (B, N, 2)  encoded station positions
         station_mask   (B, N)     bool True=real station, False=padding
         obs_mask       (B, N, F)  bool True=measurement present
-        query_coords   (B, 2)     [0,0] sentinel for unit_circle; encoded pos for domain
+        query_coords   (B, 2)     (0,0) for unit_circle; encoded pos for domain
 
     Output: (B, n_classes) raw logits.
 
@@ -180,11 +177,8 @@ class TCClassifier(nn.Module):
     attn_dropout_rate: float = 0.0
     fourier_dim:       int   = 64
     fourier_scale:     float = 1.0
-    location_encoding: str   = 'unit_circle'
-    use_learned_mask:  bool  = True
     n_obs_features:    int   = 5
     n_classes:         int   = N_CLASSES
-    missing_value:     float = -10.0
     full_self_attention: bool = False
     missingness_indicator: bool = True
 
@@ -195,24 +189,25 @@ class TCClassifier(nn.Module):
             scale=self.fourier_scale,
         )
 
-        # obs content projection (F → D) and additive position projection (fourier_dim → D)
-        # pos_proj is shared: used for station positions and (domain mode) query position
-        self.station_proj = nn.Dense(self.embed_dim)
-        self.pos_proj     = nn.Dense(self.embed_dim)
+        # Single shared token projection over [obs; (mask); Fourier(position)].
+        # Stations and the query token both pass through this one Dense, so
+        # observations and position are projected jointly, once -- not via
+        # separate obs/position layers that are summed.
+        self.token_proj = nn.Dense(self.embed_dim)
 
-        if self.use_learned_mask:
-            self.mask_token = self.param(
-                'mask_token',
-                nn.initializers.normal(stddev=0.02),
-                (self.n_obs_features,),
-            )
-
-        # Learned query content — present in both modes; captures "what it means to be the query"
-        # domain mode adds pos_proj(Fourier(query_coords)) on top (shared pos_proj, no extra layer)
-        self.learned_query = self.param(
-            'learned_query',
+        # Learned query content occupying the obs (+mask) slots of the shared
+        # projection input. Its width matches a station's non-position channels
+        # so it feeds the same token_proj; Fourier(query_coords) supplies the
+        # position slots. For unit_circle (query at (0,0)) the position features
+        # are constant, so this stand-in carries the query identity.
+        self._query_obs_width = (
+            2 * self.n_obs_features if self.missingness_indicator
+            else self.n_obs_features
+        )
+        self.query_obs_slots = self.param(
+            'query_obs_slots',
             nn.initializers.normal(stddev=0.02),
-            (self.embed_dim,),
+            (self._query_obs_width,),
         )
 
         self.encoder = TransformerEncoder(
@@ -264,64 +259,53 @@ class TCClassifier(nn.Module):
 
         B, N, _ = station_obs.shape
 
-        # 1. Missing obs handling
-        if self.use_learned_mask:
-            sentinel = jnp.broadcast_to(self.mask_token, station_obs.shape)
-        else:
-            sentinel = jnp.full_like(station_obs, self.missing_value)
-        obs_fixed = jnp.where(obs_mask, station_obs, sentinel)          # (B, N, F)
+        # 1. Missing obs -> 0. With the mask concatenated as its own channel
+        # below, the projection separates "observed 0" from "absent" cleanly
+        # (the mask weights carry the disambiguation), so the fill value is
+        # irrelevant; 0 is convenient. No sentinel needed.
+        obs_zeroed = jnp.where(obs_mask, station_obs, 0.0)              # (B, N, F)
 
-        # 1b. Explicit missingness indicator — concatenate the mask itself so
-        # a missing feature (sentinel value) is distinguishable from a real
-        # observation that happens to equal the sentinel.
-        if self.missingness_indicator:
-            obs_input = jnp.concatenate(
-                [obs_fixed, obs_mask.astype(obs_fixed.dtype)], axis=-1
-            )                                                            # (B, N, 2F)
-        else:
-            obs_input = obs_fixed                                        # (B, N, F)
-
-        # 2. Station tokens — obs content + additive positional encoding
-        station_tokens = self.station_proj(obs_input)                   # (B, N, D)
-
+        # 2. Fourier-embed station positions.
         # GaussianFourierEmbedding expects a flat (..., input_dim) input,
         # so merge batch and station dims before the call, then split them back.
-        # Before: (B=batch, N=stations,   2=[coord_0, coord_1])
-        # After:  (B=batch, N=stations,   fourier_dim=Fourier features)
         coord_feats = self.coord_embedding(
-            station_coords.reshape(B * N, 2)          # (B*N, 2) — flat over batch × station
-        ).reshape(B, N, self.fourier_dim)              # (B, N, fourier_dim) — restore batch+station
-        pos_embed      = self.pos_proj(coord_feats)                     # (B, N, D)
-        station_tokens = station_tokens + pos_embed                     # (B, N, D)
+            station_coords.reshape(B * N, 2)          # (B*N, 2) — flat over batch x station
+        ).reshape(B, N, self.fourier_dim)              # (B, N, fourier_dim)
 
-        # 3. Query token — always learned content; domain mode adds shared pos_proj on top
-        #
-        # learned_query shape: (D,) — a single vector with no batch or token dims.
-        # [None, None, :] inserts a batch dim and a token-sequence dim so it can be
-        # broadcast to (B=batch, 1=one_query_token, D=embed_dim).
-        content = jnp.broadcast_to(
-            self.learned_query[None, None, :], (B, 1, self.embed_dim)
-        )                                                                # (B, 1, D)
-        if self.location_encoding == 'unit_circle':
-            query_token = content                                        # (B, 1, D)
-        else:  # domain: content + position via shared pos_proj
-            query_feats = self.coord_embedding(query_coords)            # (B, fourier_dim)
-            # [:, None, :] inserts a token-sequence dim so the (B, D) position
-            # vector becomes (B=batch, 1=one_query_token, D=embed_dim) for addition.
-            query_pos   = self.pos_proj(query_feats)[:, None, :]        # (B, 1, D)
-            query_token = content + query_pos                           # (B, 1, D)
+        # 3. Station tokens — single projection over [obs; (mask); position].
+        if self.missingness_indicator:
+            station_input = jnp.concatenate(
+                [obs_zeroed, obs_mask.astype(obs_zeroed.dtype), coord_feats],
+                axis=-1,
+            )                                                            # (B, N, 2F+K)
+        else:
+            station_input = jnp.concatenate(
+                [obs_zeroed, coord_feats], axis=-1
+            )                                                            # (B, N, F+K)
+        station_tokens = self.token_proj(station_input)                 # (B, N, D)
 
-        # 4. Concatenate: station tokens then query token
+        # 4. Query token — SAME projection over [learned obs-slot stand-in;
+        # Fourier(query_coords)]. query_obs_slots occupies the obs(+mask) slots;
+        # the position slots come from the query's own coords (constant (0,0)
+        # for unit_circle, so the query token reduces to a learned vector).
+        query_feats = self.coord_embedding(query_coords)                # (B, K)
+        xi = jnp.broadcast_to(
+            self.query_obs_slots[None, :], (B, self._query_obs_width)
+        )                                                                # (B, obs_slots)
+        query_input = jnp.concatenate([xi, query_feats], axis=-1)       # (B, obs_slots+K)
+        query_token = self.token_proj(query_input)[:, None, :]          # (B, 1, D)
+
+        # 5. Concatenate: station tokens then query token
         tokens = jnp.concatenate([station_tokens, query_token], axis=1) # (B, N+1, D)
 
-        # 5. Attention mask — see build_attention_mask. Default is asymmetric
+        # 6. Attention mask — see build_attention_mask. Default is asymmetric
         # (stations blocked from the query); full_self_attention=True opens
         # that block for complete self-attention. Padding columns always
         # blocked for everyone.
         attn_mask = build_attention_mask(
             station_mask, self.full_self_attention)          # (B, 1, N+1, N+1)
 
-        # 6. Encoder
+        # 7. Encoder
         encoder_out = self.encoder(
             tokens, mask=attn_mask, train=train, return_weights=return_weights,
         )
@@ -330,12 +314,12 @@ class TCClassifier(nn.Module):
         else:
             encoded = encoder_out                # (B, N+1, D)
 
-        # 7. Classification head reads query token at position N
+        # 8. Classification head reads query token at position N
         # encoded[:, N, :] — index axes: [batch, token_position=N (query slot), embed_dim]
         query_out = encoded[:, N, :]                                    # (B, D)
         logits    = self.head(self.head_norm(query_out))                 # (B, n_classes)
 
-        # 8. Return
+        # 9. Return
         if return_weights:
             # Full per-layer matrices — consumers slice what they need:
             # query row of layer l = attn_weights[l, :, :, N, :].

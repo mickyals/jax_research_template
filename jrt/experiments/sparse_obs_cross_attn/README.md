@@ -49,23 +49,23 @@ This is a binary + ordinal classification problem over 11 classes:
 
 ### Token construction
 
-**Station tokens** — observation content and spatial position are encoded additively:
+**Senseiver-style single projection (2023).** A station token is one linear map (`token_proj`) over the concatenation of observation values, the missingness mask, and the Fourier-embedded position — observations and position are projected *jointly, once*, rather than through separate obs/position layers that are summed:
 
 ```
-station_tokens = station_proj(obs_fixed)            # (B, N, D)  content
-               + pos_proj(Fourier(station_coords))  # (B, N, D)  position
+station_input  = concat([obs_zeroed, obs_mask, Fourier(station_coords)])   # (B, N, 2F+K)
+station_tokens = token_proj(station_input)                                 # (B, N, D)
 ```
 
-`obs_fixed` substitutes a learned mask token (or constant sentinel) for any missing observations. `pos_proj` is a shared Dense layer used for both station and query position encoding.
+Missing observations are filled with 0; the concatenated mask channel — not the fill value — disambiguates "observed 0" from "absent" (the mask's projection weights carry the distinction). No learned or constant sentinel is needed.
 
-**Query token** — a single learned content vector present in both modes; domain mode adds a positional component via the same shared `pos_proj`:
+**Query token** — the *same* `token_proj`, applied to a learned stand-in `query_obs_slots` (ξ) occupying the obs/mask slots, with `Fourier(query_coords)` supplying the position slots:
 
-| Mode | Content | Position |
-|------|---------|---------|
-| `unit_circle` | `learned_query` param | none (Fourier([0,0]) is degenerate) |
-| `domain` | `learned_query` param | `pos_proj(Fourier(query_coords))` — shared `pos_proj` |
+```
+query_input = concat([query_obs_slots, Fourier(query_coords)])             # (B, 2F+K)
+query_token = token_proj(query_input)                                      # (B, 1, D)
+```
 
-The `learned_query` vector captures *what it means to be the query*; position is layered on top for domain mode only. There is no separate projection layer for the query.
+There is no separate query projection. For `unit_circle` the query sits at `(0,0)`, so its position features are constant and the learned ξ carries the query identity. The model is **coordinate-agnostic** — it projects whatever `station_coords`/`query_coords` the datamodule supplies, so the location-encoding choice lives only in the data config.
 
 ### Asymmetric attention mask
 
@@ -85,35 +85,29 @@ Set `model.full_self_attention: true` to open the `stations → query` block (th
 
 ### Location encoding modes
 
-Set in both `data.location_encoding` and `model.location_encoding` (they must match):
+Set in `data.location_encoding` only — the model is coordinate-agnostic and projects whatever coords it is handed:
 
 | Mode | `station_coords` | `query_coords` |
 |------|-----------------|----------------|
-| `unit_circle` | `[x, y]` storm-centred local map (`norm_dist·sin(bearing), norm_dist·cos(bearing)`), each in [-1, 1] | `[0, 0]` = storm position; query uses `learned_query` content only |
-| `domain` | `[norm_lat_rad, norm_lon_rad]` absolute | same encoding; adds `pos_proj(Fourier(...))` to query |
+| `unit_circle` | `[x, y]` storm-centred local map (`norm_dist·sin(bearing), norm_dist·cos(bearing)`), each in [-1, 1] | `[0, 0]` = storm position; Fourier features constant, so ξ carries query identity |
+| `domain` | `[norm_lat_rad, norm_lon_rad]` absolute | same encoding; `Fourier(query_coords)` varies and feeds the shared `token_proj` |
 
 `unit_circle` is rotation-equivariant (the storm is always "at the origin"). `domain` retains absolute geographic position.
 
 ### Missing observations
 
-Stations within the radius may have missing values for some variables. Missing entries are flagged by `obs_mask`; inside the model they are replaced by one of two strategies:
+Stations within the radius may have missing values for some variables. Missing entries are flagged by `obs_mask` and filled with 0 inside the model. The disambiguation between "observed 0" and "absent" is carried by an explicit mask channel:
 
-| `use_learned_mask` | Behaviour |
-|--------------------|-----------|
-| `true` (default) | A trainable `(F,)` parameter — one value per obs feature — initialised with `normal(0.02)`. The optimizer learns what "absent" should look like for each variable. `missing_value` is ignored. |
-| `false` | Missing obs are replaced with the fixed scalar `missing_value` (default −10.0) at every forward pass. The value never changes. |
-
-−10.0 is chosen to be clearly outside the normalised obs range ([-1, 1] for minmax_11) without being extreme enough to cause gradient issues.
-
-`model.missingness_indicator: true` (default) additionally concatenates `obs_mask` (as 0./1.) to the obs values before `station_proj`. Without this, a missing feature (sentinel) is indistinguishable from a real observation that happens to equal the sentinel — the indicator makes "missing" an explicit signal. Set `false` to reproduce the old aliased behaviour (ablation only).
+`model.missingness_indicator: true` (default) concatenates `obs_mask` (as 0./1.) as its own channel in the `token_proj` input. The mask's learned projection weights separate a missing feature from a real observation equal to 0 — the fill value itself is irrelevant. Set `false` to drop the mask channel and reproduce the aliased behaviour where missing == observed-zero (ablation only).
 
 ### Full forward pass
 
 ```
-1.  obs_fixed  = where(obs_mask, station_obs, mask_token)                   (B, N, F)
-2.  station_tokens = station_proj(obs_fixed)
-                   + pos_proj(Fourier(station_coords))                       (B, N, D)
-3.  query_token = learned_query [+ pos_proj(Fourier(query_coords)) if domain]  (B, 1, D)
+1.  obs_zeroed = where(obs_mask, station_obs, 0)                            (B, N, F)
+2.  station_input  = concat([obs_zeroed, obs_mask, Fourier(station_coords)])  (B, N, 2F+K)
+    station_tokens = token_proj(station_input)                             (B, N, D)
+3.  query_input = concat([query_obs_slots, Fourier(query_coords)])         (B, 2F+K)
+    query_token = token_proj(query_input)                                  (B, 1, D)
 4.  tokens  = concat([station_tokens, query_token], axis=1)                 (B, N+1, D)
 5.  encoded = TransformerEncoder(tokens, mask=asymmetric_mask)              (B, N+1, D)
 6.  logits  = head(LayerNorm(encoded[:, N, :]))                             (B, 11)
@@ -219,8 +213,8 @@ jrt/experiments/sparse_obs_cross_attn/configs/*_local.yaml
 The only required edits before a first run are the five `data:` paths. Key flags to understand:
 
 - `data.split` is required — resolved by `data/splits.py` into filtered datasets plus a run manifest written next to the checkpoints. Two strategies: `season` (per-split IBTrACS season lists, disjoint, validated — the default config reproduces the original hardcoded split: train 2005–2020, val 2021–2022, test 2023–2025, `hard_test: multi_storm`) and `sid` (hybrid: `test.seasons` lists edge years, with membership decided by track calendar years from the sid-meta table; remaining interior storms are assigned train/val by SID at `val.fraction`, seeded, stratified by `val.stratify_by`, train being the implicit remainder; train and val deliberately share the interior-year insitu stream — only test is time-separated)
-- `data.location_encoding` and `model.location_encoding` must match — `unit_circle` (default) or `domain`
-- `model.use_learned_mask: true` (default) — learned mask token for missing obs; `false` for constant sentinel
+- `data.location_encoding` — `unit_circle` (default) or `domain`; the model is coordinate-agnostic so this lives in the data block only
+- `model.missingness_indicator: true` (default) — concatenate the obs mask as its own channel (missing obs filled with 0); `false` drops it (ablation only)
 - `trainer.run_dir` — change per run to avoid overwriting checkpoints
 
 ---
@@ -515,7 +509,7 @@ plt.show()
 **Interpretation:**
 - A model that always predicts class 0 achieves `binary_accuracy = 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
 - `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tells you whether an ordinal loss (`squared_emd`) is actually improving ordinal agreement over flat CE; `val/ece` is the calibration measurement (temperature scaling to act on it is Tier 2, not yet implemented).
-- `val/attn_entropy` includes the query's self-attention weight (the last of N+1 positions). A high self-attention weight early in training is expected — the model is relying on its `learned_query` prior. Expect it to decrease as the model learns to trust station data.
+- `val/attn_entropy` includes the query's self-attention weight (the last of N+1 positions). A high self-attention weight early in training is expected — the model is relying on its learned query prior (`query_obs_slots`). Expect it to decrease as the model learns to trust station data.
 
 ---
 
@@ -531,13 +525,10 @@ Key fields in `tc_classifier.yaml`:
 | `data.max_stations` | 64 | Padding / truncation limit |
 | `data.min_stations` | 1 | Samples with fewer stations are dropped |
 | `data.station_selection` | `random` | TRAIN-loader station subsampling above `max_stations`: `random` (epoch-varying augmentation) or `nearest`. Val/test loaders always default to `nearest` (deterministic) |
-| `data.location_encoding` | `unit_circle` | `unit_circle` or `domain`; must match `model.location_encoding` |
+| `data.location_encoding` | `unit_circle` | `unit_circle` or `domain`; model is coordinate-agnostic, so this lives in the data block only |
 | `data.obs_normalisation` | `minmax_11` | `minmax_01` / `minmax_11` / `standardise` |
-| `model.location_encoding` | `unit_circle` | Must match `data.location_encoding` |
-| `model.use_learned_mask` | `true` | `true` = trainable mask token, normal(0.02) init; `false` = fixed constant sentinel |
 | `model.full_self_attention` | `false` | `false` = asymmetric mask (stations never attend to the query); `true` = complete self-attention over all N+1 tokens |
-| `model.missing_value` | −10.0 | Only used when `use_learned_mask: false`. Fixed sentinel value for missing obs. |
-| `model.missingness_indicator` | `true` | `true` = concatenate `obs_mask` to obs values before `station_proj`, disambiguating "missing" from a real obs equal to the sentinel; `false` = old aliased behaviour |
+| `model.missingness_indicator` | `true` | `true` = concatenate `obs_mask` as its own channel in `token_proj` (missing obs filled 0), disambiguating "missing" from a real obs equal to 0; `false` = aliased behaviour (ablation) |
 | `model.embed_dim` | 128 | Token dimensionality |
 | `model.num_heads` | 4 | Attention heads (`embed_dim` must be divisible) |
 | `model.num_layers` | 4 | Total encoder depth (unified self-attention over all N+1 tokens) |
@@ -559,9 +550,9 @@ For WandB: set `log_backend: wandb`, add `project` / `name` / `tags` under `log_
 
 ## Implementation notes
 
-**Shared `pos_proj`:** the same `Dense(fourier_dim → embed_dim)` layer encodes position for station tokens and (domain mode) the query token. Station and query positions therefore live in the same learned coordinate space, which is the right inductive bias for interpreting relative geometry. There is no separate query projection layer.
+**Single `token_proj` (Senseiver-style):** one `Dense((2F+K) → embed_dim)` projects every token from the concatenation `[obs; mask; Fourier(position)]`. Observations, missingness, and position therefore share one learned map and live in the same coordinate space — the right inductive bias for relative geometry, and one fewer projection than the old separate obs/position layers (which were provably equivalent up to a redundant bias). The query token uses the same layer.
 
-**`learned_query` param:** a single `(embed_dim,)` vector initialised with `normal(0.02)` — the standard ViT/BERT special-token init. In unit_circle mode it is the entire query token (absolute position is degenerate at [0,0]). In domain mode it contributes content while `pos_proj` contributes location.
+**`query_obs_slots` param (ξ):** a learned `(2F,)` vector (or `(F,)` when `missingness_indicator=False`) occupying the obs/mask slots of the query's projection input; `Fourier(query_coords)` supplies the position slots. For unit_circle the position is constant at `(0,0)`, so the query token reduces to a fixed learned vector — the standard ViT/BERT special-token role. For domain the query position varies and flows through the same `token_proj`.
 
 **Attention observability** (`train.py`): a fixed validation probe batch is held in memory for the duration of training. `return_weights=True` returns the full attention matrices from EVERY encoder layer, shape `(num_layers, B, H, N+1, N+1)`. The entropy callback computes mean entropy over the last layer's query row and logs it as `val/attn_entropy` (step cadence). Every `attn_fig_every_n_epochs` epochs two figures are logged from the same probe: `val/attn_map` (geographic query-row scatter — the query self-attention weight is dropped before the station mask is applied) and `val/attn_grid` (layers × heads grid of full matrices). The static `val/attn_mask` figure is logged once at step 0. Attention figures are VAL/TEST diagnostics — `evaluate.py` produces the same map + grid + mask figures for the test split; nothing attention-related runs on training batches.
 

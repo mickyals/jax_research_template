@@ -155,7 +155,6 @@ class _FakeTCLoader:
 
 
 def _make_model(
-    location_encoding: str = 'unit_circle',
     embed_dim:         int = 32,
 ) -> TCClassifier:
     return TCClassifier(
@@ -164,7 +163,6 @@ def _make_model(
         num_layers        = 2,
         fourier_dim       = 16,     # must be even
         n_obs_features    = F,
-        location_encoding = location_encoding,
     )
 
 
@@ -250,8 +248,8 @@ class TestOneForwardBackwardPass:
     # --- Domain encoding ---
 
     def test_domain_encoding_forward_and_backward(self, tmp_path):
-        """domain location encoding trains without error."""
-        model   = _make_model(location_encoding='domain')
+        """domain coordinate convention (varied query_coords) trains without error."""
+        model   = _make_model()
         trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
         batch   = _fake_batch(location_encoding='domain')
         state   = trainer._init_state(batch)

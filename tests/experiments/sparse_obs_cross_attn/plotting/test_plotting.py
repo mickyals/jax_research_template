@@ -59,7 +59,6 @@ def _init_model() -> tuple[TCClassifier, dict]:
         num_layers      = 1,
         fourier_dim     = 16,
         n_obs_features  = F,
-        use_learned_mask= True,
     )
     rng  = np.random.default_rng(0)
     obs  = jnp.array(rng.standard_normal((B, N, F)).astype(np.float32))

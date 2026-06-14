@@ -43,12 +43,9 @@ import matplotlib.pyplot as plt
 import yaml
 
 from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
-from experiments.sparse_obs_cross_attn.train.metrics import (
-    build_metrics_fns,
-    expected_calibration_error,
-    quadratic_weighted_kappa,
-)
+from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
+from training.metrics import expected_calibration_error, quadratic_weighted_kappa
 from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_confusion_matrix,
     plot_class_metrics,
@@ -406,7 +403,7 @@ def evaluate(
     # static asymmetric-mask figure, all from the first batch
     # ------------------------------------------------------------------
     if n_attn_samples > 0:
-        loc_enc  = config['model'].get('location_encoding', 'unit_circle')
+        loc_enc  = config['data'].get('location_encoding', 'unit_circle')
         fov_lat  = config['data'].get('fov_lat')
         fov_lon  = config['data'].get('fov_lon')
         rad_km   = config['data'].get('radius_km', 500.0)
