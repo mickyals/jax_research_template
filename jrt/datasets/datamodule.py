@@ -238,11 +238,17 @@ def list_datasets() -> list[str]:
     Returns
     -------
     list[str]
+        Names registered so far. Empty until a dataset module that calls
+        ``@register_dataset(...)`` has been imported.
 
     Example
     -------
+    >>> from datasets.base import NpzDataset
+    >>> @register_dataset("mock")
+    ... def _mock(config):
+    ...     return NpzDataset(config["npz_path"])
     >>> list_datasets()
-    ['IBTRACS']
+    ['mock']
     """
     return sorted(DATASETS.keys())
 
@@ -712,15 +718,11 @@ class DataModule(BaseDataModule):
 
 
 # ---------------------------------------------------------------------------
-# Built-in dataset factories
-# Additional factories can be registered with @register_dataset("NAME")
-# in experiment-specific modules and imported before DataModule.from_config().
+# Dataset factories
+# This module ships no built-in dataset factories — keeping it free of any
+# dependency on specific experiments. A dataset source registers itself with
+# @register_dataset("NAME") in its own module (e.g.
+# experiments/sparse_obs_cross_attn/data/sources/ibtracs.py registers
+# "IBTRACS"); importing that module before DataModule.from_config() makes the
+# name available.
 # ---------------------------------------------------------------------------
-
-@register_dataset("IBTRACS")
-def _ibtracs_factory(config: dict):
-    from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDataset
-    return IBTrACSDataset(
-        config["npz_path"],
-        config.get("multi_storm_path"),
-    )

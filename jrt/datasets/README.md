@@ -97,7 +97,7 @@ The `data:` config block **requires a `split:` section** — splitting is config
 
 ```yaml
 data:
-  dataset: ibtracs
+  dataset: mydataset          # a name registered via @register_dataset (see below)
   npz_path: ...
   split:
     column: SEASON            # any column present in the dataset
@@ -123,7 +123,20 @@ class MyDataset(NpzDataset):
         super().__init__(path)
         # domain filtering, column derivation — no split logic here
         self._data = {k: v for k, v in self._data.items()}  # e.g. drop bad rows
+
+
+# Self-register so the generic DataModule.from_config can build it by name.
+# The dependency points experiment -> jrt, never the reverse: this module
+# ships no built-in factories. Importing your dataset module before
+# DataModule.from_config() makes the name available.
+from datasets.datamodule import register_dataset
+
+@register_dataset("MYDATASET")
+def _mydataset_factory(config: dict) -> MyDataset:
+    return MyDataset(config["path"])
 ```
+
+(Then `data.dataset: MYDATASET` selects it. For example, `experiments/sparse_obs_cross_attn/data/sources/ibtracs.py` registers `"IBTRACS"` this way.)
 
 Then subclass `BaseDataModule` to wrap it, resolving the split from the config (`filter_column` for simple value splits; `datasets.splitting` helpers for group/fraction splits):
 

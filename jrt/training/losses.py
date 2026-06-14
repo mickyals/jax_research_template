@@ -318,7 +318,7 @@ def ordinal_predict(logits: jax.Array) -> jax.Array:
 
     Returns
     -------
-    jax.Array  shape (B,)  int32
+    jax.Array  shape (B, )  int32
 
     Example
     -------
@@ -385,7 +385,7 @@ def weighted_cross_entropy_loss(
     Parameters
     ----------
     logits : jax.Array  shape (B, n_classes)
-    labels : jax.Array  shape (B,)  integer class indices
+    labels : jax.Array  shape (B, )  integer class indices
     class_weights : jax.Array  shape (n_classes,)
         Per-class weight, indexed by class label.
 

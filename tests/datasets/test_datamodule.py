@@ -35,13 +35,26 @@ from datasets.datamodule import (
     list_datasets,
     register_dataset,
 )
+from datasets.base import NpzDataset
+
+
+# A generic mock dataset factory: these tests exercise the registry and
+# DataModule without depending on any specific experiment's dataset (the
+# generic layer must not reach into experiments/). Guarded against
+# re-registration in case the module is imported more than once.
+def _mock_dataset_factory(config: dict) -> NpzDataset:
+    return NpzDataset(config["npz_path"])
+
+
+if "MOCK" not in list_datasets():
+    register_dataset("MOCK")(_mock_dataset_factory)
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _make_ibtracs_npz(path: Path, n: int = 300, seed: int = 0) -> Path:
+def _make_npz(path: Path, n: int = 300, seed: int = 0) -> Path:
     rng = np.random.default_rng(seed)
     seasons = np.array([2010] * 200 + [2021] * 50 + [2023] * 50, dtype=np.float32)
     data = {
@@ -69,7 +82,7 @@ def _make_multi_storm_npz(path: Path) -> Path:
 
 @pytest.fixture
 def npz(tmp_path):
-    return _make_ibtracs_npz(tmp_path / "ibtracs.npz")
+    return _make_npz(tmp_path / "ibtracs.npz")
 
 
 @pytest.fixture
@@ -88,7 +101,7 @@ SPLIT_CFG = {
 @pytest.fixture
 def single_cfg(npz, ms_npz):
     return {
-        "dataset":          "ibtracs",
+        "dataset":          "mock",
         "npz_path":         str(npz),
         "multi_storm_path": str(ms_npz),
         "target_cols":      ["USA_WIND", "USA_PRES"],
@@ -201,12 +214,12 @@ class TestDatasetRegistry:
     def test_list_datasets_returns_list(self):
         assert isinstance(list_datasets(), list)
 
-    def test_ibtracs_registered(self):
-        assert "IBTRACS" in list_datasets()
+    def test_mock_registered(self):
+        assert "MOCK" in list_datasets()
 
     def test_duplicate_registration_raises(self):
         with pytest.raises(ValueError, match="already registered"):
-            @register_dataset("IBTRACS")
+            @register_dataset("MOCK")
             def _dup(config):
                 pass
 
@@ -216,8 +229,8 @@ class TestDatasetRegistry:
             DataModule.from_config(bad)
 
     def test_case_insensitive(self, single_cfg):
-        upper = DataModule.from_config({**single_cfg, "dataset": "IBTRACS"})
-        lower = DataModule.from_config({**single_cfg, "dataset": "ibtracs"})
+        upper = DataModule.from_config({**single_cfg, "dataset": "MOCK"})
+        lower = DataModule.from_config({**single_cfg, "dataset": "mock"})
         assert upper.train_arrays()["X"].shape == lower.train_arrays()["X"].shape
 
 
@@ -380,7 +393,7 @@ class TestDataModule:
 
     def test_minmax_feature_norm(self, npz, ms_npz):
         cfg = {
-            "dataset": "ibtracs", "npz_path": str(npz),
+            "dataset": "mock", "npz_path": str(npz),
             "multi_storm_path": str(ms_npz),
             "target_cols": ["USA_WIND"], "feature_cols": ["LAT", "LON"],
             "feature_norm": "minmax", "target_norm": "none",
@@ -393,7 +406,7 @@ class TestDataModule:
 
     def test_none_norm_keeps_physical_scale(self, npz, ms_npz):
         cfg = {
-            "dataset": "ibtracs", "npz_path": str(npz),
+            "dataset": "mock", "npz_path": str(npz),
             "multi_storm_path": str(ms_npz),
             "target_cols": ["USA_WIND"], "feature_cols": ["LAT"],
             "feature_norm": "none", "target_norm": "none",
@@ -436,7 +449,7 @@ class TestDataModule:
 
     def test_config_train_shuffle_false(self, npz, ms_npz):
         cfg = {
-            "dataset": "ibtracs", "npz_path": str(npz),
+            "dataset": "mock", "npz_path": str(npz),
             "multi_storm_path": str(ms_npz),
             "target_cols": ["USA_WIND"], "feature_cols": ["LAT", "LON"],
             "feature_norm": "standard", "target_norm": "standard",
@@ -463,14 +476,14 @@ class TestDataModuleMulti:
 
     @pytest.fixture
     def multi_cfg(self, tmp_path):
-        p1 = _make_ibtracs_npz(tmp_path / "a.npz", seed=0)
-        p2 = _make_ibtracs_npz(tmp_path / "b.npz", seed=42)
+        p1 = _make_npz(tmp_path / "a.npz", seed=0)
+        p2 = _make_npz(tmp_path / "b.npz", seed=42)
         ms = _make_multi_storm_npz(tmp_path / "ms.npz")
         return {
             "datasets": [
-                {"dataset": "ibtracs", "npz_path": str(p1),
+                {"dataset": "mock", "npz_path": str(p1),
                  "multi_storm_path": str(ms)},
-                {"dataset": "ibtracs", "npz_path": str(p2),
+                {"dataset": "mock", "npz_path": str(p2),
                  "multi_storm_path": str(ms)},
             ],
             "target_cols":  ["USA_WIND", "USA_PRES"],

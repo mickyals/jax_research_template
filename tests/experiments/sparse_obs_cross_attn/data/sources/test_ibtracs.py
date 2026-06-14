@@ -330,3 +330,22 @@ class TestSidMeta:
     def test_no_validation_without_sid_meta_path(self, ds):
         assert ds._sid_meta is None
 
+
+
+# ---------------------------------------------------------------------------
+# Registry self-registration
+# ---------------------------------------------------------------------------
+
+def test_ibtracs_self_registers_with_generic_registry():
+    """Importing the experiment's ibtracs module registers the IBTRACS factory
+    with the generic datasets registry (experiment -> jrt dependency only)."""
+    # The module is already imported at the top of this test file.
+    from datasets.datamodule import list_datasets
+    assert "IBTRACS" in list_datasets()
+
+
+def test_ibtracs_factory_builds_dataset_via_registry(ibtracs_paths):
+    from datasets.datamodule import DATASETS
+    npz, ms, *_ = ibtracs_paths
+    ds = DATASETS["IBTRACS"]({"npz_path": str(npz), "multi_storm_path": str(ms)})
+    assert isinstance(ds, IBTrACSDataset)

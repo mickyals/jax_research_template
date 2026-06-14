@@ -535,8 +535,8 @@ Key fields in `tc_classifier.yaml`:
 | `model.num_layers` | 4 | Total encoder depth (unified self-attention over all N+1 tokens) |
 | `model.fourier_dim` | 64 | `GaussianFourierEmbedding` output dim (must be even) |
 | `model.fourier_scale` | 1.0 | Std dev of frequency matrix; log-uniformly tuned in HP search [0.1, 10.0] |
-| `trainer.loss` | `squared_emd` | Training objective from `training/losses.py` LOSSES registry (`cross_entropy` or `squared_emd`); `val/cross_entropy` is always reported separately for cross-run comparability |
-| `trainer.loss_kwargs` | `{n_classes: 11}` | Forwarded to the loss factory (e.g. `n_classes` for `squared_emd`) |
+| `trainer.loss` | `squared_emd` | Training objective from `training/losses.py` LOSSES registry: `cross_entropy`, `squared_emd`, or the class-weighted variants `weighted_cross_entropy` / `weighted_squared_emd`; `val/cross_entropy` is always reported separately for cross-run comparability |
+| `trainer.loss_kwargs` | `{n_classes: 11}` | Forwarded to the loss factory: `n_classes` for `squared_emd`; `class_weights` (length-`n_classes` list) for the `weighted_*` losses |
 | `trainer.steps_per_epoch` | 500 | Random TC-sampling mode: gradient steps per epoch. Omit/`null` = sequential mode (one pass over TC data) |
 | `trainer.profile` | `false` | Trace the first `profile_steps` training steps (JAX profiler) → `<run_dir>/logs/profile`; WandB uploads it as an artifact, TensorBoard/Null leave it on disk |
 | `trainer.attn_fig_every_n_epochs` | 5 | Epoch cadence for `val/attn_map` + `val/attn_grid` figures (VAL probe batch); 0 = disabled |

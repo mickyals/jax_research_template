@@ -241,3 +241,22 @@ class IBTrACSDataset(NpzDataset):
         print(f"  seasons     : {int(self.seasons.min())}–{int(self.seasons.max())}")
         print(f"  multi-storm : {multi_str}")
         print(f"  SSHS range  : {int(sshs.min())}–{int(sshs.max())}")
+
+
+# ---------------------------------------------------------------------------
+# Self-registration with the generic dataset registry
+# ---------------------------------------------------------------------------
+# Experiment code registers its own factory (the dependency points
+# experiment -> jrt, never the reverse). Importing this module — which the
+# experiment's data pipeline always does — makes "IBTRACS" available to the
+# generic datasets.datamodule.DataModule.from_config() registry.
+
+from datasets.datamodule import register_dataset
+
+
+@register_dataset("IBTRACS")
+def _ibtracs_factory(config: dict) -> IBTrACSDataset:
+    return IBTrACSDataset(
+        config["npz_path"],
+        config.get("multi_storm_path"),
+    )

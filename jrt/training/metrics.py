@@ -120,7 +120,7 @@ def mae_class(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
     Parameters
     ----------
     logits : jax.Array  (B, n_classes)
-    labels : jax.Array  (B,) int32
+    labels : jax.Array  (B, ) int32
 
     Returns
     -------
@@ -195,7 +195,7 @@ def expected_calibration_error(
     ----------
     probs : np.ndarray (N, n_classes)
         Softmax class probabilities.
-    labels : np.ndarray (N,) int
+    labels : np.ndarray (N, ) int
         True class indices.
     n_bins : int
         Number of equal-width confidence bins (default 15).
@@ -261,7 +261,7 @@ def fit_temperature(
     ----------
     logits : np.ndarray (N, n_classes)
         Raw (pre-softmax) model outputs on the fit split.
-    labels : np.ndarray (N,) int
+    labels : np.ndarray (N, ) int
         True class indices.
     u_bounds : (float, float)
         Search bracket for the inverse temperature u = 1/T. The default
