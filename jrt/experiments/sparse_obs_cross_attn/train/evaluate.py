@@ -45,7 +45,12 @@ import yaml
 from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
 from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
-from training.metrics import expected_calibration_error, quadratic_weighted_kappa
+from training.metrics import (
+    apply_temperature,
+    expected_calibration_error,
+    fit_temperature,
+    quadratic_weighted_kappa,
+)
 from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_confusion_matrix,
     plot_class_metrics,
@@ -262,14 +267,26 @@ def print_report(
     split:       str       = 'test',
     class_names: list[str] = CLASS_NAMES,
     n_classes:   int       = N_CLASSES,
+    temperature: float     = 1.0,
 ) -> None:
-    """Print scalar metrics, binary summary, and per-class table to stdout."""
+    """Print scalar metrics, binary summary, and per-class table to stdout.
+
+    ``temperature`` (fit on the val split via temperature scaling, Guo et al.
+    2017) recalibrates the reported ECE: when != 1.0 the report prints ECE
+    both before and after scaling. T does not change the argmax, so accuracy,
+    QWK and the per-class table are identical either way.
+    """
     cm    = confusion_matrix(preds, labels, n_classes)
     pcm   = per_class_metrics(cm)
     bin_m = binary_metrics(preds, labels)
     qwk   = quadratic_weighted_kappa(cm)
     probs = np.asarray(jax.nn.softmax(jnp.array(logits), axis=-1))
     ece   = expected_calibration_error(probs, labels)
+    if temperature != 1.0:
+        probs_ts = np.asarray(
+            jax.nn.softmax(jnp.array(apply_temperature(logits, temperature)), axis=-1)
+        )
+        ece_ts = expected_calibration_error(probs_ts, labels)
 
     logits_j = jnp.array(logits)
     labels_j = jnp.array(labels)
@@ -286,6 +303,9 @@ def print_report(
         print(f"    {split}/{name}: {val:.5f}")
     print(f"    {split}/qwk: {qwk:.5f}  (ordinal agreement; 1=perfect, 0=chance)")
     print(f"    {split}/ece: {ece:.5f}  (calibration gap; 0=perfectly calibrated)")
+    if temperature != 1.0:
+        print(f"    {split}/ece_tempscaled: {ece_ts:.5f}  "
+              f"(T={temperature:.3f} fit on val; lower = better calibrated)")
 
     print(f"\n  Binary detection (TC vs. No Storm):")
     print(f"    Accuracy : {bin_m['accuracy']:.4f}")
@@ -364,8 +384,17 @@ def evaluate(
 
     preds, labels, logits, meta = collect_predictions(model, variables, loader)
 
+    # Temperature scaling (Guo et al. 2017): fit a single T on the VAL split
+    # and report calibrated ECE. For split='test' this is the proper val->test
+    # transfer; for split='val' it is fit and applied on the same split (an
+    # optimistic in-sample calibration check).
+    val_loader = dm.val_loader()
+    _, val_labels, val_logits, _ = collect_predictions(model, variables, val_loader)
+    temperature = fit_temperature(val_logits, val_labels)
+
     print_report(preds, labels, logits, metrics_fns,
-                 split=split, class_names=CLASS_NAMES, n_classes=N_CLASSES)
+                 split=split, class_names=CLASS_NAMES, n_classes=N_CLASSES,
+                 temperature=temperature)
 
     if meta is not None:
         storm_m = per_storm_metrics(preds, labels, meta['sid'])
@@ -457,7 +486,10 @@ def evaluate(
                 geo=geo,
                 storm_latlon=storm_latlon,
             )
-            fig_a.suptitle(title_i, y=1.01, fontsize=10)
+            # Keep the caption inside the figure (a y>1.0 suptitle is clipped
+            # by wandb.Image / non-tight saves) with room above the axes title.
+            fig_a.suptitle(title_i, y=0.99, fontsize=10)
+            fig_a.subplots_adjust(top=0.86)
             fig_g = plot_attention_matrix_grid(
                 attn_weights, sample_idx=i,
                 title=f'Attention matrices — {title_i}',

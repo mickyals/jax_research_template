@@ -13,6 +13,8 @@ TestBinaryMetrics         all TC correct; all no-storm correct; perfect binary;
                           mixed case; all keys present; counts add up
 TestCollectPredictions    output shapes; preds are argmax of logits;
                           labels match loader; no model mutation
+TestPrintReport           temperature branch: ece_tempscaled printed only
+                          when T != 1.0; report runs without error
 """
 
 from __future__ import annotations
@@ -28,7 +30,9 @@ from experiments.sparse_obs_cross_attn.train.evaluate import (
     confusion_matrix,
     per_class_metrics,
     per_storm_metrics,
+    print_report,
 )
+from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
 
 # ---------------------------------------------------------------------------
@@ -323,3 +327,32 @@ class TestPerStormMetrics:
             [None, None],
         )
         assert out == {}
+
+
+# ---------------------------------------------------------------------------
+# TestPrintReport — temperature-scaling branch
+# ---------------------------------------------------------------------------
+
+class TestPrintReport:
+
+    def _data(self):
+        rng    = np.random.default_rng(0)
+        n      = 40
+        labels = rng.integers(0, N_CLASSES, size=n).astype(np.int32)
+        logits = rng.standard_normal((n, N_CLASSES)).astype(np.float32)
+        preds  = logits.argmax(-1).astype(np.int32)
+        return preds, labels, logits
+
+    def test_no_tempscaled_line_when_temperature_one(self, capsys):
+        preds, labels, logits = self._data()
+        print_report(preds, labels, logits, build_metrics_fns(), temperature=1.0)
+        out = capsys.readouterr().out
+        assert '/ece:' in out
+        assert 'ece_tempscaled' not in out
+
+    def test_tempscaled_line_printed_when_temperature_not_one(self, capsys):
+        preds, labels, logits = self._data()
+        print_report(preds, labels, logits, build_metrics_fns(), temperature=2.5)
+        out = capsys.readouterr().out
+        assert 'ece_tempscaled' in out
+        assert 'T=2.500' in out

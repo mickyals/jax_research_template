@@ -155,8 +155,8 @@ sparse_obs_cross_attn/
 │                           asymmetric-mask figure
 └── train/
     ├── model.py         TCClassifier — unified Transformer encoder
-    ├── metrics.py       cross_entropy, accuracy, binary_accuracy, mae_class,
-    │                       quadratic_weighted_kappa, expected_calibration_error
+    ├── metrics.py       build_metrics_fns glue (metrics live in
+    │                       jrt/training/metrics.py)
     ├── train.py         CLI entry point + observability callbacks
     │                       (attention entropy/map/grid, gradient flow)
     ├── evaluate.py      Evaluation pipeline (metrics + predictions)
@@ -508,7 +508,8 @@ plt.show()
 
 **Interpretation:**
 - A model that always predicts class 0 achieves `binary_accuracy = 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
-- `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tells you whether an ordinal loss (`squared_emd`) is actually improving ordinal agreement over flat CE; `val/ece` is the calibration measurement (temperature scaling to act on it is Tier 2, not yet implemented).
+- `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tells you whether an ordinal loss (`squared_emd`) is actually improving ordinal agreement over flat CE; `val/ece` is the calibration measurement.
+- **Temperature scaling** (Guo et al. 2017): `evaluate.py` fits a single temperature `T` on the **val** split (`fit_temperature`, an exact ternary search since NLL is convex in `1/T`) and `print_report` prints both `<split>/ece` and `<split>/ece_tempscaled` with the fitted `T`. `T` divides the logits, so it recalibrates confidence without changing the argmax — accuracy, QWK and the per-class table are identical. For `--split test` this is the proper val→test transfer; for `--split val` it is an in-sample check.
 - `val/attn_entropy` includes the query's self-attention weight (the last of N+1 positions). A high self-attention weight early in training is expected — the model is relying on its learned query prior (`query_obs_slots`). Expect it to decrease as the model learns to trust station data.
 
 ---

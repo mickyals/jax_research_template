@@ -207,6 +207,13 @@ Full-set metrics — computed over accumulated predictions, not per-batch (too n
 | `quadratic_weighted_kappa(cm)` | Cohen's kappa with quadratic class-distance weights, from a confusion matrix |
 | `expected_calibration_error(probs, labels, n_bins=15)` | ECE — confidence vs. accuracy calibration gap |
 
+Post-hoc calibration — temperature scaling (Guo et al. 2017), fit on a held-out split and applied to the eval split:
+
+| Function | Description |
+|----------|-------------|
+| `fit_temperature(logits, labels)` | Fit a single `T>0` minimizing NLL of `softmax(logits/T)` (exact ternary search; NLL convex in `1/T`) |
+| `apply_temperature(logits, T)` | `logits / T` — recalibrates confidence without changing the argmax |
+
 ---
 
 ## `tuner.py` — `Tuner`

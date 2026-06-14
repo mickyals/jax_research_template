@@ -156,7 +156,11 @@ def _make_attn_figure_callback(
             radius_km=radius_km,
             sample_idx=0,
         )
-        fig.suptitle(title, y=1.01, fontsize=10)
+        # Keep the caption inside the figure (wandb.Image renders at the
+        # figure's own bounds, so a y>1.0 suptitle would be clipped) and
+        # reserve top margin so it clears the axes title.
+        fig.suptitle(title, y=0.99, fontsize=10)
+        fig.subplots_adjust(top=0.86)
         # Use global_step so the map aligns with all other metrics in WandB.
         logger.log_figure('val/attn_map', fig, step=global_step)
 

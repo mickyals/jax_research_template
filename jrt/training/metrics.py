@@ -27,6 +27,13 @@ quadratic_weighted_kappa  Cohen's kappa with quadratic class-distance
                           agreement, penalises far misses more than near ones
 expected_calibration_error  ECE from softmax probabilities — confidence vs.
                           accuracy calibration gap
+
+Post-hoc calibration
+--------------------
+fit_temperature / apply_temperature  temperature scaling (Guo et al. 2017) —
+                          fit a single T>0 on a held-out split, apply to the
+                          eval split; recalibrates confidence without changing
+                          the argmax
 """
 
 from __future__ import annotations
@@ -224,3 +231,91 @@ def expected_calibration_error(
         ece   += (n_b / n) * abs(acc_b - conf_b)
 
     return float(ece)
+
+
+# ---------------------------------------------------------------------------
+# Post-hoc calibration — temperature scaling (Guo et al. 2017)
+# ---------------------------------------------------------------------------
+
+def fit_temperature(
+    logits:   np.ndarray,
+    labels:   np.ndarray,
+    u_bounds: tuple[float, float] = (1e-2, 20.0),
+    n_iter:   int = 60,
+) -> float:
+    """Fit a single temperature T>0 by minimising NLL of softmax(logits / T).
+
+    Temperature scaling (Guo et al. 2017, "On Calibration of Modern Neural
+    Networks"): a one-parameter post-hoc calibrator. Dividing logits by T
+    softens (T>1) or sharpens (T<1) the softmax without changing the argmax,
+    so accuracy and any argmax-derived metric are unaffected — only the
+    confidence calibration (e.g. ECE) changes. Fit on a held-out split (e.g.
+    validation), then apply to the evaluation split.
+
+    The mean NLL is convex in the inverse temperature u = 1/T (log-sum-exp
+    composed with a linear map in u, minus a linear term), so this minimises
+    over u with an exact ternary search — no learning-rate tuning, fully
+    deterministic.
+
+    Parameters
+    ----------
+    logits : np.ndarray (N, n_classes)
+        Raw (pre-softmax) model outputs on the fit split.
+    labels : np.ndarray (N,) int
+        True class indices.
+    u_bounds : (float, float)
+        Search bracket for the inverse temperature u = 1/T. The default
+        (0.01, 20.0) covers T in [0.05, 100].
+    n_iter : int
+        Ternary-search iterations (each shrinks the bracket by 2/3).
+
+    Returns
+    -------
+    float
+        Fitted temperature T. Returns 1.0 for empty input (no-op).
+    """
+    logits = np.asarray(logits, dtype=np.float64)
+    labels = np.asarray(labels)
+    n = labels.shape[0]
+    if n == 0:
+        return 1.0
+
+    rows = np.arange(n)
+
+    def nll(u: float) -> float:
+        z = logits * u
+        z = z - z.max(axis=-1, keepdims=True)          # stabilise
+        logsumexp = np.log(np.exp(z).sum(axis=-1))
+        true_logit = z[rows, labels]
+        return float(np.mean(logsumexp - true_logit))
+
+    lo, hi = u_bounds
+    for _ in range(n_iter):
+        m1 = lo + (hi - lo) / 3.0
+        m2 = hi - (hi - lo) / 3.0
+        if nll(m1) < nll(m2):
+            hi = m2
+        else:
+            lo = m1
+    u = 0.5 * (lo + hi)
+    return float(1.0 / u)
+
+
+def apply_temperature(logits: np.ndarray, temperature: float) -> np.ndarray:
+    """Scale logits by a fitted temperature: ``logits / temperature``.
+
+    Pairs with :func:`fit_temperature`. Softmax of the result is the
+    calibrated probability distribution; the argmax is unchanged.
+
+    Parameters
+    ----------
+    logits : np.ndarray (N, n_classes)
+    temperature : float
+        Positive scalar from :func:`fit_temperature`.
+
+    Returns
+    -------
+    np.ndarray
+        Temperature-scaled logits, same shape as the input.
+    """
+    return np.asarray(logits) / temperature

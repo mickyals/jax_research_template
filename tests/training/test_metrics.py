@@ -18,6 +18,10 @@ TestQuadraticWeightedKappa
 TestExpectedCalibrationError
                       perfectly-calibrated probs ~ 0; confident-but-wrong is
                       high; empty-bin and single-sample don't crash; in [0,1]
+TestTemperatureScaling
+                      apply divides + preserves argmax; empty -> T=1;
+                      overconfident -> T>1 and lower ECE; calibrated -> T~1;
+                      T always positive
 """
 
 import jax.numpy as jnp
@@ -26,9 +30,11 @@ import pytest
 
 from training.metrics import (
     accuracy,
+    apply_temperature,
     binary_accuracy,
     cross_entropy,
     expected_calibration_error,
+    fit_temperature,
     mae_class,
     quadratic_weighted_kappa,
 )
@@ -269,3 +275,69 @@ class TestExpectedCalibrationError:
         probs  = np.exp(logits) / np.exp(logits).sum(axis=-1, keepdims=True)
         ece    = expected_calibration_error(probs, labels)
         assert 0.0 <= ece <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# TestTemperatureScaling
+# ---------------------------------------------------------------------------
+
+class TestTemperatureScaling:
+
+    def test_apply_temperature_divides(self):
+        logits = _rand_logits()
+        out = apply_temperature(np.asarray(logits), 2.0)
+        assert np.allclose(out, np.asarray(logits) / 2.0)
+
+    def test_apply_temperature_preserves_argmax(self):
+        logits = np.asarray(_rand_logits())
+        for T in (0.5, 2.0, 5.0):
+            scaled = apply_temperature(logits, T)
+            assert np.array_equal(scaled.argmax(-1), logits.argmax(-1))
+
+    def test_empty_input_returns_unit_temperature(self):
+        assert fit_temperature(np.zeros((0, N_CLS)), np.zeros((0,), dtype=np.int64)) == 1.0
+
+    def test_overconfident_logits_fit_temperature_above_one(self):
+        # Confident but only ~half correct -> needs softening (T > 1).
+        rng = np.random.default_rng(0)
+        n = 400
+        labels = rng.integers(0, N_CLS, size=n)
+        # Large logits on a class that is the true one only half the time.
+        target = np.where(rng.random(n) < 0.5, labels, (labels + 1) % N_CLS)
+        logits = np.full((n, N_CLS), -5.0)
+        logits[np.arange(n), target] = 5.0
+        T = fit_temperature(logits, labels)
+        assert T > 1.0
+
+    def test_temperature_reduces_ece_when_overconfident(self):
+        rng = np.random.default_rng(1)
+        n = 400
+        labels = rng.integers(0, N_CLS, size=n)
+        target = np.where(rng.random(n) < 0.5, labels, (labels + 1) % N_CLS)
+        logits = np.full((n, N_CLS), -5.0)
+        logits[np.arange(n), target] = 5.0
+
+        T = fit_temperature(logits, labels)
+        probs_before = np.exp(logits) / np.exp(logits).sum(-1, keepdims=True)
+        scaled = apply_temperature(logits, T)
+        probs_after = np.exp(scaled) / np.exp(scaled).sum(-1, keepdims=True)
+
+        ece_before = expected_calibration_error(probs_before, labels)
+        ece_after  = expected_calibration_error(probs_after, labels)
+        assert ece_after < ece_before
+
+    def test_well_calibrated_temperature_near_one(self):
+        # Draw labels from the model's OWN softmax -> perfectly calibrated by
+        # construction, so the optimal temperature is ~1.
+        rng = np.random.default_rng(2)
+        n = 3000
+        logits = rng.standard_normal((n, N_CLS))
+        probs  = np.exp(logits) / np.exp(logits).sum(-1, keepdims=True)
+        labels = np.array([rng.choice(N_CLS, p=probs[i]) for i in range(n)])
+        T = fit_temperature(logits, labels)
+        assert 0.7 < T < 1.4   # near 1, not pinned to a bound
+
+    def test_positive_temperature(self):
+        logits = np.asarray(_rand_logits())
+        labels = np.asarray(_rand_labels())
+        assert fit_temperature(logits, labels) > 0.0
