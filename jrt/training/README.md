@@ -94,8 +94,24 @@ Scalar loss functions for JAX/Flax training. All functions have the signature `(
 | `ordinal_loss(logits, labels)` | CORAL ordinal cross-entropy (Cao et al. 2020) |
 | `ordinal_predict(logits)` | Predicted class from ordinal logits |
 | `ordinal_probs(logits)` | Per-class probabilities from ordinal logits |
+| `squared_emd_loss(logits, labels, n_classes)` | Squared Earth Mover's Distance over ordinal class CDFs — penalises far misses more than near misses, no model change |
 
 Masked variants derive the mask from `jnp.isfinite(target)` when no mask is passed — NaN targets are excluded automatically. They return `0.0` when no valid positions exist.
+
+**Classification loss registry** — string-addressable, mirrors the optimizer/scheduler registries below:
+
+```python
+from training.losses import get_loss, list_losses
+
+loss_fn = get_loss("squared_emd", n_classes=11)   # (logits, labels) -> scalar
+```
+
+| Name | Description |
+|------|-------------|
+| `cross_entropy` | Softmax cross-entropy with integer labels |
+| `squared_emd` | Squared EMD over ordinal class CDFs (kwarg: `n_classes`, default 11) |
+
+Convention for classification experiments: a `trainer.loss` (+ `trainer.loss_kwargs`) config key selects the entry resolved via `get_loss` and bound to the `metrics_fns['loss']` key (which `loss_key` defaults to), so the training objective is configured the same way as `trainer.optimizer`/`trainer.scheduler`.
 
 ---
 

@@ -6,7 +6,8 @@ All tests use synthetic in-memory data — no disk access required.
 Coverage
 --------
 TestOneForwardBackwardPass
-    forward pass: all four metric keys returned; all finite; deterministic
+    forward pass: all five metric keys returned (loss, cross_entropy,
+        accuracy, binary_accuracy, mae_class); all finite; deterministic
     backward pass: params change after one gradient update; loss finite and positive
     both attention paths (use_self_attention True / False)
     both location encodings (unit_circle / domain)
@@ -15,8 +16,8 @@ TestOneForwardBackwardPass
 
 TestLossVariation
     loss is not identical at step 1 vs step 10
-    _train_epoch returns correct metric key and finite value
-    _eval_model returns all four val metric keys, all finite
+    _train_epoch returns correct metric key (train/loss) and finite value
+    _eval_model returns all five val metric keys, all finite
     loss decreases over training when data has a clear separable signal
     trainer.fit() completes and returns TrainState
     epoch callbacks receive correct (epoch, global_step) pairs
@@ -210,7 +211,7 @@ class TestOneForwardBackwardPass:
         trainer, state = trainer_state
         metrics = trainer._eval_step(state, _fake_batch())
         assert set(metrics.keys()) == {
-            'cross_entropy', 'accuracy', 'binary_accuracy', 'mae_class'
+            'loss', 'cross_entropy', 'accuracy', 'binary_accuracy', 'mae_class'
         }
 
     def test_forward_all_metrics_finite(self, trainer_state):
@@ -239,12 +240,12 @@ class TestOneForwardBackwardPass:
     def test_backward_loss_is_finite(self, trainer_state):
         trainer, state = trainer_state
         _, metrics = trainer._train_step(state, _fake_batch())
-        assert bool(jnp.isfinite(metrics['cross_entropy']))
+        assert bool(jnp.isfinite(metrics['loss']))
 
     def test_backward_loss_is_positive(self, trainer_state):
         trainer, state = trainer_state
         _, metrics = trainer._train_step(state, _fake_batch())
-        assert float(metrics['cross_entropy']) > 0.0
+        assert float(metrics['loss']) > 0.0
 
     # --- Domain encoding ---
 
@@ -255,7 +256,7 @@ class TestOneForwardBackwardPass:
         batch   = _fake_batch(location_encoding='domain')
         state   = trainer._init_state(batch)
         new_state, metrics = trainer._train_step(state, batch)
-        assert bool(jnp.isfinite(metrics['cross_entropy']))
+        assert bool(jnp.isfinite(metrics['loss']))
 
     # --- Masking edge cases ---
 
@@ -269,7 +270,7 @@ class TestOneForwardBackwardPass:
         batch   = {'X': X, 'y': jnp.array(rng.integers(0, N_CLS, B), dtype=jnp.int32)}
         state   = trainer._init_state(batch)
         _, metrics = trainer._train_step(state, batch)
-        assert bool(jnp.isfinite(metrics['cross_entropy']))
+        assert bool(jnp.isfinite(metrics['loss']))
 
     def test_padded_station_mask_is_handled(self, tmp_path):
         """Only 5 of 12 stations are real; the rest are padding — no NaN."""
@@ -283,7 +284,7 @@ class TestOneForwardBackwardPass:
         batch   = {'X': X, 'y': jnp.array(rng.integers(0, N_CLS, B), dtype=jnp.int32)}
         state   = trainer._init_state(batch)
         _, metrics = trainer._train_step(state, batch)
-        assert bool(jnp.isfinite(metrics['cross_entropy']))
+        assert bool(jnp.isfinite(metrics['loss']))
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +304,7 @@ class TestLossVariation:
         for _ in range(9):
             state, _ = trainer._train_step(state, batch)
         _, m10 = trainer._train_step(state, batch)
-        assert float(m0['cross_entropy']) != float(m10['cross_entropy'])
+        assert float(m0['loss']) != float(m10['loss'])
 
     def test_train_epoch_returns_correct_key_and_finite_value(self, tmp_path):
         model   = _make_model()
@@ -311,17 +312,17 @@ class TestLossVariation:
         loader  = _FakeTCLoader(n_batches=4)
         state   = trainer._init_state(next(iter(loader)))
         _, metrics = trainer._train_epoch(state, loader, epoch=0)
-        assert 'train/cross_entropy' in metrics
-        assert np.isfinite(metrics['train/cross_entropy'])
+        assert 'train/loss' in metrics
+        assert np.isfinite(metrics['train/loss'])
 
-    def test_eval_model_returns_all_four_val_metrics(self, tmp_path):
+    def test_eval_model_returns_all_five_val_metrics(self, tmp_path):
         model   = _make_model()
         trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
         loader  = _FakeTCLoader(n_batches=4)
         state   = trainer._init_state(next(iter(loader)))
         metrics = trainer._eval_model(state, loader, prefix='val')
         expected = {
-            'val/cross_entropy', 'val/accuracy',
+            'val/loss', 'val/cross_entropy', 'val/accuracy',
             'val/binary_accuracy', 'val/mae_class',
         }
         assert set(metrics.keys()) == expected

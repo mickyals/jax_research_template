@@ -177,6 +177,7 @@ model:
   # --- Fixed across all trials ---
   use_learned_mask:     true
   missing_value:        -10.0
+  missingness_indicator: true  # concat obs_mask to obs values before station_proj
   full_self_attention:  true   # false = asymmetric mask; true = complete self-attention
   n_obs_features:       5
   n_classes:            11
@@ -224,6 +225,14 @@ trainer:
 
   # Steps per training epoch (random TC sampling mode).
   steps_per_epoch:      1000
+
+  # --- Loss ---
+  # Fixed for this sweep (not a suggest_fn dimension yet). See
+  # training/losses.py LOSSES registry; val/cross_entropy is always reported
+  # separately for cross-run comparability.
+  loss:                 squared_emd
+  loss_kwargs:
+    n_classes:          11
 
   # --- Early stopping ---
   patience:             8

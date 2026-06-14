@@ -212,6 +212,60 @@ class TestTCClassifierFakeData:
 # Standalone tests
 # ---------------------------------------------------------------------------
 
+def test_missingness_indicator_disambiguates_sentinel_collision():
+    """A missing feature must produce a different token than a real obs
+    that happens to equal the sentinel value (use_learned_mask=False)."""
+    missing_value = -10.0
+    model = _make_model(
+        use_learned_mask=False,
+        missing_value=missing_value,
+        missingness_indicator=True,
+    )
+    X = _fake_batch(all_present=True)
+
+    # A real observation that happens to equal the sentinel.
+    X_real_eq_sentinel = dict(X)
+    X_real_eq_sentinel['station_obs'] = jnp.full_like(X['station_obs'], missing_value)
+    X_real_eq_sentinel['obs_mask']    = jnp.ones_like(X['obs_mask'])
+
+    # A genuinely missing feature — obs_fixed collapses to the same sentinel.
+    X_missing = dict(X)
+    X_missing['station_obs'] = jnp.zeros_like(X['station_obs'])  # ignored where obs_mask=False
+    X_missing['obs_mask']    = jnp.zeros_like(X['obs_mask'])
+
+    vs = model.init(KEY, X_real_eq_sentinel, train=False)
+    out_real    = model.apply(vs, X_real_eq_sentinel, train=False)
+    out_missing = model.apply(vs, X_missing, train=False)
+    assert not jnp.allclose(out_real, out_missing), \
+        "missingness_indicator=True should disambiguate sentinel collisions"
+
+
+def test_missingness_indicator_false_aliases_sentinel_collision():
+    """Without the indicator, a missing feature IS aliased with a real obs
+    equal to the sentinel — documents the bug the indicator fixes."""
+    missing_value = -10.0
+    model = _make_model(
+        use_learned_mask=False,
+        missing_value=missing_value,
+        missingness_indicator=False,
+    )
+    X = _fake_batch(all_present=True)
+
+    X_real_eq_sentinel = dict(X)
+    X_real_eq_sentinel['station_obs'] = jnp.full_like(X['station_obs'], missing_value)
+    X_real_eq_sentinel['obs_mask']    = jnp.ones_like(X['obs_mask'])
+
+    X_missing = dict(X)
+    X_missing['station_obs'] = jnp.zeros_like(X['station_obs'])
+    X_missing['obs_mask']    = jnp.zeros_like(X['obs_mask'])
+
+    vs = model.init(KEY, X_real_eq_sentinel, train=False)
+    out_real    = model.apply(vs, X_real_eq_sentinel, train=False)
+    out_missing = model.apply(vs, X_missing, train=False)
+    assert jnp.allclose(out_real, out_missing), \
+        "missingness_indicator=False should alias sentinel collisions (legacy behaviour)"
+
+
 def test_use_learned_mask_false():
     """Constant sentinel path (use_learned_mask=False) produces finite output."""
     model  = _make_model(use_learned_mask=False)

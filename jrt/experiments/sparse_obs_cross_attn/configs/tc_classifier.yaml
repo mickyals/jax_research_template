@@ -158,6 +158,12 @@ model:
   # without being extreme enough to cause gradient issues.
   missing_value:        -10.0
 
+  # true (recommended): concatenate obs_mask to the obs values before
+  # station_proj, so a missing feature (sentinel) is distinguishable from a
+  # real observation that happens to equal the sentinel. false reproduces
+  # the old aliased behaviour (ablation only).
+  missingness_indicator: true
+
   # --- Output ---
   n_obs_features:       5             # must equal len(data.obs_vars)
   n_classes:            11            # 0 = no storm, 1–10 = SSHS −4 to +5
@@ -198,6 +204,16 @@ trainer:
   # For a full run use 2000-5000 depending on desired training time per epoch.
   # Remove or set to null to fall back to sequential mode (one pass through TC data).
   steps_per_epoch:      500
+
+  # --- Loss ---
+  # Training objective, selected from training/losses.py LOSSES registry.
+  # 'cross_entropy' (flat softmax CE) and 'squared_emd' (ordinal-aware,
+  # penalises predictions further from the true class more) both run on the
+  # existing 11-way head. 'cross_entropy' is always reported separately
+  # (val/cross_entropy) regardless of this choice, so runs stay comparable.
+  loss:                 squared_emd
+  loss_kwargs:
+    n_classes:          11
 
   # --- Early stopping ---
   patience:             15            # epochs without improvement before halting

@@ -159,6 +159,11 @@
           "description": "False (default) = asymmetric mask (stations never attend to the query). True = complete self-attention over all N+1 tokens."
         },
 
+        "missingness_indicator": {
+          "type": "boolean",
+          "description": "True (default) = concatenate obs_mask to the obs values before station_proj, so a missing feature is distinguishable from a real observation equal to the sentinel. False reproduces the old aliased behaviour."
+        },
+
         "embed_dim":  { "type": "integer", "minimum": 1 },
         "num_heads":  { "type": "integer", "minimum": 1 },
         "num_layers": { "type": "integer", "minimum": 1, "description": "Total encoder layers (unified self-attention)." },
@@ -206,7 +211,9 @@
         "optimizer_kwargs":     { "type": "object" },
         "scheduler":            { "type": "string" },
         "scheduler_kwargs":     { "type": "object" },
-        "loss_key":             { "type": "string", "description": "Which metric is the training loss / differentiated. Defaults to the first metric (cross_entropy)." },
+        "loss_key":             { "type": "string", "description": "Which metric is the training loss / differentiated. Defaults to the first metric ('loss', resolved from trainer.loss)." },
+        "loss":                 { "type": "string", "description": "Name of a registered loss from training/losses.py LOSSES (e.g. 'cross_entropy', 'squared_emd'). Defaults to 'cross_entropy'. 'cross_entropy' is always reported separately for cross-run comparability." },
+        "loss_kwargs":          { "type": "object", "description": "Forwarded to the loss factory, e.g. {n_classes: 11} for 'squared_emd'." },
         "num_epochs":           { "type": "integer", "minimum": 1 },
         "num_steps":            { "type": "number",  "minimum": 1 },
         "steps_per_epoch":      { "type": "integer", "minimum": 1, "description": "Random TC-sampling mode: gradient steps per epoch. Omit/null = sequential mode (one pass over TC data). Read by train.py/tune.py." },

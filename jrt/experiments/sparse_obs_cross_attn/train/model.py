@@ -140,6 +140,15 @@ class TCClassifier(nn.Module):
         True = complete self-attention over all N+1 tokens (every token attends
         to every other, modulo padding) — i.e. the standard, unrestricted
         Transformer pattern.
+    missingness_indicator : bool
+        True (default) = concatenate obs_mask (as 0./1.) to the obs values
+        before station_proj, so station_proj sees 2*n_obs_features inputs.
+        Without this, a missing feature (replaced by the mask_token /
+        missing_value sentinel) is indistinguishable from a real observation
+        that happens to equal the sentinel value — the indicator makes
+        "missing" an explicit, separate signal rather than relying on the
+        sentinel's position in feature space. False reproduces the old
+        aliased behaviour.
 
     Notes
     -----
@@ -177,6 +186,7 @@ class TCClassifier(nn.Module):
     n_classes:         int   = N_CLASSES
     missing_value:     float = -10.0
     full_self_attention: bool = False
+    missingness_indicator: bool = True
 
     def setup(self):
         self.coord_embedding = GaussianFourierEmbedding(
@@ -261,8 +271,18 @@ class TCClassifier(nn.Module):
             sentinel = jnp.full_like(station_obs, self.missing_value)
         obs_fixed = jnp.where(obs_mask, station_obs, sentinel)          # (B, N, F)
 
+        # 1b. Explicit missingness indicator — concatenate the mask itself so
+        # a missing feature (sentinel value) is distinguishable from a real
+        # observation that happens to equal the sentinel.
+        if self.missingness_indicator:
+            obs_input = jnp.concatenate(
+                [obs_fixed, obs_mask.astype(obs_fixed.dtype)], axis=-1
+            )                                                            # (B, N, 2F)
+        else:
+            obs_input = obs_fixed                                        # (B, N, F)
+
         # 2. Station tokens — obs content + additive positional encoding
-        station_tokens = self.station_proj(obs_fixed)                   # (B, N, D)
+        station_tokens = self.station_proj(obs_input)                   # (B, N, D)
 
         # GaussianFourierEmbedding expects a flat (..., input_dim) input,
         # so merge batch and station dims before the call, then split them back.

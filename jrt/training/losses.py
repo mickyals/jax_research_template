@@ -39,7 +39,9 @@ reported loss magnitude differs.
 
 from __future__ import annotations
 
-from typing import Optional
+import warnings
+import inspect
+from typing import Callable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -326,6 +328,47 @@ def ordinal_predict(logits: jax.Array) -> jax.Array:
     return jnp.sum(jax.nn.sigmoid(logits) > 0.5, axis=-1).astype(jnp.int32)
 
 
+# ---------------------------------------------------------------------------
+# Ordinal classification (squared EMD over class CDFs)
+# ---------------------------------------------------------------------------
+
+def squared_emd_loss(
+    logits:    jax.Array,
+    labels:    jax.Array,
+    n_classes: int = 11,
+) -> jax.Array:
+    """Squared Earth Mover's Distance loss for ordinal classes.
+
+    Compares the cumulative distribution of the predicted class
+    probabilities against the cumulative distribution of the (one-hot)
+    target along the ordinal class axis. Unlike flat cross-entropy,
+    predicting a class far from the true one (e.g. Cat5 -> TD) accumulates
+    a larger penalty than a near miss (Cat5 -> Cat4), without any model
+    change — it operates on the existing K-way softmax output.
+
+    Parameters
+    ----------
+    logits : jax.Array  shape (B, n_classes)
+    labels : jax.Array  shape (B,)  integer class indices in {0, ..., n_classes-1}
+    n_classes : int
+
+    Returns
+    -------
+    jax.Array  scalar
+
+    Example
+    -------
+    >>> logits = jnp.zeros((4, 11)).at[:, 0].set(100.0)  # confident class 0
+    >>> labels = jnp.zeros(4, dtype=jnp.int32)
+    >>> float(squared_emd_loss(logits, labels)) < 1e-6
+    True
+    """
+    probs    = jax.nn.softmax(logits, axis=-1)
+    target   = jax.nn.one_hot(labels, n_classes)
+    cdf_diff = jnp.cumsum(probs, axis=-1) - jnp.cumsum(target, axis=-1)
+    return jnp.mean(jnp.sum(cdf_diff ** 2, axis=-1))
+
+
 def ordinal_probs(logits: jax.Array) -> jax.Array:
     """Convert ordinal logits to a class probability distribution.
 
@@ -350,3 +393,153 @@ def ordinal_probs(logits: jax.Array) -> jax.Array:
     zeros     = jnp.zeros((*logits.shape[:-1], 1))
     augmented = jnp.concatenate([ones, cum, zeros], axis=-1)
     return jnp.clip(augmented[..., :-1] - augmented[..., 1:], 0.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Classification loss registry
+# ---------------------------------------------------------------------------
+#
+# Mirrors the optimizer/scheduler registries in training/optimizers.py:
+# registered entries are FACTORY functions that take config kwargs and
+# return a (logits, labels) -> scalar callable. This lets trainer.loss +
+# trainer.loss_kwargs select the training objective by name, on the same
+# footing as trainer.optimizer/scheduler.
+
+LOSSES: dict[str, dict] = {}
+
+
+def register_loss(name: str, description: str = ""):
+    """Register a classification loss factory by name.
+
+    Parameters
+    ----------
+    name : str
+        Registry key (case-insensitive).
+    description : str, optional
+        Short description shown by list_losses().
+
+    Returns
+    -------
+    callable
+        Function decorator. The decorated function must return a
+        ``(logits, labels) -> scalar`` callable.
+
+    Raises
+    ------
+    ValueError
+        If a loss with the same name is already registered.
+
+    Example
+    -------
+    >>> @register_loss("MY_LOSS", description="Custom loss")
+    ... def _my_loss(weight: float = 1.0):
+    ...     def loss_fn(logits, labels):
+    ...         return weight * cross_entropy_loss()(logits, labels)
+    ...     return loss_fn
+    """
+    name = name.upper()
+
+    def decorator(fn):
+        if name in LOSSES:
+            raise ValueError(f"Loss '{name}' is already registered.")
+        LOSSES[name] = {"fn": fn, "description": description}
+        return fn
+
+    return decorator
+
+
+def get_loss(name: str, **kwargs) -> Callable[[jax.Array, jax.Array], jax.Array]:
+    """Instantiate a registered classification loss.
+
+    Parameters
+    ----------
+    name : str
+        Registry key (case-insensitive).
+    **kwargs
+        Forwarded to the loss factory. Unknown kwargs trigger a
+        UserWarning and are dropped rather than causing a TypeError.
+
+    Returns
+    -------
+    Callable[[jax.Array, jax.Array], jax.Array]
+        ``(logits, labels) -> scalar``.
+
+    Raises
+    ------
+    ValueError
+        If the name is not registered.
+
+    Example
+    -------
+    >>> loss_fn = get_loss("cross_entropy")
+    >>> loss_fn = get_loss("squared_emd", n_classes=11)
+    """
+    name = name.upper()
+    if name not in LOSSES:
+        available = ", ".join(sorted(LOSSES.keys()))
+        raise ValueError(
+            f"Loss '{name}' is not registered. Available: {available}"
+        )
+
+    fn = LOSSES[name]["fn"]
+
+    if kwargs:
+        sig = inspect.signature(fn)
+        valid = {
+            k for k, p in sig.parameters.items()
+            if p.kind not in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            )
+        }
+        unknown = set(kwargs.keys()) - valid
+        if unknown:
+            warnings.warn(
+                f"get_loss('{name}'): unknown kwargs {unknown} will be "
+                f"ignored. Valid kwargs: {valid or 'none'}.",
+                UserWarning,
+                stacklevel=2,
+            )
+        kwargs = {k: v for k, v in kwargs.items() if k in valid}
+
+    return fn(**kwargs)
+
+
+def list_losses() -> dict[str, str]:
+    """Return all registered loss names and their descriptions.
+
+    Returns
+    -------
+    dict[str, str]
+
+    Example
+    -------
+    >>> list_losses()
+    {'CROSS_ENTROPY': '...', 'SQUARED_EMD': '...'}
+    """
+    return {name: info["description"] for name, info in LOSSES.items()}
+
+
+@register_loss(
+    "cross_entropy",
+    description="Softmax cross-entropy with integer labels.",
+)
+def _cross_entropy_loss() -> Callable[[jax.Array, jax.Array], jax.Array]:
+    def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
+        return jnp.mean(
+            _optax.softmax_cross_entropy_with_integer_labels(logits, labels)
+        )
+    return loss_fn
+
+
+@register_loss(
+    "squared_emd",
+    description=(
+        "Squared Earth Mover's Distance over ordinal class CDFs "
+        "(ordinal-aware alternative to flat cross-entropy)."
+    ),
+)
+def _squared_emd_loss(n_classes: int = 11) -> Callable[[jax.Array, jax.Array], jax.Array]:
+    def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
+        return squared_emd_loss(logits, labels, n_classes=n_classes)
+    return loss_fn

@@ -17,10 +17,15 @@ TestMaskedLogCosh       NaN exclusion, all-NaN
 TestGradients           grad shapes, finite grads, zero grad at NaN positions
 TestJit                 JIT compatibility for all functions
 TestReExports           optax losses accessible from training.losses
+TestSquaredEmdLoss      ordinal CDF loss: perfect pred, non-negativity,
+                        near-miss < far-miss, shape, jit, grad
+TestLossRegistry        register_loss/get_loss/list_losses, cross_entropy +
+                        squared_emd registered, kwargs filtering/warnings
 """
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax.losses as optax_losses
 import pytest
 
@@ -34,6 +39,10 @@ from training.losses import (
     sigmoid_binary_cross_entropy,
     softmax_cross_entropy,
     softmax_cross_entropy_with_integer_labels,
+    # ordinal
+    squared_emd_loss,
+    # loss registry
+    LOSSES, get_loss, list_losses, register_loss,
 )
 
 
@@ -432,3 +441,128 @@ class TestReExports:
             0.5 * squared_error(pred, target),
             atol=1e-6,
         )
+
+
+# ---------------------------------------------------------------------------
+# TestSquaredEmdLoss
+# ---------------------------------------------------------------------------
+
+class TestSquaredEmdLoss:
+
+    B_CLS = 4
+    N_CLS = 11
+
+    def _confident_logits(self, correct_class: int) -> jnp.ndarray:
+        return jnp.full((self.B_CLS, self.N_CLS), -100.0).at[:, correct_class].set(100.0)
+
+    def test_perfect_prediction_near_zero(self):
+        labels = jnp.array([3] * self.B_CLS, dtype=jnp.int32)
+        out = squared_emd_loss(self._confident_logits(3), labels, n_classes=self.N_CLS)
+        assert float(out) < 1e-6
+
+    def test_nonnegative(self):
+        rng    = np.random.default_rng(0)
+        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS)).astype(np.float32))
+        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
+        assert float(squared_emd_loss(logits, labels, n_classes=self.N_CLS)) >= 0.0
+
+    def test_near_miss_penalised_less_than_far_miss(self):
+        """Predicting Cat4 when truth is Cat5 should cost less than predicting TD."""
+        labels   = jnp.array([5] * self.B_CLS, dtype=jnp.int32)
+        near     = self._confident_logits(4)   # off by 1
+        far      = self._confident_logits(0)   # off by 5
+        loss_near = float(squared_emd_loss(near, labels, n_classes=self.N_CLS))
+        loss_far  = float(squared_emd_loss(far, labels, n_classes=self.N_CLS))
+        assert loss_near < loss_far
+
+    def test_scalar_shape(self):
+        rng    = np.random.default_rng(0)
+        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS)).astype(np.float32))
+        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
+        assert squared_emd_loss(logits, labels, n_classes=self.N_CLS).shape == ()
+
+    def test_jit(self):
+        rng    = np.random.default_rng(0)
+        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS)).astype(np.float32))
+        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
+        out = jax.jit(lambda l, y: squared_emd_loss(l, y, n_classes=self.N_CLS))(logits, labels)
+        assert jnp.isfinite(out)
+
+    def test_grad_flows(self):
+        rng    = np.random.default_rng(0)
+        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS)).astype(np.float32))
+        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
+        grad = jax.grad(lambda l: squared_emd_loss(l, labels, n_classes=self.N_CLS))(logits)
+        assert grad.shape == logits.shape
+        assert jnp.all(jnp.isfinite(grad))
+
+
+# ---------------------------------------------------------------------------
+# TestLossRegistry
+# ---------------------------------------------------------------------------
+
+class TestLossRegistry:
+
+    B_CLS = 4
+    N_CLS = 11
+
+    def _rand_logits_labels(self):
+        rng = np.random.default_rng(0)
+        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS)).astype(np.float32))
+        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
+        return logits, labels
+
+    def test_cross_entropy_registered(self):
+        assert 'CROSS_ENTROPY' in LOSSES
+
+    def test_squared_emd_registered(self):
+        assert 'SQUARED_EMD' in LOSSES
+
+    def test_get_loss_cross_entropy(self):
+        logits, labels = self._rand_logits_labels()
+        loss_fn = get_loss('cross_entropy')
+        out = loss_fn(logits, labels)
+        expected = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, labels))
+        assert jnp.allclose(out, expected)
+
+    def test_get_loss_squared_emd_default_n_classes(self):
+        logits, labels = self._rand_logits_labels()
+        loss_fn = get_loss('squared_emd')
+        out = loss_fn(logits, labels)
+        expected = squared_emd_loss(logits, labels, n_classes=11)
+        assert jnp.allclose(out, expected)
+
+    def test_get_loss_squared_emd_custom_n_classes(self):
+        logits = jnp.zeros((self.B_CLS, 5))
+        labels = jnp.zeros(self.B_CLS, dtype=jnp.int32)
+        loss_fn = get_loss('squared_emd', n_classes=5)
+        out = loss_fn(logits, labels)
+        assert out.shape == ()
+        assert bool(jnp.isfinite(out))
+
+    def test_get_loss_case_insensitive(self):
+        assert get_loss('Cross_Entropy') is not None
+        assert get_loss('SQUARED_EMD') is not None
+
+    def test_get_loss_unknown_raises(self):
+        with pytest.raises(ValueError, match="not registered"):
+            get_loss('not_a_real_loss')
+
+    def test_get_loss_unknown_kwargs_warns_and_drops(self):
+        logits, labels = self._rand_logits_labels()
+        with pytest.warns(UserWarning, match="unknown kwargs"):
+            loss_fn = get_loss('cross_entropy', bogus_kwarg=123)
+        expected = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, labels))
+        assert jnp.allclose(loss_fn(logits, labels), expected)
+
+    def test_list_losses_returns_descriptions(self):
+        names = list_losses()
+        assert 'CROSS_ENTROPY' in names
+        assert 'SQUARED_EMD' in names
+        assert all(isinstance(v, str) for v in names.values())
+
+    def test_register_loss_duplicate_raises(self):
+        with pytest.raises(ValueError, match="already registered"):
+            @register_loss('cross_entropy')
+            def _dup():
+                ...

@@ -105,6 +105,8 @@ Stations within the radius may have missing values for some variables. Missing e
 
 −10.0 is chosen to be clearly outside the normalised obs range ([-1, 1] for minmax_11) without being extreme enough to cause gradient issues.
 
+`model.missingness_indicator: true` (default) additionally concatenates `obs_mask` (as 0./1.) to the obs values before `station_proj`. Without this, a missing feature (sentinel) is indistinguishable from a real observation that happens to equal the sentinel — the indicator makes "missing" an explicit signal. Set `false` to reproduce the old aliased behaviour (ablation only).
+
 ### Full forward pass
 
 ```
@@ -159,7 +161,8 @@ sparse_obs_cross_attn/
 │                           asymmetric-mask figure
 └── train/
     ├── model.py         TCClassifier — unified Transformer encoder
-    ├── metrics.py       cross_entropy, accuracy, binary_accuracy, mae_class
+    ├── metrics.py       cross_entropy, accuracy, binary_accuracy, mae_class,
+    │                       quadratic_weighted_kappa, expected_calibration_error
     ├── train.py         CLI entry point + observability callbacks
     │                       (attention entropy/map/grid, gradient flow)
     ├── evaluate.py      Evaluation pipeline (metrics + predictions)
@@ -499,15 +502,19 @@ plt.show()
 
 | Metric | Description |
 |--------|-------------|
-| `train/cross_entropy` | Softmax CE over 11 classes — training loss |
-| `val/cross_entropy` | Validation CE — patience metric for early stopping |
+| `train/loss` | Training objective from `trainer.loss` (e.g. `squared_emd`) |
+| `val/loss` | Same objective evaluated on val |
+| `val/cross_entropy` | Validation CE — always reported for cross-run comparability; patience metric for early stopping |
 | `val/accuracy` | Top-1 accuracy over all 11 classes |
 | `val/binary_accuracy` | TC vs no-TC (class 0 vs class > 0); random chance = 0.5 |
 | `val/mae_class` | Mean \|predicted class − true class\| in class units |
+| `val/qwk` | Quadratic-weighted kappa (full val set, every `eval_plots_every_n_epochs`) — ordinal agreement; 1 = perfect, 0 = chance, negative = worse than chance |
+| `val/ece` | Expected calibration error (full val set, every `eval_plots_every_n_epochs`) — gap between confidence and accuracy; 0 = perfectly calibrated |
 | `val/attn_entropy` | Entropy of the LAST layer's query-row attention weights over N+1 positions. A falling curve means the model is concentrating attention on specific stations. |
 
 **Interpretation:**
 - A model that always predicts class 0 achieves `binary_accuracy = 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
+- `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tells you whether an ordinal loss (`squared_emd`) is actually improving ordinal agreement over flat CE; `val/ece` is the calibration measurement (temperature scaling to act on it is Tier 2, not yet implemented).
 - `val/attn_entropy` includes the query's self-attention weight (the last of N+1 positions). A high self-attention weight early in training is expected — the model is relying on its `learned_query` prior. Expect it to decrease as the model learns to trust station data.
 
 ---
@@ -530,11 +537,14 @@ Key fields in `tc_classifier.yaml`:
 | `model.use_learned_mask` | `true` | `true` = trainable mask token, normal(0.02) init; `false` = fixed constant sentinel |
 | `model.full_self_attention` | `false` | `false` = asymmetric mask (stations never attend to the query); `true` = complete self-attention over all N+1 tokens |
 | `model.missing_value` | −10.0 | Only used when `use_learned_mask: false`. Fixed sentinel value for missing obs. |
+| `model.missingness_indicator` | `true` | `true` = concatenate `obs_mask` to obs values before `station_proj`, disambiguating "missing" from a real obs equal to the sentinel; `false` = old aliased behaviour |
 | `model.embed_dim` | 128 | Token dimensionality |
 | `model.num_heads` | 4 | Attention heads (`embed_dim` must be divisible) |
 | `model.num_layers` | 4 | Total encoder depth (unified self-attention over all N+1 tokens) |
 | `model.fourier_dim` | 64 | `GaussianFourierEmbedding` output dim (must be even) |
 | `model.fourier_scale` | 1.0 | Std dev of frequency matrix; log-uniformly tuned in HP search [0.1, 10.0] |
+| `trainer.loss` | `squared_emd` | Training objective from `training/losses.py` LOSSES registry (`cross_entropy` or `squared_emd`); `val/cross_entropy` is always reported separately for cross-run comparability |
+| `trainer.loss_kwargs` | `{n_classes: 11}` | Forwarded to the loss factory (e.g. `n_classes` for `squared_emd`) |
 | `trainer.steps_per_epoch` | 500 | Random TC-sampling mode: gradient steps per epoch. Omit/`null` = sequential mode (one pass over TC data) |
 | `trainer.profile` | `false` | Trace the first `profile_steps` training steps (JAX profiler) → `<run_dir>/logs/profile`; WandB uploads it as an artifact, TensorBoard/Null leave it on disk |
 | `trainer.attn_fig_every_n_epochs` | 5 | Epoch cadence for `val/attn_map` + `val/attn_grid` figures (VAL probe batch); 0 = disabled |

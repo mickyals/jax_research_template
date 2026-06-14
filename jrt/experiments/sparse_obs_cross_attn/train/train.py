@@ -42,6 +42,8 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
 from experiments.sparse_obs_cross_attn.train.metrics import (
     build_metrics_fns,
     cross_entropy,
+    expected_calibration_error,
+    quadratic_weighted_kappa,
 )
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier
 from training.trainer import Trainer, TrainState
@@ -238,7 +240,10 @@ def _make_eval_plots_callback(
     """Return an epoch-level callback that logs confusion matrix and per-class F1.
 
     Runs a full forward pass over the val loader to collect predictions, then
-    plots and uploads to WandB as images. Appears under Media → Images.
+    plots and uploads to WandB as images (appears under Media → Images) and
+    logs full-set scalars ``val/qwk`` (quadratic-weighted kappa — ordinal
+    agreement) and ``val/ece`` (expected calibration error), both from
+    metrics.py over the accumulated predictions/logits.
 
     Parameters
     ----------
@@ -246,7 +251,7 @@ def _make_eval_plots_callback(
     val_loader : TCLoader
         Re-iterable val loader — iterated fresh on each callback invocation.
     logger : experiment logger
-        Must expose ``log_figure``.
+        Must expose ``log_figure`` and ``log_metrics``.
     every_n_epochs : int
         How often to run. 0 = disabled. Default 1 (every epoch).
     """
@@ -255,10 +260,15 @@ def _make_eval_plots_callback(
             return
 
         variables = {'params': state.params}
-        preds, labels, _, _ = collect_predictions(model, variables, val_loader)
+        preds, labels, logits, _ = collect_predictions(model, variables, val_loader)
 
         cm  = confusion_matrix(preds, labels)
         pcm = per_class_metrics(cm)
+
+        probs = np.asarray(jax.nn.softmax(jnp.array(logits), axis=-1))
+        qwk   = quadratic_weighted_kappa(cm)
+        ece   = expected_calibration_error(probs, labels)
+        logger.log_metrics({'val/qwk': qwk, 'val/ece': ece}, step=global_step)
 
         fig_norm = plot_confusion_matrix(
             cm, CLASS_NAMES, normalize=True,
@@ -391,7 +401,10 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # ------------------------------------------------------------------
     # Trainer
     # ------------------------------------------------------------------
-    metrics_fns = build_metrics_fns()
+    metrics_fns = build_metrics_fns(
+        loss        = trainer_cfg.get('loss', 'cross_entropy'),
+        loss_kwargs = trainer_cfg.get('loss_kwargs'),
+    )
     trainer     = Trainer(model, metrics_fns, trainer_cfg)
 
     # Log full config so every run is reproducible from its artifact

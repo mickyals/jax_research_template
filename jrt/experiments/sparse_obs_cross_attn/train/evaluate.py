@@ -5,7 +5,9 @@ Post-training evaluation for TCClassifier.
 
 Produces
 --------
-- Scalar metrics (cross-entropy, accuracy, binary_accuracy, mae_class)
+- Scalar metrics (loss, cross-entropy, accuracy, binary_accuracy, mae_class)
+- Quadratic-weighted kappa (ordinal agreement) and ECE (calibration gap),
+  computed over the full accumulated split — see metrics.py
 - 11×11 confusion matrix — row-normalised (recall per class) + raw counts
 - Per-class precision, recall, F1 bar chart
 - Binary detection summary (TC vs. no-storm)
@@ -41,7 +43,11 @@ import matplotlib.pyplot as plt
 import yaml
 
 from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
+from experiments.sparse_obs_cross_attn.train.metrics import (
+    build_metrics_fns,
+    expected_calibration_error,
+    quadratic_weighted_kappa,
+)
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
 from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_confusion_matrix,
@@ -264,6 +270,9 @@ def print_report(
     cm    = confusion_matrix(preds, labels, n_classes)
     pcm   = per_class_metrics(cm)
     bin_m = binary_metrics(preds, labels)
+    qwk   = quadratic_weighted_kappa(cm)
+    probs = np.asarray(jax.nn.softmax(jnp.array(logits), axis=-1))
+    ece   = expected_calibration_error(probs, labels)
 
     logits_j = jnp.array(logits)
     labels_j = jnp.array(labels)
@@ -278,6 +287,8 @@ def print_report(
     for name, fn in metrics_fns.items():
         val = float(fn(logits_j, labels_j))
         print(f"    {split}/{name}: {val:.5f}")
+    print(f"    {split}/qwk: {qwk:.5f}  (ordinal agreement; 1=perfect, 0=chance)")
+    print(f"    {split}/ece: {ece:.5f}  (calibration gap; 0=perfectly calibrated)")
 
     print(f"\n  Binary detection (TC vs. No Storm):")
     print(f"    Accuracy : {bin_m['accuracy']:.4f}")

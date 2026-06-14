@@ -13,6 +13,13 @@ TestMaeClass          exact match = 0.0; off-by-one = 1.0; larger offset;
                       non-negative; scalar shape
 TestBuildMetricsFns   expected keys; first key is cross_entropy; all callable;
                       all produce finite scalars
+TestQuadraticWeightedKappa
+                      perfect agreement = 1.0; anti-ordinal cm is negative;
+                      near-miss scores higher than far-miss at equal accuracy;
+                      degenerate single-class cm -> 0.0, no crash
+TestExpectedCalibrationError
+                      perfectly-calibrated probs ~ 0; confident-but-wrong is
+                      high; empty-bin and single-sample don't crash; in [0,1]
 """
 
 import jax.numpy as jnp
@@ -24,7 +31,9 @@ from experiments.sparse_obs_cross_attn.train.metrics import (
     binary_accuracy,
     build_metrics_fns,
     cross_entropy,
+    expected_calibration_error,
     mae_class,
+    quadratic_weighted_kappa,
 )
 
 B     = 8
@@ -176,11 +185,33 @@ class TestBuildMetricsFns:
     def test_expected_keys(self):
         fns = build_metrics_fns()
         assert set(fns.keys()) == {
-            'cross_entropy', 'accuracy', 'binary_accuracy', 'mae_class'
+            'loss', 'cross_entropy', 'accuracy', 'binary_accuracy', 'mae_class'
         }
 
-    def test_first_key_is_cross_entropy(self):
-        assert list(build_metrics_fns().keys())[0] == 'cross_entropy'
+    def test_first_key_is_loss(self):
+        assert list(build_metrics_fns().keys())[0] == 'loss'
+
+    def test_default_loss_matches_cross_entropy(self):
+        logits = _rand_logits()
+        labels = _rand_labels()
+        fns = build_metrics_fns()
+        assert float(fns['loss'](logits, labels)) == pytest.approx(
+            float(fns['cross_entropy'](logits, labels)), rel=1e-5
+        )
+
+    def test_squared_emd_loss_selectable(self):
+        logits = _rand_logits()
+        labels = _rand_labels()
+        fns = build_metrics_fns(loss='squared_emd', loss_kwargs={'n_classes': N_CLS})
+        out = fns['loss'](logits, labels)
+        assert out.shape == ()
+        assert bool(jnp.isfinite(out))
+        # squared_emd differs from flat cross_entropy in general
+        assert float(out) != pytest.approx(float(fns['cross_entropy'](logits, labels)))
+
+    def test_unknown_loss_raises(self):
+        with pytest.raises(ValueError):
+            build_metrics_fns(loss='not_a_real_loss')
 
     def test_all_values_are_callable(self):
         for fn in build_metrics_fns().values():
@@ -193,3 +224,95 @@ class TestBuildMetricsFns:
             out = fn(logits, labels)
             assert out.shape == (), f"{name} is not scalar"
             assert bool(jnp.isfinite(out)), f"{name} is not finite"
+
+
+# ---------------------------------------------------------------------------
+# TestQuadraticWeightedKappa
+# ---------------------------------------------------------------------------
+
+class TestQuadraticWeightedKappa:
+
+    def test_perfect_agreement_gives_one(self):
+        cm = np.eye(N_CLS, dtype=np.int64) * 5
+        assert quadratic_weighted_kappa(cm) == pytest.approx(1.0)
+
+    def test_anti_ordinal_is_negative(self):
+        # All true class 0 predicted as class 10, and vice versa — the
+        # worst-possible ordinal confusion.
+        cm = np.zeros((N_CLS, N_CLS), dtype=np.int64)
+        cm[0, N_CLS - 1] = 10
+        cm[N_CLS - 1, 0] = 10
+        assert quadratic_weighted_kappa(cm) < 0.0
+
+    def test_near_miss_scores_higher_than_far_miss_at_equal_accuracy(self):
+        cm_near = np.eye(N_CLS, dtype=np.int64) * 8
+        cm_near[0, 1] = 2  # off by one
+
+        cm_far = np.eye(N_CLS, dtype=np.int64) * 8
+        cm_far[0, N_CLS - 1] = 2  # off by ten
+
+        kappa_near = quadratic_weighted_kappa(cm_near)
+        kappa_far  = quadratic_weighted_kappa(cm_far)
+        assert kappa_near > kappa_far
+
+    def test_degenerate_single_class_gives_zero(self):
+        cm = np.zeros((N_CLS, N_CLS), dtype=np.int64)
+        cm[0, 0] = 10
+        assert quadratic_weighted_kappa(cm) == pytest.approx(0.0)
+
+    def test_empty_confusion_matrix_gives_zero(self):
+        cm = np.zeros((N_CLS, N_CLS), dtype=np.int64)
+        assert quadratic_weighted_kappa(cm) == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# TestExpectedCalibrationError
+# ---------------------------------------------------------------------------
+
+class TestExpectedCalibrationError:
+
+    def test_perfectly_calibrated_is_near_zero(self):
+        # confidence == accuracy within each bin: 80% of the probability
+        # mass on the correct class, and the model is correct 80% of the time.
+        rng    = np.random.default_rng(0)
+        n      = 1000
+        labels = rng.integers(0, N_CLS, size=n)
+        correct_mask = rng.random(n) < 0.8
+
+        probs = np.full((n, N_CLS), 0.02 / (N_CLS - 1))
+        for i in range(n):
+            target = labels[i] if correct_mask[i] else (labels[i] + 1) % N_CLS
+            probs[i] = (1.0 - 0.8) / (N_CLS - 1)
+            probs[i, target] = 0.8
+
+        ece = expected_calibration_error(probs, labels)
+        assert ece < 0.05
+
+    def test_confident_but_wrong_is_high(self):
+        n      = 200
+        labels = np.zeros(n, dtype=np.int64)
+        wrong  = np.full(n, 1, dtype=np.int64)
+
+        probs = np.full((n, N_CLS), (1.0 - 0.95) / (N_CLS - 1))
+        probs[np.arange(n), wrong] = 0.95
+
+        ece = expected_calibration_error(probs, labels)
+        assert ece > 0.5
+
+    def test_empty_input_gives_zero(self):
+        probs  = np.zeros((0, N_CLS))
+        labels = np.zeros((0,), dtype=np.int64)
+        assert expected_calibration_error(probs, labels) == pytest.approx(0.0)
+
+    def test_single_sample_does_not_crash(self):
+        probs  = np.full((1, N_CLS), 1.0 / N_CLS)
+        labels = np.array([0], dtype=np.int64)
+        ece = expected_calibration_error(probs, labels)
+        assert np.isfinite(ece)
+
+    def test_output_in_unit_interval(self):
+        logits = np.asarray(_rand_logits())
+        labels = np.asarray(_rand_labels())
+        probs  = np.exp(logits) / np.exp(logits).sum(axis=-1, keepdims=True)
+        ece    = expected_calibration_error(probs, labels)
+        assert 0.0 <= ece <= 1.0

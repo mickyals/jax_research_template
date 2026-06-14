@@ -133,7 +133,10 @@ def tune(
     def val_loader_fn():
         return dm.val_loader()
 
-    metrics_fns = build_metrics_fns()
+    metrics_fns = build_metrics_fns(
+        loss        = trainer_cfg.get("loss", "cross_entropy"),
+        loss_kwargs = trainer_cfg.get("loss_kwargs"),
+    )
 
     tuner = Tuner(
         suggest_fn       = suggest_fn,
