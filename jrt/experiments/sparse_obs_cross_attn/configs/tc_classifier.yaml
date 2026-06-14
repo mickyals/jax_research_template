@@ -93,7 +93,7 @@ data:
   # random  = fresh random subset each epoch (subsampling augmentation)
   # nearest = deterministic nearest-N by distance
   # Val/test loaders always use 'nearest' (deterministic deployment policy).
-  station_selection:      random
+  station_selection:      nearest
 
   # --- Batch construction ---
   # batch_size is NOT set here — it flows down from trainer.batch_size automatically.
@@ -120,10 +120,10 @@ model:
   # --- Transformer ---
   embed_dim:            128           # token width (must be divisible by num_heads)
   num_heads:            4
-  num_layers:           4             # encoder depth; all N+1 tokens share every layer
+  num_layers:           2             # encoder depth; all N+1 tokens share every layer
 
   # Attention mask over the N+1 tokens (N stations + 1 query):
-  # false = asymmetric — stations contextualise each other and the query
+  # false = asymmetric — stations contextualize each other and the query
   #         reads them, but stations never attend to the query (default).
   # true  = complete self-attention — every token attends to every other
   #         (standard unrestricted Transformer; padding still masked).
@@ -224,7 +224,7 @@ trainer:
   # runs/tc_classifier/run_01 always expands to
   #   jrt/experiments/sparse_obs_cross_attn/runs/tc_classifier/run_01
   # regardless of where the CLI is invoked from.  Absolute paths are used as-is.
-  run_dir:              runs/tc_classifier/run_03
+  run_dir:              runs/tc_classifier/run_05
 
   # --- Logging ---
   log_backend:          wandb
@@ -260,7 +260,7 @@ trainer:
   # WandB project / run metadata.
   log_kwargs:
     project:  sparse_obs_encoding
-    name:     unified-transformer-unit-circle-run4
+    name:     unified-transformer-unit-circle-run5
     offline:  false
     tags:     [unit_circle, unified_transformer]
 
