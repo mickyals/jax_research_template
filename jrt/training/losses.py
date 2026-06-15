@@ -277,21 +277,30 @@ def masked_log_cosh(
 # ---------------------------------------------------------------------------
 
 def ordinal_loss(
-    logits:    jax.Array,
-    labels:    jax.Array,
-    n_classes: int,
+    logits:       jax.Array,
+    labels:       jax.Array,
+    n_classes:    int,
+    task_weights: Optional[jax.Array] = None,
 ) -> jax.Array:
-    """CORAL ordinal loss over K-1 cumulative thresholds.
+    """CORAL ordinal loss over K-1 cumulative thresholds (Cao et al. 2020).
 
     For K ordinal classes labelled {0, ..., K-1}, the model produces K-1
-    logits representing P(Y > k). Loss is mean sigmoid BCE across all
-    K-1 thresholds, built on sigmoid_binary_cross_entropy.
+    logits from a shared feature ``g(x)`` plus K-1 independent biases, each
+    representing P(Y > k) via a sigmoid. Loss is the (per-task weighted) mean
+    sigmoid BCE across all K-1 thresholds, built on
+    sigmoid_binary_cross_entropy.
 
     Parameters
     ----------
     logits : jax.Array  shape (B, n_classes - 1)
     labels : jax.Array  shape (B,)  integer class labels in {0, ..., K-1}
     n_classes : int
+    task_weights : jax.Array, optional  shape (n_classes - 1,)
+        Per-task importance weights λ(k) > 0 (Cao et al. Eq. 4). Each weights
+        the *whole* binary CE of threshold k (both pos and neg terms) — a task
+        weight, distinct from a class weight. None = uniform (the paper's
+        default). When given, a weighted mean over thresholds keeps the scale
+        comparable; classifier consistency holds for any positive weights.
 
     Returns
     -------
@@ -304,7 +313,11 @@ def ordinal_loss(
     """
     thresholds = jnp.arange(n_classes - 1)
     targets    = (labels[:, None] > thresholds[None, :]).astype(jnp.float32)
-    return jnp.mean(_optax.sigmoid_binary_cross_entropy(logits, targets))
+    bce        = _optax.sigmoid_binary_cross_entropy(logits, targets)   # (B, K-1)
+    if task_weights is not None:
+        tw = jnp.asarray(task_weights)
+        return jnp.mean(jnp.sum(tw[None, :] * bce, axis=-1) / jnp.sum(tw))
+    return jnp.mean(bce)
 
 
 def ordinal_predict(logits: jax.Array) -> jax.Array:
@@ -337,34 +350,50 @@ def cross_entropy_loss(
     labels:        jax.Array,
     class_weights: Optional[jax.Array] = None,
     focal_gamma:   Optional[float]     = None,
+    emd_lambda:    Optional[float]     = None,
+    emd_omega:     float               = 1.0,
+    emd_mu:        float               = 0.0,
 ) -> jax.Array:
-    """Softmax cross-entropy with optional focal modulation and class weights.
+    """Softmax cross-entropy with composable focal modulation, class weights,
+    and a self-guided squared-EMD regulariser (Hou et al. 2016).
 
-    Three orthogonal, composable pieces over the per-sample CE term
+    Composable pieces over the per-sample CE term
     ``ce_i = -log softmax(logits_i)[y_i]``:
 
     * **basic** (defaults): plain mean CE.
-    * **focal** (``focal_gamma`` set): multiply each term by ``(1 - pt_i)**γ``
-      where ``pt_i = exp(-ce_i)`` is the predicted probability of the true
-      class — down-weights easy, confident-correct samples (Lin et al. 2017).
-    * **class-weighted** (``class_weights`` set): weight each term by
-      ``class_weights[y_i]`` and take a weighted mean (sum of weighted terms /
-      sum of weights), so the loss scale stays comparable regardless of weight
-      magnitudes. Use for class imbalance (inverse-frequency, effective-number
-      (Cui et al. 2019), median-frequency (Eigen & Fergus 2015), ...).
+    * **focal** (``focal_gamma`` set): multiply each CE term by
+      ``(1 - pt_i)**γ`` where ``pt_i = exp(-ce_i)`` — down-weights easy,
+      confident-correct samples (Lin et al. 2017).
+    * **squared-EMD regulariser** (``emd_lambda`` set): add
+      ``λ · Σ_j p_{i,j}^2 (|j - y_i|^ω + μ)`` to each sample, where
+      ``p_i = softmax(logits_i)`` and ``|j - y_i|`` is the ordinal ground
+      distance to the true class. ω sets distance sensitivity; a negative μ
+      makes near-class mass a *reward* (Hou et al. use the EMD term as a
+      regulariser on top of CE — the standalone EMD loss collapses to uniform,
+      so it is not offered on its own).
+    * **class-weighted** (``class_weights`` set): weight each per-sample loss
+      (CE + EMD term) by ``class_weights[y_i]`` and take a weighted mean (sum
+      of weighted terms / sum of weights), so the loss scale stays comparable
+      regardless of weight magnitudes. The weighting method is the caller's
+      choice (inverse-freq, effective-number (Cui et al. 2019), median-freq
+      (Eigen & Fergus 2015), ...) — this function only consumes the vector.
 
-    Setting both kwargs gives the class-balanced focal loss; the weighting
-    method is the caller's choice — this function only consumes the resulting
-    per-class weight vector.
+    Any subset of the kwargs may be combined.
 
     Parameters
     ----------
     logits : jax.Array  shape (B, n_classes)
-    labels : jax.Array  shape (B,)  integer class indices
+    labels : jax.Array  shape (B, )  integer class indices
     class_weights : jax.Array, optional  shape (n_classes,)
         Per-class weight, indexed by class label. None = uniform.
     focal_gamma : float, optional
         Focal focusing parameter γ ≥ 0. None (or 0) = no focal modulation.
+    emd_lambda : float, optional
+        Weight of the squared-EMD regulariser. None (or 0) = no regulariser.
+    emd_omega : float
+        Ground-distance power ω (default 1.0). Higher = penalise only far misses.
+    emd_mu : float
+        Ground-distance bias μ (default 0.0). Negative rewards near-class mass.
 
     Returns
     -------
@@ -374,10 +403,19 @@ def cross_entropy_loss(
     if focal_gamma:
         pt = jnp.exp(-ce)
         ce = ((1.0 - pt) ** focal_gamma) * ce
+
+    loss = ce
+    if emd_lambda:
+        probs = jax.nn.softmax(logits, axis=-1)
+        idx   = jnp.arange(logits.shape[-1])
+        dist  = jnp.abs(idx[None, :] - labels[:, None]).astype(probs.dtype)  # (B, C)
+        emd2  = jnp.sum(probs ** 2 * (dist ** emd_omega + emd_mu), axis=-1)  # (B,)
+        loss  = loss + emd_lambda * emd2
+
     if class_weights is not None:
         w = jnp.asarray(class_weights)[labels]
-        return jnp.sum(w * ce) / jnp.sum(w)
-    return jnp.mean(ce)
+        return jnp.sum(w * loss) / jnp.sum(w)
+    return jnp.mean(loss)
 
 
 def ordinal_probs(logits: jax.Array) -> jax.Array:
@@ -535,19 +573,45 @@ def list_losses() -> dict[str, str]:
     "cross_entropy",
     description=(
         "Softmax cross-entropy with integer labels. Optional kwargs compose: "
-        "focal_gamma (Lin et al. 2017 focal modulation) and class_weights "
-        "(length-n_classes per-class weights for imbalance). Basic / focal / "
-        "class-balanced / class-balanced-focal are all this one loss."
+        "focal_gamma (Lin et al. 2017 focal modulation), class_weights "
+        "(length-n_classes per-class weights for imbalance), and a squared-EMD "
+        "regulariser (emd_lambda/emd_omega/emd_mu, Hou et al. 2016). Basic / "
+        "focal / class-balanced / EMD-regularised and any combination are all "
+        "this one loss."
     ),
 )
 def _cross_entropy_loss(
     class_weights: Optional[list]  = None,
     focal_gamma:   Optional[float] = None,
+    emd_lambda:    Optional[float] = None,
+    emd_omega:     float           = 1.0,
+    emd_mu:        float           = 0.0,
 ) -> Callable[[jax.Array, jax.Array], jax.Array]:
     cw = jnp.asarray(class_weights) if class_weights is not None else None
 
     def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
         return cross_entropy_loss(
-            logits, labels, class_weights=cw, focal_gamma=focal_gamma
+            logits, labels, class_weights=cw, focal_gamma=focal_gamma,
+            emd_lambda=emd_lambda, emd_omega=emd_omega, emd_mu=emd_mu,
         )
+    return loss_fn
+
+
+@register_loss(
+    "coral",
+    description=(
+        "CORAL ordinal threshold loss (Cao et al. 2020): weighted sigmoid BCE "
+        "over K-1 cumulative-threshold binary tasks. Requires a CORAL head "
+        "(K-1 ordered logits from a shared feature + K-1 biases). kwargs: "
+        "n_classes, task_weights (optional length-(K-1) λ(k))."
+    ),
+)
+def _coral_loss(
+    n_classes:    int,
+    task_weights: Optional[list] = None,
+) -> Callable[[jax.Array, jax.Array], jax.Array]:
+    tw = jnp.asarray(task_weights) if task_weights is not None else None
+
+    def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
+        return ordinal_loss(logits, labels, n_classes=n_classes, task_weights=tw)
     return loss_fn

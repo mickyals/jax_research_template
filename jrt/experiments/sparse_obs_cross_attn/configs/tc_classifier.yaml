@@ -201,7 +201,17 @@ trainer:
   loss:                 cross_entropy
   loss_kwargs:          {}
     # focal_gamma:      2.0
-    # class_weights:    [1.0, ...]   # 11 values; see docs for weighting schemes
+    # emd_lambda:       0.1          # squared-EMD regulariser; emd_omega/emd_mu tune it
+    # class_weights:    [1.0, ...]   # 11 values (or use class_weight_scheme below)
+
+  # --- Class weighting (within-TC imbalance) ---
+  # If set, per-class weights are computed at setup from the train split's
+  # realized class counts (resolve_splits manifest) and injected as
+  # loss_kwargs.class_weights; the realized vector is stored back in the
+  # manifest. Background (class 0, count 0 in the TC table) stays weight 1.0.
+  # Schemes: none | inverse_freq | sqrt_inverse_freq | effective_number | median_freq
+  class_weight_scheme:  none
+  class_weight_beta:    0.999        # effective_number only
 
   # --- Early stopping ---
   patience:             15            # epochs without improvement before halting

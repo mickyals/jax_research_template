@@ -40,7 +40,8 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_confusion_matrix,
 )
 from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
+from training.class_weights import class_weights_from_counts
 from training.metrics import (
     cross_entropy,
     expected_calibration_error,
@@ -404,9 +405,32 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # ------------------------------------------------------------------
     # Trainer
     # ------------------------------------------------------------------
+    # Optional class weighting: derive per-class weights from the train split's
+    # realized class counts (computed once here, not per batch) and feed them to
+    # the loss via loss_kwargs['class_weights']. The realized vector is recorded
+    # in the manifest so the run is reproducible from its artifact.
+    manifest    = dm.manifest()
+    loss_kwargs = dict(trainer_cfg.get('loss_kwargs') or {})
+    cw_scheme   = trainer_cfg.get('class_weight_scheme', 'none')
+    if cw_scheme != 'none':
+        n_classes = config['model'].get('n_classes', N_CLASSES)
+        counts = [int(manifest['train']['class_counts'].get(str(c), 0))
+                  for c in range(n_classes)]
+        cw = class_weights_from_counts(
+            counts,
+            scheme = cw_scheme,
+            beta   = trainer_cfg.get('class_weight_beta', 0.999),
+        )
+        loss_kwargs['class_weights'] = cw.tolist()
+        manifest['train']['class_weights'] = {
+            'scheme':  cw_scheme,
+            'weights': cw.tolist(),
+        }
+        print(f"  class weighting [{cw_scheme}]: {np.round(cw, 3).tolist()}")
+
     metrics_fns = build_metrics_fns(
         loss        = trainer_cfg.get('loss', 'cross_entropy'),
-        loss_kwargs = trainer_cfg.get('loss_kwargs'),
+        loss_kwargs = loss_kwargs,
     )
     trainer     = Trainer(model, metrics_fns, trainer_cfg)
 
@@ -415,7 +439,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
 
     # Persist the resolved data split (manifest.json next to checkpoints +
     # logger copy) — the durable answer to "what did this run train on"
-    trainer.write_manifest(dm.manifest())
+    trainer.write_manifest(manifest)
 
     # ------------------------------------------------------------------
     # Callbacks

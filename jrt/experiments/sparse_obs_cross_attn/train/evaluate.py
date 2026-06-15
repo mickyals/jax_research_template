@@ -67,7 +67,8 @@ from training.trainer import Trainer
 # ---------------------------------------------------------------------------
 
 CLASS_NAMES: list[str] = [
-    'No Storm',     # 0  — background
+    'Background',    # 0  — absence (no TC at query); NOT the bottom of the SSHS
+                     #      organisational scale, a categorically separate class
     'SSHS -4',      # 1
     'SSHS -3',      # 2
     'SSHS -2',      # 3
@@ -307,7 +308,7 @@ def print_report(
         print(f"    {split}/ece_tempscaled: {ece_ts:.5f}  "
               f"(T={temperature:.3f} fit on val; lower = better calibrated)")
 
-    print(f"\n  Binary detection (TC vs. No Storm):")
+    print(f"\n  Binary detection (TC vs. Background):")
     print(f"    Accuracy : {bin_m['accuracy']:.4f}")
     print(f"    Precision: {bin_m['precision']:.4f}")
     print(f"    Recall   : {bin_m['recall']:.4f}")

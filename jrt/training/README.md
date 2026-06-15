@@ -109,11 +109,12 @@ loss_fn = get_loss("cross_entropy", focal_gamma=2.0, class_weights=[1.0]*11)
 
 | Name | Kwargs | Description |
 |------|--------|-------------|
-| `cross_entropy` | `focal_gamma` (float, optional), `class_weights` (length-`n_classes` list, optional) | Softmax CE; the two kwargs compose — none = basic, `focal_gamma` = focal loss (Lin et al. 2017), `class_weights` = class-balanced, both = class-balanced focal. Weights are a weighted mean so the loss scale stays comparable |
+| `cross_entropy` | `focal_gamma`, `class_weights` (length-`n_classes` list), `emd_lambda` / `emd_omega` / `emd_mu` — all optional | Softmax CE; kwargs compose freely. `focal_gamma` = focal loss (Lin et al. 2017); `class_weights` = class-balanced (weighted mean, scale-comparable); `emd_lambda` adds the squared-EMD regulariser `λ·Σ pᵢ²(|i−k|^ω+μ)` (Hou et al. 2016 — the working *regulariser* form; the standalone EMD loss is not offered). |
+| `coral` | `n_classes` (required), `task_weights` (length-`n_classes−1` list, optional) | CORAL ordinal threshold loss (Cao et al. 2020): weighted sigmoid BCE over K−1 cumulative-threshold tasks. **Requires a CORAL head** (K−1 ordered logits); decode with `ordinal_predict`. |
 
-Weighting is **method-agnostic**: the caller supplies the realized per-class weight vector (inverse-frequency, effective-number (Cui et al. 2019), median-frequency (Eigen & Fergus 2015), ...) — `cross_entropy` just consumes it. Compute it once from the train-split class counts and record it (e.g. in the run manifest).
+Class weighting is **method-agnostic**: the caller supplies the realized per-class vector. `training/class_weights.py::class_weights_from_counts(counts, scheme, beta)` derives it from class counts — `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` (Cui et al. 2019) / `median_freq` (Eigen & Fergus 2015); zero-count classes stay 1.0, present classes normalized to mean 1. Compute once from the train-split counts and record it (e.g. in the run manifest).
 
-Convention for classification experiments: a `trainer.loss` (+ `trainer.loss_kwargs`) config key selects the entry resolved via `get_loss` and bound to the `metrics_fns['loss']` key (which `loss_key` defaults to), so the training objective is configured the same way as `trainer.optimizer`/`trainer.scheduler`.
+Convention for classification experiments: a `trainer.loss` (+ `trainer.loss_kwargs`) config key selects the entry resolved via `get_loss` and bound to the `metrics_fns['loss']` key (which `loss_key` defaults to), so the training objective is configured the same way as `trainer.optimizer`/`trainer.scheduler`. An experiment may also compute `class_weights` at setup from a config `class_weight_scheme` (see the sparse_obs_cross_attn trainer config).
 
 ---
 

@@ -229,6 +229,10 @@ trainer:
   # separately for cross-run comparability.
   loss:                 cross_entropy
   loss_kwargs:          {}
+  # Class weighting from train-split counts (see tc_classifier.yaml):
+  # none | inverse_freq | sqrt_inverse_freq | effective_number | median_freq
+  class_weight_scheme:  none
+  class_weight_beta:    0.999
 
   # --- Early stopping ---
   patience:             8
