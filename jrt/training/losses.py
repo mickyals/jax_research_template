@@ -15,8 +15,9 @@ name via trainer.loss + trainer.loss_kwargs. Registered entries:
                         ``class_weights`` (imbalance), and a squared-EMD
                         regulariser (``emd_lambda``/``emd_omega``/``emd_mu``,
                         Hou et al. 2016).
-  * ``coral``         — CORAL ordinal threshold loss (Cao et al. 2020); needs a
-                        K-1-logit head.
+
+(A CORAL ordinal loss + K-1-logit head is a planned Tier-3 addition; not yet
+present.)
 
 Optax's element-wise losses (squared_error, etc.) are the computational backend
 and are re-exported below for direct use. MSE is the canonical regression base;
@@ -47,7 +48,6 @@ from utils.registry import Registry
 # ---------------------------------------------------------------------------
 
 squared_error                             = _optax.squared_error              # (pred-target)^2  — used by mse
-sigmoid_binary_cross_entropy              = _optax.sigmoid_binary_cross_entropy  # used by ordinal_loss (CORAL)
 softmax_cross_entropy_with_integer_labels = _optax.softmax_cross_entropy_with_integer_labels  # used by cross_entropy_loss
 
 
@@ -153,11 +153,11 @@ def mse(
     """
     _check_shapes(pred, target)
     if mask is None:
-        return jnp.mean(_optax.squared_error(pred, target))
+        return jnp.mean(squared_error(pred, target))
     if mask is True:
         mask = _mask_from_target(target)
     target_safe = _nan_to_zero(target)
-    return _apply_mask(_optax.squared_error(pred, target_safe), mask)
+    return _apply_mask(squared_error(pred, target_safe), mask)
 
 
 @register_loss(
@@ -173,78 +173,9 @@ def _mse(masked: bool = False) -> Callable[[jax.Array, jax.Array], jax.Array]:
     return loss_fn
 
 
-# ---------------------------------------------------------------------------
-# Ordinal classification (CORAL)
-# ---------------------------------------------------------------------------
-
-def ordinal_loss(
-    logits:       jax.Array,
-    labels:       jax.Array,
-    n_classes:    int,
-    task_weights: Optional[jax.Array] = None,
-) -> jax.Array:
-    """CORAL ordinal loss over K-1 cumulative thresholds (Cao et al. 2020).
-
-    For K ordinal classes labelled {0, ..., K-1}, the model produces K-1
-    logits from a shared feature ``g(x)`` plus K-1 independent biases, each
-    representing P(Y > k) via a sigmoid. Loss is the (per-task weighted) mean
-    sigmoid BCE across all K-1 thresholds, built on
-    sigmoid_binary_cross_entropy.
-
-    Parameters
-    ----------
-    logits : jax.Array  shape (B, n_classes - 1)
-    labels : jax.Array  shape (B,)  integer class labels in {0, ..., K-1}
-    n_classes : int
-    task_weights : jax.Array, optional  shape (n_classes - 1,)
-        Per-task importance weights λ(k) > 0 (Cao et al. Eq. 4). Each weights
-        the *whole* binary CE of threshold k (both pos and neg terms) — a task
-        weight, distinct from a class weight. None = uniform (the paper's
-        default). When given, a weighted mean over thresholds keeps the scale
-        comparable; classifier consistency holds for any positive weights.
-
-    Returns
-    -------
-    jax.Array  scalar
-
-    Example
-    -------
-    >>> ordinal_loss(jnp.zeros((4, 9)), jnp.array([0, 3, 7, 9]), n_classes=10).shape
-    ()
-    """
-    thresholds = jnp.arange(n_classes - 1)
-    targets    = (labels[:, None] > thresholds[None, :]).astype(jnp.float32)
-    bce        = _optax.sigmoid_binary_cross_entropy(logits, targets)   # (B, K-1)
-    if task_weights is not None:
-        tw = jnp.asarray(task_weights)
-        return jnp.mean(jnp.sum(tw[None, :] * bce, axis=-1) / jnp.sum(tw))
-    return jnp.mean(bce)
-
-
-def ordinal_predict(logits: jax.Array) -> jax.Array:
-    """Convert ordinal logits to predicted class indices.
-
-    Returns k = sum(sigmoid(logit_j) > 0.5 for j in 0..K-2).
-
-    Parameters
-    ----------
-    logits : jax.Array  shape (B, K-1)
-
-    Returns
-    -------
-    jax.Array  shape (B, )  int32
-
-    Example
-    -------
-    >>> ordinal_predict(jnp.array([[10., 10., -10., -10., -10., -10., -10., -10., -10.]]))
-    Array([2], dtype=int32)
-    """
-    return jnp.sum(jax.nn.sigmoid(logits) > 0.5, axis=-1).astype(jnp.int32)
-
-
-# ---------------------------------------------------------------------------
-# Ordinal classification (squared EMD over class CDFs)
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# Cross-entropy (softmax) — composable: focal + class weights + EMD regulariser
+# -------------------------------------------------------------------------
 
 def cross_entropy_loss(
     logits:        jax.Array,
@@ -300,7 +231,7 @@ def cross_entropy_loss(
     -------
     jax.Array  scalar
     """
-    ce = _optax.softmax_cross_entropy_with_integer_labels(logits, labels)
+    ce = softmax_cross_entropy_with_integer_labels(logits, labels)
     if focal_gamma:
         pt = jnp.exp(-ce)
         ce = ((1.0 - pt) ** focal_gamma) * ce
@@ -317,32 +248,6 @@ def cross_entropy_loss(
         w = jnp.asarray(class_weights)[labels]
         return jnp.sum(w * loss) / jnp.sum(w)
     return jnp.mean(loss)
-
-
-def ordinal_probs(logits: jax.Array) -> jax.Array:
-    """Convert ordinal logits to a class probability distribution.
-
-    Derives P(Y = k) from cumulative probabilities P(Y > k) = sigmoid(logit_k).
-    Differences are clamped to [0, 1] to guard against non-monotone outputs.
-
-    Parameters
-    ----------
-    logits : jax.Array  shape (B, K-1)
-
-    Returns
-    -------
-    jax.Array  shape (B, K)
-
-    Example
-    -------
-    >>> p = ordinal_probs(jnp.zeros((2, 9))); p.shape
-    (2, 10)
-    """
-    cum       = jax.nn.sigmoid(logits)
-    ones      = jnp.ones((*logits.shape[:-1], 1))
-    zeros     = jnp.zeros((*logits.shape[:-1], 1))
-    augmented = jnp.concatenate([ones, cum, zeros], axis=-1)
-    return jnp.clip(augmented[..., :-1] - augmented[..., 1:], 0.0, 1.0)
 
 
 @register_loss(
@@ -372,22 +277,3 @@ def _cross_entropy_loss(
         )
     return loss_fn
 
-
-@register_loss(
-    "coral",
-    description=(
-        "CORAL ordinal threshold loss (Cao et al. 2020): weighted sigmoid BCE "
-        "over K-1 cumulative-threshold binary tasks. Requires a CORAL head "
-        "(K-1 ordered logits from a shared feature + K-1 biases). kwargs: "
-        "n_classes, task_weights (optional length-(K-1) λ(k))."
-    ),
-)
-def _coral_loss(
-    n_classes:    int,
-    task_weights: Optional[list] = None,
-) -> Callable[[jax.Array, jax.Array], jax.Array]:
-    tw = jnp.asarray(task_weights) if task_weights is not None else None
-
-    def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
-        return ordinal_loss(logits, labels, n_classes=n_classes, task_weights=tw)
-    return loss_fn

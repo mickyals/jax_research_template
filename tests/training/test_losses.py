@@ -11,12 +11,8 @@ TestCrossEntropyLoss    compositional CE: defaults match plain CE; focal
                         down-weights easy examples; class weights amplify rare
                         classes; EMD regulariser penalises far mass; all pieces
                         compose; shape/jit/grad
-TestOrdinalLoss         CORAL: shape, perfect thresholds ~0, uniform task
-                        weights == default, task weights change loss,
-                        ordinal_predict, grad
-TestLossRegistry        register_loss/get_loss/list_losses; cross_entropy with
-                        focal_gamma/class_weights/emd kwargs; coral entry +
-                        task_weights; filtering/warnings
+TestLossRegistry        register_loss/get_loss/list_losses; mse + cross_entropy
+                        (focal_gamma/class_weights/emd kwargs); filtering/warnings
 """
 
 import jax
@@ -30,12 +26,9 @@ from training.losses import (
     mse,
     # optax re-exports
     squared_error,
-    sigmoid_binary_cross_entropy,
     softmax_cross_entropy_with_integer_labels,
     # classification
     cross_entropy_loss,
-    ordinal_loss,
-    ordinal_predict,
     # loss registry
     LOSSES, get_loss, list_losses, register_loss,
 )
@@ -135,9 +128,6 @@ class TestReExports:
 
     def test_squared_error_importable(self):
         assert callable(squared_error)
-
-    def test_sigmoid_binary_cross_entropy_importable(self):
-        assert callable(sigmoid_binary_cross_entropy)
 
     def test_softmax_cross_entropy_with_integer_labels_importable(self):
         assert callable(softmax_cross_entropy_with_integer_labels)
@@ -270,59 +260,6 @@ class TestCrossEntropyLoss:
 
 
 # ---------------------------------------------------------------------------
-# TestOrdinalLoss (CORAL)
-# ---------------------------------------------------------------------------
-
-class TestOrdinalLoss:
-
-    B_CLS = 4
-    N_CLS = 11   # -> K-1 = 10 threshold logits
-
-    def _rand(self, seed=0):
-        rng = np.random.default_rng(seed)
-        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS - 1)).astype(np.float32))
-        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
-        return logits, labels
-
-    def test_scalar_shape(self):
-        logits, labels = self._rand()
-        assert ordinal_loss(logits, labels, n_classes=self.N_CLS).shape == ()
-
-    def test_perfect_thresholds_near_zero(self):
-        # Confident, correctly-ordered thresholds for label 3: first 3 logits +, rest -.
-        labels = jnp.array([3], dtype=jnp.int32)
-        logits = jnp.concatenate([jnp.full((1, 3), 20.0), jnp.full((1, self.N_CLS - 1 - 3), -20.0)], axis=-1)
-        assert float(ordinal_loss(logits, labels, n_classes=self.N_CLS)) < 1e-3
-
-    def test_uniform_task_weights_match_default(self):
-        logits, labels = self._rand()
-        tw = jnp.ones(self.N_CLS - 1)
-        # weighted mean over thresholds with uniform weights == plain mean
-        assert jnp.allclose(
-            ordinal_loss(logits, labels, n_classes=self.N_CLS, task_weights=tw),
-            ordinal_loss(logits, labels, n_classes=self.N_CLS),
-        )
-
-    def test_task_weights_change_loss(self):
-        logits, labels = self._rand()
-        tw = jnp.ones(self.N_CLS - 1).at[0].set(5.0)
-        assert not jnp.allclose(
-            ordinal_loss(logits, labels, n_classes=self.N_CLS, task_weights=tw),
-            ordinal_loss(logits, labels, n_classes=self.N_CLS),
-        )
-
-    def test_ordinal_predict_counts_positive_thresholds(self):
-        logits = jnp.array([[10., 10., -10., -10., -10., -10., -10., -10., -10., -10.]])
-        assert int(ordinal_predict(logits)[0]) == 2
-
-    def test_grad_flows(self):
-        logits, labels = self._rand()
-        grad = jax.grad(lambda l: ordinal_loss(l, labels, n_classes=self.N_CLS))(logits)
-        assert grad.shape == logits.shape
-        assert jnp.all(jnp.isfinite(grad))
-
-
-# ---------------------------------------------------------------------------
 # TestLossRegistry
 # ---------------------------------------------------------------------------
 
@@ -340,30 +277,9 @@ class TestLossRegistry:
     def test_cross_entropy_registered(self):
         assert 'CROSS_ENTROPY' in LOSSES
 
-    def test_coral_registered(self):
-        assert 'CORAL' in LOSSES
-
     def test_get_loss_cross_entropy_with_emd(self):
         logits, labels = self._rand_logits_labels()
         loss_fn = get_loss('cross_entropy', emd_lambda=0.5, emd_omega=2.0, emd_mu=-1.0)
-        out = loss_fn(logits, labels)
-        assert out.shape == ()
-        assert bool(jnp.isfinite(out))
-
-    def test_get_loss_coral(self):
-        rng = np.random.default_rng(0)
-        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS - 1)).astype(np.float32))
-        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
-        loss_fn = get_loss('coral', n_classes=self.N_CLS)
-        out = loss_fn(logits, labels)
-        expected = ordinal_loss(logits, labels, n_classes=self.N_CLS)
-        assert jnp.allclose(out, expected)
-
-    def test_get_loss_coral_task_weights(self):
-        rng = np.random.default_rng(0)
-        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS - 1)).astype(np.float32))
-        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
-        loss_fn = get_loss('coral', n_classes=self.N_CLS, task_weights=[1.0] * (self.N_CLS - 1))
         out = loss_fn(logits, labels)
         assert out.shape == ()
         assert bool(jnp.isfinite(out))
@@ -420,7 +336,6 @@ class TestLossRegistry:
     def test_list_losses_returns_descriptions(self):
         names = list_losses()
         assert 'CROSS_ENTROPY' in names
-        assert 'CORAL' in names
         assert all(isinstance(v, str) for v in names.values())
 
     def test_register_loss_duplicate_raises(self):

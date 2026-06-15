@@ -6,9 +6,12 @@ JSON-serialisable run manifest.
 
 Two strategies (decision 3, plan-data-splits-sampling):
 
-'season' reproduces the previous hardcoded IBTRACS_TRAIN/VAL/TEST_SEASONS
-behaviour exactly — those constants become the default config values, not
-policy baked into the dataset classes.
+'season' splits by ISO_TIME calendar year — both the IBTrACS track rows
+(filter_seasons, now year-based) and the insitu/background stream
+(filter_years) use the observation year, so the two streams stay aligned even
+for cross-New-Year storms (the IBTRACS_*_SEASONS constants remain the default
+config values). NOTE the config key is still named `seasons:` pending the
+season→year rename.
 
 'sid' is the hybrid design: test = edge years (explicit config list);
 remaining interior storms are assigned train/val by SID at a seeded,
@@ -129,6 +132,10 @@ def _resolve_season(
     ibtracs_full: IBTrACSDataset,
     insitu_full: Optional[InsituLandDataset],
 ) -> dict:
+    # Both IBTrACS (filter_seasons) and insitu (filter_years) split by ISO_TIME
+    # calendar year, so the TC and background streams are year-aligned (a
+    # cross-New-Year storm lands in the split matching its observation times,
+    # not its SEASON label).
     seasons: dict[str, list[int]] = {}
     for name in SPLIT_NAMES:
         if name not in split_config or 'seasons' not in split_config[name]:

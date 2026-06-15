@@ -39,9 +39,12 @@ def _make_ibtracs_npz(tmp_path, n_per_season=8):
         for i in range(n_per_season):
             sids.append(f"{s}A" if i < n_per_season // 2 else f"{s}B")
 
+    # ISO_TIME year aligned with SEASON (filter_seasons now filters on the
+    # observation year, not the SEASON column).
     iso_times = np.array([
-        1118253600000000000 + i * 21600_000_000_000
-        for i in range(n)
+        np.datetime64(f"{s}-09-01", "ns").astype(np.int64)
+        + (i % n_per_season) * 21600_000_000_000
+        for i, s in enumerate(seasons_list)
     ], dtype=np.int64)
 
     data = {

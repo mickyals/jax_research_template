@@ -207,11 +207,16 @@ class IBTrACSDataset(NpzDataset):
     # ------------------------------------------------------------------
 
     def filter_seasons(self, seasons: list[int]) -> IBTrACSDataset:
-        """Keep rows whose SEASON is in seasons.
+        """Keep rows whose ISO_TIME calendar year is in ``seasons``.
 
-        SEASON is stored as float32 — comparison is done as float.
+        Filters on the observation timestamp's year (not the SEASON column), so
+        the TC split aligns with the insitu/background stream (also split by
+        ISO year). This handles cross-New-Year storms correctly — e.g. Zeta
+        (SEASON 2005, track Jan 2006) goes to the 2006 split, matching its
+        actual observation times.
         """
-        return self.filter_column('SEASON', [float(s) for s in seasons])
+        years = self.iso_time.year.to_numpy()
+        return self._mask_to_dataset(np.isin(years, list(seasons)))
 
     def filter_sids(self, sids: list[str]) -> IBTrACSDataset:
         """Keep rows whose SID is in sids."""

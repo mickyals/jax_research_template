@@ -9,11 +9,14 @@ seed: 3678
 # Changing this affects both the data preprocessing pipeline and the model, so
 # it lives here rather than being duplicated in data: and model:.
 #
+# The model is coordinate-agnostic (Senseiver single projection over
+# [obs; mask; Fourier(coords)]); this only sets the datamodule's coordinate
+# convention.
 # unit_circle  station_coords = [x, y] storm-centred local map
-#              (norm_dist·sin(bearing), norm_dist·cos(bearing)), each in [-1, 1]
-#              query_coords   = [0, 0] = storm position; query = learned content
-# domain       station_coords = [norm_lat_rad, norm_lon_rad] absolute position
-#              query_coords   = same encoding; pos_proj adds a positional term
+#              (norm_dist·sin(bearing), norm_dist·cos(bearing)), each in [-1, 1];
+#              query_coords = [0, 0] = storm position
+# domain       station_coords = [norm_lat_rad, norm_lon_rad] absolute position;
+#              query_coords = same encoding
 location_encoding:      unit_circle
 
 
@@ -44,12 +47,12 @@ data:
   split:
     strategy: season
     train:
-      seasons: [2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014,
-                2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023]
+      seasons: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014,
+                2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022]
     val:
-      seasons: [2024]
+      seasons: [2023, 2024]
     test:
-      seasons: [2005, 2025]
+      seasons: [2025]
       hard_test: multi_storm
 
   # --- Station filtering ---
@@ -144,8 +147,8 @@ model:
   mlp_initializer:      xavier_uniform
 
   # --- Regularisation ---
-  dropout_rate:         0.0
-  attn_dropout_rate:    0.0
+  dropout_rate:         0.25
+  attn_dropout_rate:    0.25
 
   # --- Coordinate embedding ---
   fourier_dim:          64            # GaussianFourierEmbedding output dim — must be even
