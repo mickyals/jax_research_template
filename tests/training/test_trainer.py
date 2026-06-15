@@ -39,9 +39,15 @@ import pytest
 from flax import linen as nn
 
 from datasets.datamodule import ArrayLoader
-from training.losses import mae, mse
+from training.losses import mse
 from training.trainer import Trainer, TrainState, _TQDM_AVAILABLE
 from utils.jax_core.helpers import create_rng
+
+
+def mae(pred, target):
+    """Local mean-absolute-error — a second distinct metric for multi-metric
+    trainer tests (jrt.training.losses now ships only mse)."""
+    return jnp.mean(jnp.abs(pred - target))
 
 
 # ---------------------------------------------------------------------------

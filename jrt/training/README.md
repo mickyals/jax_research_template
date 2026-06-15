@@ -81,24 +81,19 @@ test_metrics = trainer.test(dm.test_loader())
 
 ## `losses.py`
 
-Scalar loss functions for JAX/Flax training. All functions have the signature `(pred, target) -> scalar`.
+Loss functions for JAX/Flax training.
 
 | Function | Description |
 |----------|-------------|
-| `mse(pred, target)` | Mean squared error |
-| `rmse(pred, target)` | Root mean squared error |
-| `mae(pred, target)` | Mean absolute error |
-| `huber(pred, target, delta)` | Huber loss |
-| `log_cosh(pred, target)` | Log-cosh loss |
-| `masked_mse`, `masked_rmse`, ... | NaN-safe variants; `mask=True` means valid |
-| `cross_entropy_loss(logits, labels, class_weights=None, focal_gamma=None)` | Softmax CE with composable focal modulation (Lin et al. 2017) and per-class weighting (weighted mean) — basic / focal / class-balanced / class-balanced-focal are all this one function |
-| `ordinal_loss(logits, labels)` | CORAL ordinal cross-entropy (Cao et al. 2020) |
-| `ordinal_predict(logits)` | Predicted class from ordinal logits |
-| `ordinal_probs(logits)` | Per-class probabilities from ordinal logits |
+| `mse(pred, target, mask=None)` | Mean squared error. `mask=None` plain; `mask=True` NaN-safe (mask from finite targets, returns 0.0 if none valid); `mask=<array>` explicit |
+| `cross_entropy_loss(logits, labels, class_weights=None, focal_gamma=None, emd_lambda=None, emd_omega=1.0, emd_mu=0.0)` | Softmax CE; composes focal modulation (Lin et al. 2017), per-class weighting (weighted mean), and a squared-EMD regulariser (Hou et al. 2016) |
+| `ordinal_loss(logits, labels, n_classes, task_weights=None)` | CORAL ordinal threshold loss (Cao et al. 2020); per-task λ(k) optional |
+| `ordinal_predict(logits)` | Predicted class from CORAL ordinal logits |
+| `ordinal_probs(logits)` | Per-class probabilities from CORAL ordinal logits |
 
-Masked variants derive the mask from `jnp.isfinite(target)` when no mask is passed — NaN targets are excluded automatically. They return `0.0` when no valid positions exist.
+MSE is the canonical regression base; RMSE/MAE/Huber/log-cosh are available element-wise in `optax.losses` and can be wrapped + registered when a regression experiment needs them. The element-wise functions used by the registered losses (`squared_error`, `sigmoid_binary_cross_entropy`, `softmax_cross_entropy_with_integer_labels`) are re-exported from `training.losses` for convenience.
 
-**Classification loss registry** — string-addressable, mirrors the optimizer/scheduler registries below:
+**Loss registry** — string-addressable, mirrors the optimizer/scheduler registries below:
 
 ```python
 from training.losses import get_loss, list_losses
@@ -109,12 +104,13 @@ loss_fn = get_loss("cross_entropy", focal_gamma=2.0, class_weights=[1.0]*11)
 
 | Name | Kwargs | Description |
 |------|--------|-------------|
+| `mse` | `masked` (bool) | Mean squared error; `masked: true` = NaN-safe over finite targets |
 | `cross_entropy` | `focal_gamma`, `class_weights` (length-`n_classes` list), `emd_lambda` / `emd_omega` / `emd_mu` — all optional | Softmax CE; kwargs compose freely. `focal_gamma` = focal loss (Lin et al. 2017); `class_weights` = class-balanced (weighted mean, scale-comparable); `emd_lambda` adds the squared-EMD regulariser `λ·Σ pᵢ²(|i−k|^ω+μ)` (Hou et al. 2016 — the working *regulariser* form; the standalone EMD loss is not offered). |
 | `coral` | `n_classes` (required), `task_weights` (length-`n_classes−1` list, optional) | CORAL ordinal threshold loss (Cao et al. 2020): weighted sigmoid BCE over K−1 cumulative-threshold tasks. **Requires a CORAL head** (K−1 ordered logits); decode with `ordinal_predict`. |
 
-Class weighting is **method-agnostic**: the caller supplies the realized per-class vector. `training/class_weights.py::class_weights_from_counts(counts, scheme, beta)` derives it from class counts — `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` (Cui et al. 2019) / `median_freq` (Eigen & Fergus 2015); zero-count classes stay 1.0, present classes normalized to mean 1. Compute once from the train-split counts and record it (e.g. in the run manifest).
+Class weighting is **method-agnostic**: the caller supplies the realized per-class vector. The deriving helper lives with the data layer (class imbalance is a data property) — `datasets/class_weights.py::class_weights_from_counts(counts, scheme, beta)` — `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` (Cui et al. 2019) / `median_freq` (Eigen & Fergus 2015); zero-count classes stay 1.0, present classes normalized to mean 1. Compute once from the train-split counts and record it (e.g. in the run manifest).
 
-Convention for classification experiments: a `trainer.loss` (+ `trainer.loss_kwargs`) config key selects the entry resolved via `get_loss` and bound to the `metrics_fns['loss']` key (which `loss_key` defaults to), so the training objective is configured the same way as `trainer.optimizer`/`trainer.scheduler`. An experiment may also compute `class_weights` at setup from a config `class_weight_scheme` (see the sparse_obs_cross_attn trainer config).
+Convention for classification experiments: a `trainer.loss` (+ `trainer.loss_kwargs`) config key selects the entry resolved via `get_loss` and bound to the `metrics_fns['loss']` key (which `loss_key` defaults to), so the training objective is configured the same way as `trainer.optimizer`/`trainer.scheduler`. An experiment may also compute `class_weights` at setup from a `data.class_weight_scheme` (see the sparse_obs_cross_attn data config); an explicit `loss_kwargs.class_weights` overrides it.
 
 ---
 
@@ -204,7 +200,8 @@ Full-set metrics — computed over accumulated predictions, not per-batch (too n
 | Function | Description |
 |----------|-------------|
 | `quadratic_weighted_kappa(cm)` | Cohen's kappa with quadratic class-distance weights, from a confusion matrix |
-| `expected_calibration_error(probs, labels, n_bins=15)` | ECE — confidence vs. accuracy calibration gap |
+| `expected_calibration_error(probs, labels, n_bins=15)` | ECE — occupancy-weighted confidence-vs-accuracy gap |
+| `maximum_calibration_error(probs, labels, n_bins=15)` | MCE — worst single bin's gap (high-stakes; noisier than ECE) |
 
 Post-hoc calibration — temperature scaling (Guo et al. 2017), fit on a held-out split and applied to the eval split:
 

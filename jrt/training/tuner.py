@@ -70,7 +70,7 @@ Usage
         suggest_fn       = suggest_fn,
         base_config      = config['trainer'],
         model_fn         = model_fn,
-        metrics_fns      = {'masked_mse': masked_mse},
+        metrics_fns      = {'mse': mse},
         train_loader_fn  = lambda: dm.train_loader(batch_size=256),
         val_loader_fn    = lambda: dm.val_loader(batch_size=256),
         study_name       = 'ibtracs_siren',

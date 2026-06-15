@@ -1,7 +1,7 @@
 # core/pooling.py
 import inspect
 import warnings
-from typing import Optional, Sequence, Union
+from typing import Sequence, Union
 
 import jax
 import jax.numpy as jnp

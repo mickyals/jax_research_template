@@ -49,6 +49,7 @@ from training.metrics import (
     apply_temperature,
     expected_calibration_error,
     fit_temperature,
+    maximum_calibration_error,
     quadratic_weighted_kappa,
 )
 from experiments.sparse_obs_cross_attn.plotting.plotting import (
@@ -283,6 +284,7 @@ def print_report(
     qwk   = quadratic_weighted_kappa(cm)
     probs = np.asarray(jax.nn.softmax(jnp.array(logits), axis=-1))
     ece   = expected_calibration_error(probs, labels)
+    mce   = maximum_calibration_error(probs, labels)
     if temperature != 1.0:
         probs_ts = np.asarray(
             jax.nn.softmax(jnp.array(apply_temperature(logits, temperature)), axis=-1)
@@ -303,7 +305,8 @@ def print_report(
         val = float(fn(logits_j, labels_j))
         print(f"    {split}/{name}: {val:.5f}")
     print(f"    {split}/qwk: {qwk:.5f}  (ordinal agreement; 1=perfect, 0=chance)")
-    print(f"    {split}/ece: {ece:.5f}  (calibration gap; 0=perfectly calibrated)")
+    print(f"    {split}/ece: {ece:.5f}  (mean calibration gap; 0=perfectly calibrated)")
+    print(f"    {split}/mce: {mce:.5f}  (worst-bin calibration gap)")
     if temperature != 1.0:
         print(f"    {split}/ece_tempscaled: {ece_ts:.5f}  "
               f"(T={temperature:.3f} fit on val; lower = better calibrated)")

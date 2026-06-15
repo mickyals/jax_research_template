@@ -158,6 +158,11 @@ data:
   # batch_size is set in trainer: and propagated here by tune.py.
   tc_fraction:            0.5         # 50/50 balanced for tuning
 
+  # Class weighting from train-split counts (see tc_classifier.yaml):
+  # none | inverse_freq | sqrt_inverse_freq | effective_number | median_freq
+  class_weight_scheme:    none
+  class_weight_beta:      0.999
+
   # --- Domain ---
   fov_lat:                [0.0,  30.0]
   fov_lon:                [-100.0, -45.0]
@@ -229,10 +234,6 @@ trainer:
   # separately for cross-run comparability.
   loss:                 cross_entropy
   loss_kwargs:          {}
-  # Class weighting from train-split counts (see tc_classifier.yaml):
-  # none | inverse_freq | sqrt_inverse_freq | effective_number | median_freq
-  class_weight_scheme:  none
-  class_weight_beta:    0.999
 
   # --- Early stopping ---
   patience:             8

@@ -13,7 +13,7 @@ TestClassWeightsFromCounts
 import numpy as np
 import pytest
 
-from training.class_weights import SCHEMES, class_weights_from_counts
+from datasets.class_weights import SCHEMES, class_weights_from_counts
 
 
 COUNTS = np.array([0, 72, 1356, 96, 808, 2935, 738, 337, 288, 271, 54], dtype=float)

@@ -18,6 +18,8 @@ TestQuadraticWeightedKappa
 TestExpectedCalibrationError
                       perfectly-calibrated probs ~ 0; confident-but-wrong is
                       high; empty-bin and single-sample don't crash; in [0,1]
+TestMaximumCalibrationError
+                      empty -> 0; MCE >= ECE; confident-but-wrong high; in [0,1]
 TestTemperatureScaling
                       apply divides + preserves argmax; empty -> T=1;
                       overconfident -> T>1 and lower ECE; calibrated -> T~1;
@@ -36,6 +38,7 @@ from training.metrics import (
     expected_calibration_error,
     fit_temperature,
     mae_class,
+    maximum_calibration_error,
     quadratic_weighted_kappa,
 )
 
@@ -275,6 +278,39 @@ class TestExpectedCalibrationError:
         probs  = np.exp(logits) / np.exp(logits).sum(axis=-1, keepdims=True)
         ece    = expected_calibration_error(probs, labels)
         assert 0.0 <= ece <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# TestMaximumCalibrationError
+# ---------------------------------------------------------------------------
+
+class TestMaximumCalibrationError:
+
+    def test_empty_input_gives_zero(self):
+        assert maximum_calibration_error(np.zeros((0, N_CLS)),
+                                         np.zeros((0,), dtype=np.int64)) == pytest.approx(0.0)
+
+    def test_mce_at_least_ece(self):
+        # worst bin >= occupancy-weighted average, always.
+        rng    = np.random.default_rng(0)
+        n      = 300
+        labels = rng.integers(0, N_CLS, size=n)
+        probs  = rng.random((n, N_CLS)); probs /= probs.sum(-1, keepdims=True)
+        assert (maximum_calibration_error(probs, labels)
+                >= expected_calibration_error(probs, labels) - 1e-9)
+
+    def test_confident_but_wrong_is_high(self):
+        n      = 200
+        labels = np.zeros(n, dtype=np.int64)
+        probs  = np.full((n, N_CLS), (1.0 - 0.95) / (N_CLS - 1))
+        probs[:, 1] = 0.95            # confident on the wrong class
+        assert maximum_calibration_error(probs, labels) > 0.5
+
+    def test_output_in_unit_interval(self):
+        logits = np.asarray(_rand_logits())
+        labels = np.asarray(_rand_labels())
+        probs  = np.exp(logits) / np.exp(logits).sum(axis=-1, keepdims=True)
+        assert 0.0 <= maximum_calibration_error(probs, labels) <= 1.0
 
 
 # ---------------------------------------------------------------------------

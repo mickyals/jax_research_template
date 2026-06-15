@@ -1,7 +1,7 @@
 # core/nets/conv.py
 import inspect
 import warnings
-from typing import Optional, Callable, Tuple, Union
+from typing import Optional
 
 import jax
 import jax.numpy as jnp

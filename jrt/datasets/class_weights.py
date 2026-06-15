@@ -1,8 +1,10 @@
 """
-training/class_weights.py
+datasets/class_weights.py
 
-Derive per-class loss weights from class counts — a small, dataset-agnostic
-helper for the `class_weights` kwarg of `training.losses.cross_entropy_loss`.
+Derive per-class loss weights from class counts — a small data-distribution
+helper. Class imbalance is a property of the data, so this lives with the
+datasets layer (counts come from the resolve_splits manifest); the result
+feeds the `class_weights` kwarg of `training.losses.cross_entropy_loss`.
 
 The math is the same family across schemes (rarer class -> larger weight); they
 differ only in how aggressively they up-weight:

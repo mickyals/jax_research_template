@@ -95,7 +95,6 @@ Positional encoding  (optional; applied after to_Xy, before normalisation)
 
 from __future__ import annotations
 
-import warnings
 from abc import ABC, abstractmethod
 
 import jax

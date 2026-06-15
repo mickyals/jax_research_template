@@ -54,11 +54,11 @@ get_optimizer("LBFGS", ...) raises NotImplementedError until then.
 
 from __future__ import annotations
 
-import inspect
-import warnings
 from typing import Union
 
 import optax
+
+from utils.registry import Registry
 
 # Schedule type alias: int -> float
 Schedule = Union[float, optax.Schedule]
@@ -68,44 +68,8 @@ Schedule = Union[float, optax.Schedule]
 # Optimizer registry
 # ---------------------------------------------------------------------------
 
-OPTIMIZERS: dict[str, dict] = {}
-
-
-def register_optimizer(name: str, description: str = ""):
-    """Register an optimizer factory by name.
-
-    Parameters
-    ----------
-    name : str
-        Registry key (case-insensitive).
-    description : str, optional
-        Short description shown by list_optimizers().
-
-    Returns
-    -------
-    callable
-        Function decorator.
-
-    Raises
-    ------
-    ValueError
-        If an optimizer with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_optimizer("MY_OPT", description="Custom optimizer")
-    ... def _my_opt(learning_rate, eps: float = 1e-8):
-    ...     return optax.adam(learning_rate, eps=eps)
-    """
-    name = name.upper()
-
-    def decorator(fn):
-        if name in OPTIMIZERS:
-            raise ValueError(f"Optimizer '{name}' is already registered.")
-        OPTIMIZERS[name] = {"fn": fn, "description": description}
-        return fn
-
-    return decorator
+OPTIMIZERS = Registry("Optimizer")
+register_optimizer = OPTIMIZERS.register
 
 
 def get_optimizer(
@@ -115,19 +79,8 @@ def get_optimizer(
 ) -> optax.GradientTransformation:
     """Instantiate a registered optimizer.
 
-    Parameters
-    ----------
-    name : str
-        Registry key (case-insensitive).
-    learning_rate : float or optax.Schedule
-        Fixed scalar lr or a schedule callable returned by get_scheduler().
-    **kwargs
-        Forwarded to the optimizer factory. Unknown kwargs trigger a
-        UserWarning and are dropped rather than causing a TypeError.
-
-    Returns
-    -------
-    optax.GradientTransformation
+    Case-insensitive; ``learning_rate`` is forwarded to the factory and other
+    unknown kwargs are dropped with a UserWarning (see utils.registry).
 
     Raises
     ------
@@ -142,117 +95,27 @@ def get_optimizer(
     >>> opt = get_optimizer("adam", learning_rate=get_scheduler("cosine_decay",
     ...                             init_value=1e-3, decay_steps=10_000))
     """
-    name = name.upper()
-    if name not in OPTIMIZERS:
-        available = ", ".join(sorted(OPTIMIZERS.keys()))
-        raise ValueError(
-            f"Optimizer '{name}' is not registered. Available: {available}"
-        )
-
-    fn = OPTIMIZERS[name]["fn"]
-
-    if kwargs:
-        sig = inspect.signature(fn)
-        valid = {
-            k for k, p in sig.parameters.items()
-            if k not in ("learning_rate",)
-            and p.kind not in (
-                inspect.Parameter.VAR_POSITIONAL,
-                inspect.Parameter.VAR_KEYWORD,
-            )
-        }
-        unknown = set(kwargs.keys()) - valid
-        if unknown:
-            warnings.warn(
-                f"get_optimizer('{name}'): unknown kwargs {unknown} will be "
-                f"ignored. Valid kwargs: {valid or 'none'}.",
-                UserWarning,
-                stacklevel=2,
-            )
-        kwargs = {k: v for k, v in kwargs.items() if k in valid}
-
-    return fn(learning_rate, **kwargs)
+    return OPTIMIZERS.get(name, learning_rate=learning_rate, **kwargs)
 
 
 def list_optimizers() -> dict[str, str]:
-    """Return all registered optimizer names and their descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_optimizers()
-    {'ADAM': 'Adam (Kingma & Ba 2015)', 'ADAMW': '...', ...}
-    """
-    return {name: info["description"] for name, info in OPTIMIZERS.items()}
+    """Map of registered optimizer name -> description."""
+    return OPTIMIZERS.describe()
 
 
 # ---------------------------------------------------------------------------
 # Scheduler registry
 # ---------------------------------------------------------------------------
 
-SCHEDULERS: dict[str, dict] = {}
-
-
-def register_scheduler(name: str, description: str = ""):
-    """Register a schedule factory by name.
-
-    Parameters
-    ----------
-    name : str
-        Registry key (case-insensitive).
-    description : str, optional
-        Short description shown by list_schedulers().
-
-    Returns
-    -------
-    callable
-        Function decorator.
-
-    Raises
-    ------
-    ValueError
-        If a scheduler with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_scheduler("MY_SCHEDULE", description="Custom schedule")
-    ... def _my_schedule(init_value: float, decay_steps: int):
-    ...     return optax.cosine_decay_schedule(init_value, decay_steps)
-    """
-    name = name.upper()
-
-    def decorator(fn):
-        if name in SCHEDULERS:
-            raise ValueError(f"Scheduler '{name}' is already registered.")
-        SCHEDULERS[name] = {"fn": fn, "description": description}
-        return fn
-
-    return decorator
+SCHEDULERS = Registry("Scheduler")
+register_scheduler = SCHEDULERS.register
 
 
 def get_scheduler(name: str, **kwargs) -> optax.Schedule:
-    """Instantiate a registered learning-rate schedule.
+    """Instantiate a registered learning-rate schedule (case-insensitive).
 
-    Parameters
-    ----------
-    name : str
-        Registry key (case-insensitive).
-    **kwargs
-        Forwarded to the schedule factory. Unknown kwargs trigger a
-        UserWarning and are dropped.
-
-    Returns
-    -------
-    optax.Schedule
-        A callable int -> float representing the lr at each step.
-
-    Raises
-    ------
-    ValueError
-        If the name is not registered.
+    Unknown kwargs are dropped with a UserWarning (see utils.registry); raises
+    ValueError for an unknown name.
 
     Example
     -------
@@ -264,50 +127,12 @@ def get_scheduler(name: str, **kwargs) -> optax.Schedule:
     >>> schedule(500)  # lr at peak
     0.001
     """
-    name = name.upper()
-    if name not in SCHEDULERS:
-        available = ", ".join(sorted(SCHEDULERS.keys()))
-        raise ValueError(
-            f"Scheduler '{name}' is not registered. Available: {available}"
-        )
-
-    fn = SCHEDULERS[name]["fn"]
-
-    if kwargs:
-        sig = inspect.signature(fn)
-        valid = {
-            k for k, p in sig.parameters.items()
-            if p.kind not in (
-                inspect.Parameter.VAR_POSITIONAL,
-                inspect.Parameter.VAR_KEYWORD,
-            )
-        }
-        unknown = set(kwargs.keys()) - valid
-        if unknown:
-            warnings.warn(
-                f"get_scheduler('{name}'): unknown kwargs {unknown} will be "
-                f"ignored. Valid kwargs: {valid or 'none'}.",
-                UserWarning,
-                stacklevel=2,
-            )
-        kwargs = {k: v for k, v in kwargs.items() if k in valid}
-
-    return fn(**kwargs)
+    return SCHEDULERS.get(name, **kwargs)
 
 
 def list_schedulers() -> dict[str, str]:
-    """Return all registered scheduler names and their descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_schedulers()
-    {'CONSTANT': 'Fixed value — no decay', 'WARMUP_COSINE': '...', ...}
-    """
-    return {name: info["description"] for name, info in SCHEDULERS.items()}
+    """Map of registered scheduler name -> description."""
+    return SCHEDULERS.describe()
 
 
 # ---------------------------------------------------------------------------

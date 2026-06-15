@@ -41,7 +41,7 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
 )
 from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
-from training.class_weights import class_weights_from_counts
+from datasets.class_weights import class_weights_from_counts
 from training.metrics import (
     cross_entropy,
     expected_calibration_error,
@@ -411,15 +411,17 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # in the manifest so the run is reproducible from its artifact.
     manifest    = dm.manifest()
     loss_kwargs = dict(trainer_cfg.get('loss_kwargs') or {})
-    cw_scheme   = trainer_cfg.get('class_weight_scheme', 'none')
-    if cw_scheme != 'none':
+    cw_scheme   = config['data'].get('class_weight_scheme', 'none')
+    # Precedence: an explicit loss_kwargs.class_weights wins; otherwise a
+    # data.class_weight_scheme is computed from the train split's class counts.
+    if 'class_weights' not in loss_kwargs and cw_scheme != 'none':
         n_classes = config['model'].get('n_classes', N_CLASSES)
         counts = [int(manifest['train']['class_counts'].get(str(c), 0))
                   for c in range(n_classes)]
         cw = class_weights_from_counts(
             counts,
             scheme = cw_scheme,
-            beta   = trainer_cfg.get('class_weight_beta', 0.999),
+            beta   = config['data'].get('class_weight_beta', 0.999),
         )
         loss_kwargs['class_weights'] = cw.tolist()
         manifest['train']['class_weights'] = {

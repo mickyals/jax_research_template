@@ -25,8 +25,10 @@ over accumulated val/test predictions)
 quadratic_weighted_kappa  Cohen's kappa with quadratic class-distance
                           weights, from a confusion matrix — ordinal
                           agreement, penalises far misses more than near ones
-expected_calibration_error  ECE from softmax probabilities — confidence vs.
-                          accuracy calibration gap
+expected_calibration_error  ECE from softmax probabilities — occupancy-weighted
+                          confidence-vs-accuracy gap
+maximum_calibration_error  MCE — the worst single bin's gap (high-stakes,
+                          noisier than ECE)
 
 Post-hoc calibration
 --------------------
@@ -231,6 +233,60 @@ def expected_calibration_error(
         ece   += (n_b / n) * abs(acc_b - conf_b)
 
     return float(ece)
+
+
+def maximum_calibration_error(
+    probs:  np.ndarray,
+    labels: np.ndarray,
+    n_bins: int = 15,
+) -> float:
+    """Maximum Calibration Error (MCE) from softmax probabilities.
+
+    Same equal-width confidence binning as
+    :func:`expected_calibration_error`, but reports the **worst** bin's
+    |accuracy − confidence| gap rather than the occupancy-weighted average
+    (Guo et al. 2017). Useful for high-stakes settings where any single
+    badly-calibrated confidence band matters; noisier than ECE since a
+    sparsely-populated bin can dominate.
+
+    Parameters
+    ----------
+    probs : np.ndarray (N, n_classes)
+        Softmax class probabilities.
+    labels : np.ndarray (N,) int
+        True class indices.
+    n_bins : int
+        Number of equal-width confidence bins (default 15).
+
+    Returns
+    -------
+    float
+        In [0, 1]. The max gap over non-empty bins. Returns 0.0 for N == 0.
+    """
+    probs  = np.asarray(probs)
+    labels = np.asarray(labels)
+    n = labels.shape[0]
+    if n == 0:
+        return 0.0
+
+    confidences = probs.max(axis=-1)
+    predictions = probs.argmax(axis=-1)
+    correct     = (predictions == labels).astype(np.float64)
+
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    mce = 0.0
+    for b in range(n_bins):
+        lo, hi = bin_edges[b], bin_edges[b + 1]
+        if b == n_bins - 1:
+            in_bin = (confidences >= lo) & (confidences <= hi)
+        else:
+            in_bin = (confidences >= lo) & (confidences < hi)
+        if not in_bin.any():
+            continue
+        gap = abs(correct[in_bin].mean() - confidences[in_bin].mean())
+        mce = max(mce, float(gap))
+
+    return mce
 
 
 # ---------------------------------------------------------------------------

@@ -42,7 +42,7 @@ import yaml
 from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
 from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
 from experiments.sparse_obs_cross_attn.train.model import N_CLASSES
-from training.class_weights import class_weights_from_counts
+from datasets.class_weights import class_weights_from_counts
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier
 from training.tuner import Tuner, apply_search_space
 
@@ -139,14 +139,14 @@ def tune(
     # Optional class weighting from the train split's realized class counts
     # (computed once; shared across trials). See train.py for the rationale.
     loss_kwargs = dict(trainer_cfg.get("loss_kwargs") or {})
-    cw_scheme   = trainer_cfg.get("class_weight_scheme", "none")
-    if cw_scheme != "none":
+    cw_scheme   = base_config["data"].get("class_weight_scheme", "none")
+    if "class_weights" not in loss_kwargs and cw_scheme != "none":
         n_classes = base_config["model"].get("n_classes", N_CLASSES)
         counts = [int(dm.manifest()["train"]["class_counts"].get(str(c), 0))
                   for c in range(n_classes)]
         loss_kwargs["class_weights"] = class_weights_from_counts(
             counts, scheme=cw_scheme,
-            beta=trainer_cfg.get("class_weight_beta", 0.999),
+            beta=base_config["data"].get("class_weight_beta", 0.999),
         ).tolist()
 
     metrics_fns = build_metrics_fns(

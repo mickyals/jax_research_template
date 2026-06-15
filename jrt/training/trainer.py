@@ -15,9 +15,9 @@ from the DataModule, and a logger into a training loop with:
 
 Usage
 -----
-    from training.losses import masked_mse, masked_rmse
+    from training.losses import mse
 
-    metrics_fns = {"masked_mse": masked_mse, "masked_rmse": masked_rmse}
+    metrics_fns = {"mse": mse, "rmse": lambda p, t: mse(p, t) ** 0.5}
     trainer     = Trainer(model, metrics_fns, config["trainer"])
     best_state  = trainer.fit(dm.train_arrays(), dm.val_arrays())
 

@@ -508,7 +508,7 @@ plt.show()
 
 **Interpretation:**
 - A model that always predicts class 0 achieves `binary_accuracy = 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
-- `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tracks ordinal agreement (rewards near misses over far misses) independent of the training loss; `val/ece` is the calibration measurement.
+- `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tracks ordinal agreement (rewards near misses over far misses) independent of the training loss; `val/ece` (mean) and the test report's `mce` (worst-bin) are the calibration measurements.
 - **Temperature scaling** (Guo et al. 2017): `evaluate.py` fits a single temperature `T` on the **val** split (`fit_temperature`, an exact ternary search since NLL is convex in `1/T`) and `print_report` prints both `<split>/ece` and `<split>/ece_tempscaled` with the fitted `T`. `T` divides the logits, so it recalibrates confidence without changing the argmax — accuracy, QWK and the per-class table are identical. For `--split test` this is the proper val→test transfer; for `--split val` it is an in-sample check.
 - `val/attn_entropy` includes the query's self-attention weight (the last of N+1 positions). A high self-attention weight early in training is expected — the model is relying on its learned query prior (`query_obs_slots`). Expect it to decrease as the model learns to trust station data.
 
@@ -528,6 +528,8 @@ Key fields in `tc_classifier.yaml`:
 | `data.station_selection` | `random` | TRAIN-loader station subsampling above `max_stations`: `random` (epoch-varying augmentation) or `nearest`. Val/test loaders always default to `nearest` (deterministic) |
 | `data.location_encoding` | `unit_circle` | `unit_circle` or `domain`; model is coordinate-agnostic, so this lives in the data block only |
 | `data.obs_normalisation` | `minmax_11` | `minmax_01` / `minmax_11` / `standardise` |
+| `data.class_weight_scheme` | `none` | `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` / `median_freq` — computes `class_weights` at setup from train-split counts (stored in manifest); overridden by an explicit `trainer.loss_kwargs.class_weights` |
+| `data.class_weight_beta` | `0.999` | effective-number β (that scheme only) |
 | `model.full_self_attention` | `false` | `false` = asymmetric mask (stations never attend to the query); `true` = complete self-attention over all N+1 tokens |
 | `model.missingness_indicator` | `true` | `true` = concatenate `obs_mask` as its own channel in `token_proj` (missing obs filled 0), disambiguating "missing" from a real obs equal to 0; `false` = aliased behaviour (ablation) |
 | `model.embed_dim` | 128 | Token dimensionality |
@@ -536,7 +538,7 @@ Key fields in `tc_classifier.yaml`:
 | `model.fourier_dim` | 64 | `GaussianFourierEmbedding` output dim (must be even) |
 | `model.fourier_scale` | 1.0 | Std dev of frequency matrix; log-uniformly tuned in HP search [0.1, 10.0] |
 | `trainer.loss` | `cross_entropy` | Training objective from `training/losses.py` LOSSES registry; `val/cross_entropy` is always reported separately for cross-run comparability |
-| `trainer.loss_kwargs` | `{}` | Composable kwargs for `cross_entropy`: `focal_gamma` (focal loss) and/or `class_weights` (length-11 per-class weights; index 0 = background) |
+| `trainer.loss_kwargs` | `{}` | Composable kwargs for `cross_entropy`: `focal_gamma` (focal loss), `emd_lambda`/`emd_omega`/`emd_mu` (squared-EMD regulariser), and/or explicit `class_weights` (length-11; overrides `data.class_weight_scheme`) |
 | `trainer.steps_per_epoch` | 500 | Random TC-sampling mode: gradient steps per epoch. Omit/`null` = sequential mode (one pass over TC data) |
 | `trainer.profile` | `false` | Trace the first `profile_steps` training steps (JAX profiler) → `<run_dir>/logs/profile`; WandB uploads it as an artifact, TensorBoard/Null leave it on disk |
 | `trainer.attn_fig_every_n_epochs` | 5 | Epoch cadence for `val/attn_map` + `val/attn_grid` figures (VAL probe batch); 0 = disabled |

@@ -24,6 +24,8 @@ act = get_activation("SINE", w0=30.0) # kwargs forwarded to __init__
 
 `list_Xs()` prints a table of all registered names and descriptions — useful when exploring what is available.
 
+**Shared machinery — `core/registry.py`.** The factory-style registries (losses, optimizers, schedulers) are instances of a single `Registry` class that centralises the boilerplate: case-insensitive names, duplicate guard, kwarg filtering with a warning for unknown keys (a factory with `**kwargs` accepts anything), and `describe()`/`names()`/`in`. A module just does `LOSSES = Registry("Loss")` near the top and registers below; `register_loss`/`get_loss`/`list_losses` are thin aliases. (The core component registries above and the `datasets` registry predate it / use a different contract and remain bespoke for now.)
+
 ---
 
 ## Modules
