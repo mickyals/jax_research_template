@@ -32,17 +32,17 @@ def build_metrics_fns(
     The first key ('loss') is used as the training loss and the default
     patience metric (val/loss) — resolved from the loss registry in
     training/losses.py via trainer.loss + trainer.loss_kwargs. 'cross_entropy'
-    is always reported separately so runs with a different training loss
-    (e.g. squared_emd) remain comparable on a common scale.
+    is always reported separately so runs with focal/class-weighting applied
+    remain comparable on a common (unweighted) scale.
 
     Parameters
     ----------
     loss : str
-        Name of a registered loss (training/losses.py LOSSES registry),
-        e.g. 'cross_entropy' (default) or 'squared_emd'.
+        Name of a registered loss (training/losses.py LOSSES registry);
+        currently 'cross_entropy' (the default).
     loss_kwargs : dict, optional
-        Forwarded to the loss factory (e.g. {'n_classes': 11} for
-        'squared_emd').
+        Forwarded to the loss factory, e.g. {'focal_gamma': 2.0,
+        'class_weights': [...]} for class-balanced focal cross-entropy.
 
     Returns
     -------

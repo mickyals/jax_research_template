@@ -224,11 +224,11 @@ trainer:
 
   # --- Loss ---
   # Fixed for this sweep (not a suggest_fn dimension yet). See
-  # training/losses.py LOSSES registry; val/cross_entropy is always reported
+  # training/losses.py LOSSES registry; cross_entropy composes focal_gamma +
+  # class_weights via loss_kwargs. val/cross_entropy is always reported
   # separately for cross-run comparability.
-  loss:                 squared_emd
-  loss_kwargs:
-    n_classes:          11
+  loss:                 cross_entropy
+  loss_kwargs:          {}
 
   # --- Early stopping ---
   patience:             8

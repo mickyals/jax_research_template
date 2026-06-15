@@ -91,12 +91,10 @@ Scalar loss functions for JAX/Flax training. All functions have the signature `(
 | `huber(pred, target, delta)` | Huber loss |
 | `log_cosh(pred, target)` | Log-cosh loss |
 | `masked_mse`, `masked_rmse`, ... | NaN-safe variants; `mask=True` means valid |
+| `cross_entropy_loss(logits, labels, class_weights=None, focal_gamma=None)` | Softmax CE with composable focal modulation (Lin et al. 2017) and per-class weighting (weighted mean) — basic / focal / class-balanced / class-balanced-focal are all this one function |
 | `ordinal_loss(logits, labels)` | CORAL ordinal cross-entropy (Cao et al. 2020) |
 | `ordinal_predict(logits)` | Predicted class from ordinal logits |
 | `ordinal_probs(logits)` | Per-class probabilities from ordinal logits |
-| `squared_emd_loss(logits, labels, n_classes)` | Squared Earth Mover's Distance over ordinal class CDFs — penalises far misses more than near misses, no model change |
-| `weighted_cross_entropy_loss(logits, labels, class_weights)` | Cross-entropy with a per-class sample weight (`class_weights[labels[i]]`), weighted mean |
-| `weighted_squared_emd_loss(logits, labels, class_weights, n_classes)` | `squared_emd_loss` with a per-class sample weight |
 
 Masked variants derive the mask from `jnp.isfinite(target)` when no mask is passed — NaN targets are excluded automatically. They return `0.0` when no valid positions exist.
 
@@ -105,15 +103,15 @@ Masked variants derive the mask from `jnp.isfinite(target)` when no mask is pass
 ```python
 from training.losses import get_loss, list_losses
 
-loss_fn = get_loss("squared_emd", n_classes=11)   # (logits, labels) -> scalar
+# class-balanced focal cross-entropy
+loss_fn = get_loss("cross_entropy", focal_gamma=2.0, class_weights=[1.0]*11)
 ```
 
-| Name | Description |
-|------|-------------|
-| `cross_entropy` | Softmax cross-entropy with integer labels |
-| `squared_emd` | Squared EMD over ordinal class CDFs (kwarg: `n_classes`, default 11) |
-| `weighted_cross_entropy` | Cross-entropy with a per-class sample weight (kwarg: `class_weights`, list of length `n_classes`) |
-| `weighted_squared_emd` | Squared EMD with a per-class sample weight (kwargs: `class_weights`, `n_classes` default 11) |
+| Name | Kwargs | Description |
+|------|--------|-------------|
+| `cross_entropy` | `focal_gamma` (float, optional), `class_weights` (length-`n_classes` list, optional) | Softmax CE; the two kwargs compose — none = basic, `focal_gamma` = focal loss (Lin et al. 2017), `class_weights` = class-balanced, both = class-balanced focal. Weights are a weighted mean so the loss scale stays comparable |
+
+Weighting is **method-agnostic**: the caller supplies the realized per-class weight vector (inverse-frequency, effective-number (Cui et al. 2019), median-frequency (Eigen & Fergus 2015), ...) — `cross_entropy` just consumes it. Compute it once from the train-split class counts and record it (e.g. in the run manifest).
 
 Convention for classification experiments: a `trainer.loss` (+ `trainer.loss_kwargs`) config key selects the entry resolved via `get_loss` and bound to the `metrics_fns['loss']` key (which `loss_key` defaults to), so the training objective is configured the same way as `trainer.optimizer`/`trainer.scheduler`.
 

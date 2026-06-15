@@ -192,13 +192,16 @@ trainer:
 
   # --- Loss ---
   # Training objective, selected from training/losses.py LOSSES registry.
-  # 'cross_entropy' (flat softmax CE) and 'squared_emd' (ordinal-aware,
-  # penalises predictions further from the true class more) both run on the
-  # existing 11-way head. 'cross_entropy' is always reported separately
-  # (val/cross_entropy) regardless of this choice, so runs stay comparable.
-  loss:                 squared_emd
-  loss_kwargs:
-    n_classes:          11
+  # 'cross_entropy' is composable via loss_kwargs:
+  #   focal_gamma:   focal modulation (Lin et al. 2017), down-weights easy samples
+  #   class_weights: length-11 per-class weights for imbalance (inverse-freq /
+  #                  effective-number / median-freq) — index 0 = background
+  # Setting both gives the class-balanced focal loss. 'cross_entropy' is always
+  # reported separately (val/cross_entropy) so runs stay comparable.
+  loss:                 cross_entropy
+  loss_kwargs:          {}
+    # focal_gamma:      2.0
+    # class_weights:    [1.0, ...]   # 11 values; see docs for weighting schemes
 
   # --- Early stopping ---
   patience:             15            # epochs without improvement before halting

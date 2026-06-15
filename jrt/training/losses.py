@@ -332,102 +332,52 @@ def ordinal_predict(logits: jax.Array) -> jax.Array:
 # Ordinal classification (squared EMD over class CDFs)
 # ---------------------------------------------------------------------------
 
-def squared_emd_loss(
-    logits:    jax.Array,
-    labels:    jax.Array,
-    n_classes: int = 11,
-) -> jax.Array:
-    """Squared Earth Mover's Distance loss for ordinal classes.
-
-    Compares the cumulative distribution of the predicted class
-    probabilities against the cumulative distribution of the (one-hot)
-    target along the ordinal class axis. Unlike flat cross-entropy,
-    predicting a class far from the true one (e.g. Cat5 -> TD) accumulates
-    a larger penalty than a near miss (Cat5 -> Cat4), without any model
-    change — it operates on the existing K-way softmax output.
-
-    Parameters
-    ----------
-    logits : jax.Array  shape (B, n_classes)
-    labels : jax.Array  shape (B,)  integer class indices in {0, ..., n_classes-1}
-    n_classes : int
-
-    Returns
-    -------
-    jax.Array  scalar
-
-    Example
-    -------
-    >>> logits = jnp.zeros((4, 11)).at[:, 0].set(100.0)  # confident class 0
-    >>> labels = jnp.zeros(4, dtype=jnp.int32)
-    >>> float(squared_emd_loss(logits, labels)) < 1e-6
-    True
-    """
-    probs    = jax.nn.softmax(logits, axis=-1)
-    target   = jax.nn.one_hot(labels, n_classes)
-    cdf_diff = jnp.cumsum(probs, axis=-1) - jnp.cumsum(target, axis=-1)
-    return jnp.mean(jnp.sum(cdf_diff ** 2, axis=-1))
-
-
-def weighted_cross_entropy_loss(
+def cross_entropy_loss(
     logits:        jax.Array,
     labels:        jax.Array,
-    class_weights: jax.Array,
+    class_weights: Optional[jax.Array] = None,
+    focal_gamma:   Optional[float]     = None,
 ) -> jax.Array:
-    """Softmax cross-entropy with a per-class sample weight.
+    """Softmax cross-entropy with optional focal modulation and class weights.
 
-    Each sample's CE term is weighted by ``class_weights[labels[i]]`` before
-    averaging, so rarer classes contribute more to the gradient. The result
-    is a weighted mean (sum of weighted losses / sum of weights), so the
-    overall loss scale stays comparable to plain cross-entropy regardless of
-    the weight magnitudes.
+    Three orthogonal, composable pieces over the per-sample CE term
+    ``ce_i = -log softmax(logits_i)[y_i]``:
+
+    * **basic** (defaults): plain mean CE.
+    * **focal** (``focal_gamma`` set): multiply each term by ``(1 - pt_i)**γ``
+      where ``pt_i = exp(-ce_i)`` is the predicted probability of the true
+      class — down-weights easy, confident-correct samples (Lin et al. 2017).
+    * **class-weighted** (``class_weights`` set): weight each term by
+      ``class_weights[y_i]`` and take a weighted mean (sum of weighted terms /
+      sum of weights), so the loss scale stays comparable regardless of weight
+      magnitudes. Use for class imbalance (inverse-frequency, effective-number
+      (Cui et al. 2019), median-frequency (Eigen & Fergus 2015), ...).
+
+    Setting both kwargs gives the class-balanced focal loss; the weighting
+    method is the caller's choice — this function only consumes the resulting
+    per-class weight vector.
 
     Parameters
     ----------
     logits : jax.Array  shape (B, n_classes)
-    labels : jax.Array  shape (B, )  integer class indices
-    class_weights : jax.Array  shape (n_classes,)
-        Per-class weight, indexed by class label.
+    labels : jax.Array  shape (B,)  integer class indices
+    class_weights : jax.Array, optional  shape (n_classes,)
+        Per-class weight, indexed by class label. None = uniform.
+    focal_gamma : float, optional
+        Focal focusing parameter γ ≥ 0. None (or 0) = no focal modulation.
 
     Returns
     -------
     jax.Array  scalar
     """
     ce = _optax.softmax_cross_entropy_with_integer_labels(logits, labels)
-    w  = jnp.asarray(class_weights)[labels]
-    return jnp.sum(w * ce) / jnp.sum(w)
-
-
-def weighted_squared_emd_loss(
-    logits:        jax.Array,
-    labels:        jax.Array,
-    class_weights: jax.Array,
-    n_classes:     int = 11,
-) -> jax.Array:
-    """Squared EMD loss (see `squared_emd_loss`) with a per-class sample weight.
-
-    Each sample's squared-EMD term is weighted by
-    ``class_weights[labels[i]]`` before averaging, combining ordinal-distance
-    awareness with within-class rebalancing.
-
-    Parameters
-    ----------
-    logits : jax.Array  shape (B, n_classes)
-    labels : jax.Array  shape (B,)  integer class indices in {0, ..., n_classes-1}
-    class_weights : jax.Array  shape (n_classes,)
-        Per-class weight, indexed by class label.
-    n_classes : int
-
-    Returns
-    -------
-    jax.Array  scalar
-    """
-    probs      = jax.nn.softmax(logits, axis=-1)
-    target     = jax.nn.one_hot(labels, n_classes)
-    cdf_diff   = jnp.cumsum(probs, axis=-1) - jnp.cumsum(target, axis=-1)
-    per_sample = jnp.sum(cdf_diff ** 2, axis=-1)
-    w          = jnp.asarray(class_weights)[labels]
-    return jnp.sum(w * per_sample) / jnp.sum(w)
+    if focal_gamma:
+        pt = jnp.exp(-ce)
+        ce = ((1.0 - pt) ** focal_gamma) * ce
+    if class_weights is not None:
+        w = jnp.asarray(class_weights)[labels]
+        return jnp.sum(w * ce) / jnp.sum(w)
+    return jnp.mean(ce)
 
 
 def ordinal_probs(logits: jax.Array) -> jax.Array:
@@ -533,7 +483,7 @@ def get_loss(name: str, **kwargs) -> Callable[[jax.Array, jax.Array], jax.Array]
     Example
     -------
     >>> loss_fn = get_loss("cross_entropy")
-    >>> loss_fn = get_loss("squared_emd", n_classes=11)
+    >>> loss_fn = get_loss("cross_entropy", focal_gamma=2.0, class_weights=[1.0]*11)
     """
     name = name.upper()
     if name not in LOSSES:
@@ -576,68 +526,28 @@ def list_losses() -> dict[str, str]:
     Example
     -------
     >>> list_losses()
-    {'CROSS_ENTROPY': '...', 'SQUARED_EMD': '...'}
+    {'CROSS_ENTROPY': '...'}
     """
     return {name: info["description"] for name, info in LOSSES.items()}
 
 
 @register_loss(
     "cross_entropy",
-    description="Softmax cross-entropy with integer labels.",
-)
-def _cross_entropy_loss() -> Callable[[jax.Array, jax.Array], jax.Array]:
-    def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
-        return jnp.mean(
-            _optax.softmax_cross_entropy_with_integer_labels(logits, labels)
-        )
-    return loss_fn
-
-
-@register_loss(
-    "squared_emd",
     description=(
-        "Squared Earth Mover's Distance over ordinal class CDFs "
-        "(ordinal-aware alternative to flat cross-entropy)."
+        "Softmax cross-entropy with integer labels. Optional kwargs compose: "
+        "focal_gamma (Lin et al. 2017 focal modulation) and class_weights "
+        "(length-n_classes per-class weights for imbalance). Basic / focal / "
+        "class-balanced / class-balanced-focal are all this one loss."
     ),
 )
-def _squared_emd_loss(n_classes: int = 11) -> Callable[[jax.Array, jax.Array], jax.Array]:
-    def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
-        return squared_emd_loss(logits, labels, n_classes=n_classes)
-    return loss_fn
-
-
-@register_loss(
-    "weighted_cross_entropy",
-    description=(
-        "Softmax cross-entropy with a per-class sample weight "
-        "(kwarg: class_weights, list of length n_classes)."
-    ),
-)
-def _weighted_cross_entropy_loss(
-    class_weights: list,
+def _cross_entropy_loss(
+    class_weights: Optional[list]  = None,
+    focal_gamma:   Optional[float] = None,
 ) -> Callable[[jax.Array, jax.Array], jax.Array]:
-    cw = jnp.asarray(class_weights)
+    cw = jnp.asarray(class_weights) if class_weights is not None else None
 
     def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
-        return weighted_cross_entropy_loss(logits, labels, class_weights=cw)
-    return loss_fn
-
-
-@register_loss(
-    "weighted_squared_emd",
-    description=(
-        "Squared EMD over ordinal class CDFs with a per-class sample weight "
-        "(kwargs: class_weights list of length n_classes, n_classes)."
-    ),
-)
-def _weighted_squared_emd_loss(
-    class_weights: list,
-    n_classes:     int = 11,
-) -> Callable[[jax.Array, jax.Array], jax.Array]:
-    cw = jnp.asarray(class_weights)
-
-    def loss_fn(logits: jax.Array, labels: jax.Array) -> jax.Array:
-        return weighted_squared_emd_loss(
-            logits, labels, class_weights=cw, n_classes=n_classes
+        return cross_entropy_loss(
+            logits, labels, class_weights=cw, focal_gamma=focal_gamma
         )
     return loss_fn

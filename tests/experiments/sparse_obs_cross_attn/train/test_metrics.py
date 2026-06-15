@@ -9,7 +9,7 @@ build_metrics_fns wiring.
 Coverage
 --------
 TestBuildMetricsFns   expected keys; first key is loss; default loss matches
-                      cross_entropy; squared_emd selectable; unknown loss
+                      cross_entropy; focal+class-weighted selectable; unknown loss
                       raises; all callable; all produce finite scalars
 """
 
@@ -56,14 +56,17 @@ class TestBuildMetricsFns:
             float(fns['cross_entropy'](logits, labels)), rel=1e-5
         )
 
-    def test_squared_emd_loss_selectable(self):
+    def test_focal_class_weighted_loss_selectable(self):
         logits = _rand_logits()
         labels = _rand_labels()
-        fns = build_metrics_fns(loss='squared_emd', loss_kwargs={'n_classes': N_CLS})
+        fns = build_metrics_fns(
+            loss='cross_entropy',
+            loss_kwargs={'focal_gamma': 2.0, 'class_weights': [1.0] * N_CLS},
+        )
         out = fns['loss'](logits, labels)
         assert out.shape == ()
         assert bool(jnp.isfinite(out))
-        # squared_emd differs from flat cross_entropy in general
+        # focal modulation differs from flat cross_entropy in general
         assert float(out) != pytest.approx(float(fns['cross_entropy'](logits, labels)))
 
     def test_unknown_loss_raises(self):

@@ -17,18 +17,11 @@ TestMaskedLogCosh       NaN exclusion, all-NaN
 TestGradients           grad shapes, finite grads, zero grad at NaN positions
 TestJit                 JIT compatibility for all functions
 TestReExports           optax losses accessible from training.losses
-TestSquaredEmdLoss      ordinal CDF loss: perfect pred, non-negativity,
-                        near-miss < far-miss, shape, jit, grad
-TestWeightedCrossEntropyLoss
-                        uniform weights match plain CE; rare-class weight
-                        amplifies that class's contribution; shape, jit, grad
-TestWeightedSquaredEmdLoss
-                        uniform weights match plain squared_emd; rare-class
-                        weight amplifies that class's contribution; shape
-TestLossRegistry        register_loss/get_loss/list_losses, cross_entropy +
-                        squared_emd + weighted_cross_entropy +
-                        weighted_squared_emd registered, kwargs
-                        filtering/warnings
+TestCrossEntropyLoss    compositional CE: defaults match plain CE; focal
+                        down-weights easy examples; class weights amplify rare
+                        classes; class-balanced focal composes; shape/jit/grad
+TestLossRegistry        register_loss/get_loss/list_losses; cross_entropy with
+                        focal_gamma + class_weights kwargs; filtering/warnings
 """
 
 import jax
@@ -48,9 +41,7 @@ from training.losses import (
     softmax_cross_entropy,
     softmax_cross_entropy_with_integer_labels,
     # ordinal
-    squared_emd_loss,
-    weighted_cross_entropy_loss,
-    weighted_squared_emd_loss,
+    cross_entropy_loss,
     # loss registry
     LOSSES, get_loss, list_losses, register_loss,
 )
@@ -454,64 +445,10 @@ class TestReExports:
 
 
 # ---------------------------------------------------------------------------
-# TestSquaredEmdLoss
+# TestCrossEntropyLoss (compositional: basic / focal / class-weighted)
 # ---------------------------------------------------------------------------
 
-class TestSquaredEmdLoss:
-
-    B_CLS = 4
-    N_CLS = 11
-
-    def _confident_logits(self, correct_class: int) -> jnp.ndarray:
-        return jnp.full((self.B_CLS, self.N_CLS), -100.0).at[:, correct_class].set(100.0)
-
-    def test_perfect_prediction_near_zero(self):
-        labels = jnp.array([3] * self.B_CLS, dtype=jnp.int32)
-        out = squared_emd_loss(self._confident_logits(3), labels, n_classes=self.N_CLS)
-        assert float(out) < 1e-6
-
-    def test_nonnegative(self):
-        rng    = np.random.default_rng(0)
-        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS)).astype(np.float32))
-        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
-        assert float(squared_emd_loss(logits, labels, n_classes=self.N_CLS)) >= 0.0
-
-    def test_near_miss_penalised_less_than_far_miss(self):
-        """Predicting Cat4 when truth is Cat5 should cost less than predicting TD."""
-        labels   = jnp.array([5] * self.B_CLS, dtype=jnp.int32)
-        near     = self._confident_logits(4)   # off by 1
-        far      = self._confident_logits(0)   # off by 5
-        loss_near = float(squared_emd_loss(near, labels, n_classes=self.N_CLS))
-        loss_far  = float(squared_emd_loss(far, labels, n_classes=self.N_CLS))
-        assert loss_near < loss_far
-
-    def test_scalar_shape(self):
-        rng    = np.random.default_rng(0)
-        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS)).astype(np.float32))
-        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
-        assert squared_emd_loss(logits, labels, n_classes=self.N_CLS).shape == ()
-
-    def test_jit(self):
-        rng    = np.random.default_rng(0)
-        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS)).astype(np.float32))
-        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
-        out = jax.jit(lambda l, y: squared_emd_loss(l, y, n_classes=self.N_CLS))(logits, labels)
-        assert jnp.isfinite(out)
-
-    def test_grad_flows(self):
-        rng    = np.random.default_rng(0)
-        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS)).astype(np.float32))
-        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
-        grad = jax.grad(lambda l: squared_emd_loss(l, labels, n_classes=self.N_CLS))(logits)
-        assert grad.shape == logits.shape
-        assert jnp.all(jnp.isfinite(grad))
-
-
-# ---------------------------------------------------------------------------
-# TestWeightedCrossEntropyLoss
-# ---------------------------------------------------------------------------
-
-class TestWeightedCrossEntropyLoss:
+class TestCrossEntropyLoss:
 
     B_CLS = 4
     N_CLS = 11
@@ -522,93 +459,74 @@ class TestWeightedCrossEntropyLoss:
         labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
         return logits, labels
 
-    def test_uniform_weights_match_plain_cross_entropy(self):
+    # --- basic ---
+    def test_defaults_match_plain_cross_entropy(self):
         logits, labels = self._rand_logits_labels()
-        weights = jnp.ones(self.N_CLS)
-        out      = weighted_cross_entropy_loss(logits, labels, class_weights=weights)
+        out      = cross_entropy_loss(logits, labels)
         expected = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, labels))
         assert jnp.allclose(out, expected)
 
-    def test_rare_class_weight_amplifies_its_contribution(self):
-        # Two samples: one in class 0 (wrong pred), one in class 1 (correct pred).
-        labels = jnp.array([0, 1], dtype=jnp.int32)
-        logits = jnp.zeros((2, self.N_CLS)).at[1, 1].set(100.0)
-
-        uniform = jnp.ones(self.N_CLS)
-        upweight_class0 = jnp.ones(self.N_CLS).at[0].set(10.0)
-
-        out_uniform = float(weighted_cross_entropy_loss(logits, labels, class_weights=uniform))
-        out_weighted = float(weighted_cross_entropy_loss(logits, labels, class_weights=upweight_class0))
-        # Up-weighting class 0 (the wrong/high-loss sample) raises the overall loss.
-        assert out_weighted > out_uniform
-
     def test_scalar_shape(self):
         logits, labels = self._rand_logits_labels()
-        weights = jnp.ones(self.N_CLS)
-        assert weighted_cross_entropy_loss(logits, labels, class_weights=weights).shape == ()
-
-    def test_jit(self):
-        logits, labels = self._rand_logits_labels()
-        weights = jnp.ones(self.N_CLS)
-        out = jax.jit(
-            lambda l, y, w: weighted_cross_entropy_loss(l, y, class_weights=w)
-        )(logits, labels, weights)
-        assert jnp.isfinite(out)
-
-    def test_grad_flows(self):
-        logits, labels = self._rand_logits_labels()
-        weights = jnp.ones(self.N_CLS)
-        grad = jax.grad(
-            lambda l: weighted_cross_entropy_loss(l, labels, class_weights=weights)
-        )(logits)
-        assert grad.shape == logits.shape
-        assert jnp.all(jnp.isfinite(grad))
-
-
-# ---------------------------------------------------------------------------
-# TestWeightedSquaredEmdLoss
-# ---------------------------------------------------------------------------
-
-class TestWeightedSquaredEmdLoss:
-
-    B_CLS = 4
-    N_CLS = 11
-
-    def _rand_logits_labels(self, seed=0):
-        rng = np.random.default_rng(seed)
-        logits = jnp.array(rng.standard_normal((self.B_CLS, self.N_CLS)).astype(np.float32))
-        labels = jnp.array(rng.integers(0, self.N_CLS, size=self.B_CLS), dtype=jnp.int32)
-        return logits, labels
-
-    def test_uniform_weights_match_plain_squared_emd(self):
-        logits, labels = self._rand_logits_labels()
-        weights = jnp.ones(self.N_CLS)
-        out      = weighted_squared_emd_loss(logits, labels, class_weights=weights, n_classes=self.N_CLS)
-        expected = squared_emd_loss(logits, labels, n_classes=self.N_CLS)
-        assert jnp.allclose(out, expected)
-
-    def test_rare_class_weight_amplifies_its_contribution(self):
-        # Two samples: one in class 0 (far miss), one in class 5 (perfect).
-        labels = jnp.array([0, 5], dtype=jnp.int32)
-        logits = jnp.zeros((2, self.N_CLS)).at[0, self.N_CLS - 1].set(100.0).at[1, 5].set(100.0)
-
-        uniform = jnp.ones(self.N_CLS)
-        upweight_class0 = jnp.ones(self.N_CLS).at[0].set(10.0)
-
-        out_uniform = float(weighted_squared_emd_loss(logits, labels, class_weights=uniform, n_classes=self.N_CLS))
-        out_weighted = float(weighted_squared_emd_loss(logits, labels, class_weights=upweight_class0, n_classes=self.N_CLS))
-        assert out_weighted > out_uniform
-
-    def test_scalar_shape(self):
-        logits, labels = self._rand_logits_labels()
-        weights = jnp.ones(self.N_CLS)
-        assert weighted_squared_emd_loss(logits, labels, class_weights=weights, n_classes=self.N_CLS).shape == ()
+        assert cross_entropy_loss(logits, labels).shape == ()
 
     def test_nonnegative(self):
         logits, labels = self._rand_logits_labels()
+        assert float(cross_entropy_loss(logits, labels)) >= 0.0
+
+    def test_grad_flows(self):
+        logits, labels = self._rand_logits_labels()
+        grad = jax.grad(lambda l: cross_entropy_loss(l, labels))(logits)
+        assert grad.shape == logits.shape
+        assert jnp.all(jnp.isfinite(grad))
+
+    def test_jit(self):
+        logits, labels = self._rand_logits_labels()
+        out = jax.jit(lambda l, y: cross_entropy_loss(l, y))(logits, labels)
+        assert jnp.isfinite(out)
+
+    # --- focal ---
+    def test_focal_gamma_zero_matches_basic(self):
+        logits, labels = self._rand_logits_labels()
+        assert jnp.allclose(
+            cross_entropy_loss(logits, labels, focal_gamma=0.0),
+            cross_entropy_loss(logits, labels),
+        )
+
+    def test_focal_downweights_easy_examples(self):
+        # One confidently-correct (easy) and one wrong (hard) sample.
+        labels = jnp.array([0, 1], dtype=jnp.int32)
+        logits = jnp.zeros((2, self.N_CLS)).at[0, 0].set(100.0)  # sample 0 easy/correct
+        basic = float(cross_entropy_loss(logits, labels))
+        focal = float(cross_entropy_loss(logits, labels, focal_gamma=2.0))
+        # focal shrinks the (already tiny) easy term; the mean loss drops.
+        assert focal < basic
+
+    # --- class-weighted ---
+    def test_uniform_weights_match_basic(self):
+        logits, labels = self._rand_logits_labels()
         weights = jnp.ones(self.N_CLS)
-        out = weighted_squared_emd_loss(logits, labels, class_weights=weights, n_classes=self.N_CLS)
-        assert float(out) >= 0.0
+        assert jnp.allclose(
+            cross_entropy_loss(logits, labels, class_weights=weights),
+            cross_entropy_loss(logits, labels),
+        )
+
+    def test_rare_class_weight_amplifies_its_contribution(self):
+        labels = jnp.array([0, 1], dtype=jnp.int32)
+        logits = jnp.zeros((2, self.N_CLS)).at[1, 1].set(100.0)   # sample 1 correct
+        uniform         = jnp.ones(self.N_CLS)
+        upweight_class0 = jnp.ones(self.N_CLS).at[0].set(10.0)
+        out_uniform  = float(cross_entropy_loss(logits, labels, class_weights=uniform))
+        out_weighted = float(cross_entropy_loss(logits, labels, class_weights=upweight_class0))
+        assert out_weighted > out_uniform   # up-weighting the high-loss class raises loss
+
+    # --- composition ---
+    def test_class_balanced_focal_composes(self):
+        logits, labels = self._rand_logits_labels()
+        weights = jnp.ones(self.N_CLS).at[0].set(3.0)
+        out = cross_entropy_loss(logits, labels, class_weights=weights, focal_gamma=2.0)
+        assert out.shape == ()
+        assert bool(jnp.isfinite(out))
 
 
 # ---------------------------------------------------------------------------
@@ -629,40 +547,6 @@ class TestLossRegistry:
     def test_cross_entropy_registered(self):
         assert 'CROSS_ENTROPY' in LOSSES
 
-    def test_squared_emd_registered(self):
-        assert 'SQUARED_EMD' in LOSSES
-
-    def test_weighted_cross_entropy_registered(self):
-        assert 'WEIGHTED_CROSS_ENTROPY' in LOSSES
-
-    def test_weighted_squared_emd_registered(self):
-        assert 'WEIGHTED_SQUARED_EMD' in LOSSES
-
-    def test_get_loss_weighted_cross_entropy(self):
-        logits, labels = self._rand_logits_labels()
-        weights = [1.0] * self.N_CLS
-        loss_fn = get_loss('weighted_cross_entropy', class_weights=weights)
-        out = loss_fn(logits, labels)
-        expected = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, labels))
-        assert jnp.allclose(out, expected)
-
-    def test_get_loss_weighted_squared_emd(self):
-        logits, labels = self._rand_logits_labels()
-        weights = [1.0] * self.N_CLS
-        loss_fn = get_loss('weighted_squared_emd', class_weights=weights)
-        out = loss_fn(logits, labels)
-        expected = squared_emd_loss(logits, labels, n_classes=11)
-        assert jnp.allclose(out, expected)
-
-    def test_get_loss_weighted_squared_emd_custom_n_classes(self):
-        weights = [1.0] * 5
-        logits = jnp.zeros((self.B_CLS, 5))
-        labels = jnp.zeros(self.B_CLS, dtype=jnp.int32)
-        loss_fn = get_loss('weighted_squared_emd', class_weights=weights, n_classes=5)
-        out = loss_fn(logits, labels)
-        assert out.shape == ()
-        assert bool(jnp.isfinite(out))
-
     def test_get_loss_cross_entropy(self):
         logits, labels = self._rand_logits_labels()
         loss_fn = get_loss('cross_entropy')
@@ -670,24 +554,36 @@ class TestLossRegistry:
         expected = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, labels))
         assert jnp.allclose(out, expected)
 
-    def test_get_loss_squared_emd_default_n_classes(self):
+    def test_get_loss_cross_entropy_with_class_weights(self):
         logits, labels = self._rand_logits_labels()
-        loss_fn = get_loss('squared_emd')
+        weights = [1.0] * self.N_CLS
+        loss_fn = get_loss('cross_entropy', class_weights=weights)
         out = loss_fn(logits, labels)
-        expected = squared_emd_loss(logits, labels, n_classes=11)
+        # uniform weights -> identical to plain CE
+        expected = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, labels))
         assert jnp.allclose(out, expected)
 
-    def test_get_loss_squared_emd_custom_n_classes(self):
-        logits = jnp.zeros((self.B_CLS, 5))
-        labels = jnp.zeros(self.B_CLS, dtype=jnp.int32)
-        loss_fn = get_loss('squared_emd', n_classes=5)
+    def test_get_loss_cross_entropy_with_focal(self):
+        logits, labels = self._rand_logits_labels()
+        loss_fn = get_loss('cross_entropy', focal_gamma=2.0)
+        out = loss_fn(logits, labels)
+        assert out.shape == ()
+        assert bool(jnp.isfinite(out))
+        # focal differs from plain CE in general
+        plain = jnp.mean(softmax_cross_entropy_with_integer_labels(logits, labels))
+        assert not jnp.allclose(out, plain)
+
+    def test_get_loss_class_balanced_focal_composes(self):
+        logits, labels = self._rand_logits_labels()
+        weights = [1.0] * self.N_CLS
+        loss_fn = get_loss('cross_entropy', class_weights=weights, focal_gamma=2.0)
         out = loss_fn(logits, labels)
         assert out.shape == ()
         assert bool(jnp.isfinite(out))
 
     def test_get_loss_case_insensitive(self):
         assert get_loss('Cross_Entropy') is not None
-        assert get_loss('SQUARED_EMD') is not None
+        assert get_loss('CROSS_ENTROPY') is not None
 
     def test_get_loss_unknown_raises(self):
         with pytest.raises(ValueError, match="not registered"):
@@ -703,9 +599,6 @@ class TestLossRegistry:
     def test_list_losses_returns_descriptions(self):
         names = list_losses()
         assert 'CROSS_ENTROPY' in names
-        assert 'SQUARED_EMD' in names
-        assert 'WEIGHTED_CROSS_ENTROPY' in names
-        assert 'WEIGHTED_SQUARED_EMD' in names
         assert all(isinstance(v, str) for v in names.values())
 
     def test_register_loss_duplicate_raises(self):

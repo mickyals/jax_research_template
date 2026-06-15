@@ -496,7 +496,7 @@ plt.show()
 
 | Metric | Description |
 |--------|-------------|
-| `train/loss` | Training objective from `trainer.loss` (e.g. `squared_emd`) |
+| `train/loss` | Training objective from `trainer.loss` (e.g. `cross_entropy`, optionally focal / class-weighted) |
 | `val/loss` | Same objective evaluated on val |
 | `val/cross_entropy` | Validation CE — always reported for cross-run comparability; patience metric for early stopping |
 | `val/accuracy` | Top-1 accuracy over all 11 classes |
@@ -508,7 +508,7 @@ plt.show()
 
 **Interpretation:**
 - A model that always predicts class 0 achieves `binary_accuracy = 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
-- `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tells you whether an ordinal loss (`squared_emd`) is actually improving ordinal agreement over flat CE; `val/ece` is the calibration measurement.
+- `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tracks ordinal agreement (rewards near misses over far misses) independent of the training loss; `val/ece` is the calibration measurement.
 - **Temperature scaling** (Guo et al. 2017): `evaluate.py` fits a single temperature `T` on the **val** split (`fit_temperature`, an exact ternary search since NLL is convex in `1/T`) and `print_report` prints both `<split>/ece` and `<split>/ece_tempscaled` with the fitted `T`. `T` divides the logits, so it recalibrates confidence without changing the argmax — accuracy, QWK and the per-class table are identical. For `--split test` this is the proper val→test transfer; for `--split val` it is an in-sample check.
 - `val/attn_entropy` includes the query's self-attention weight (the last of N+1 positions). A high self-attention weight early in training is expected — the model is relying on its learned query prior (`query_obs_slots`). Expect it to decrease as the model learns to trust station data.
 
@@ -535,8 +535,8 @@ Key fields in `tc_classifier.yaml`:
 | `model.num_layers` | 4 | Total encoder depth (unified self-attention over all N+1 tokens) |
 | `model.fourier_dim` | 64 | `GaussianFourierEmbedding` output dim (must be even) |
 | `model.fourier_scale` | 1.0 | Std dev of frequency matrix; log-uniformly tuned in HP search [0.1, 10.0] |
-| `trainer.loss` | `squared_emd` | Training objective from `training/losses.py` LOSSES registry: `cross_entropy`, `squared_emd`, or the class-weighted variants `weighted_cross_entropy` / `weighted_squared_emd`; `val/cross_entropy` is always reported separately for cross-run comparability |
-| `trainer.loss_kwargs` | `{n_classes: 11}` | Forwarded to the loss factory: `n_classes` for `squared_emd`; `class_weights` (length-`n_classes` list) for the `weighted_*` losses |
+| `trainer.loss` | `cross_entropy` | Training objective from `training/losses.py` LOSSES registry; `val/cross_entropy` is always reported separately for cross-run comparability |
+| `trainer.loss_kwargs` | `{}` | Composable kwargs for `cross_entropy`: `focal_gamma` (focal loss) and/or `class_weights` (length-11 per-class weights; index 0 = background) |
 | `trainer.steps_per_epoch` | 500 | Random TC-sampling mode: gradient steps per epoch. Omit/`null` = sequential mode (one pass over TC data) |
 | `trainer.profile` | `false` | Trace the first `profile_steps` training steps (JAX profiler) → `<run_dir>/logs/profile`; WandB uploads it as an artifact, TensorBoard/Null leave it on disk |
 | `trainer.attn_fig_every_n_epochs` | 5 | Epoch cadence for `val/attn_map` + `val/attn_grid` figures (VAL probe batch); 0 = disabled |
