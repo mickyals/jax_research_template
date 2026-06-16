@@ -7,7 +7,7 @@ Column constants and label mappings live here alongside the class so that
 imports are self-contained:
 
     from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
-        IBTrACSDataset, SSHS_TO_CLASS, N_CLASSES,
+        IBTrACSDataset, status_sshs_to_class, CLASS_NAMES, N_CLASSES,
     )
 
 Splitting is not a dataset concern: this class exposes filter primitives
@@ -60,12 +60,86 @@ IBTRACS_TRAIN_SEASONS: list[int] = list(range(2005, 2021))   # 2005–2020 inclu
 IBTRACS_VAL_SEASONS:   list[int] = [2021, 2022]
 IBTRACS_TEST_SEASONS:  list[int] = list(range(2023, 2026))    # 2023–2025 inclusive
 
-# Label mapping — class 0 is reserved for "no storm" (assigned by TCDataset)
-# USA_SSHS values present in ibtracs_full.npz: -4 through 5 (no -5)
-SSHS_TO_CLASS: dict[int, int] = {
-    -4: 1, -3: 2, -2: 3, -1: 4, 0: 5, 1: 6, 2: 7, 3: 8, 4: 9, 5: 10,
-}
-N_CLASSES: int = 11   # 0 = no storm, 1–10 = SSHS -4 to +5
+# ---------------------------------------------------------------------------
+# Ordinal organisation label scheme (decision r2, plan-encoder-probing-rescope)
+# ---------------------------------------------------------------------------
+# Classes are ordered by degree of organisation: background → disturbance →
+# depression → storm → Saffir-Simpson categories 1–5. The class is STATUS-driven
+# — the agency USA_STATUS code sets it; USA_SSHS supplies ONLY the hurricane
+# category number (1–5). Systems off the tropical-organisation axis
+# (extratropical, post-tropical, dissipating, inland, extrapolated, unknown) are
+# excluded: status_sshs_to_class returns None and TCDataset drops the row.
+#
+# Class 0 (Background) is assigned by TCDataset for no-storm samples and never
+# appears for an IBTrACS row. This is the canonical label space for the
+# experiment — model/metrics/plotting all read CLASS_NAMES / N_CLASSES from here.
+
+CLASS_BACKGROUND:  int = 0
+CLASS_DISTURBANCE: int = 1
+CLASS_DEPRESSION:  int = 2
+CLASS_STORM:       int = 3
+# 4..8 = Saffir-Simpson category 1..5  (CLASS_STORM + sshs)
+
+CLASS_NAMES: list[str] = [
+    'Background',   # 0  no coherent system
+    'Disturbance',  # 1  DB / LO / WV / MD
+    'Depression',   # 2  TD / SD
+    'Storm',        # 3  TS / SS
+    'Category 1',   # 4  SSHS 1
+    'Category 2',   # 5  SSHS 2
+    'Category 3',   # 6  SSHS 3
+    'Category 4',   # 7  SSHS 4
+    'Category 5',   # 8  SSHS 5
+]
+
+N_CLASSES: int = len(CLASS_NAMES)   # 9
+
+# USA_STATUS code groups (status drives the class — see status_sshs_to_class).
+_DISTURBANCE_STATUS = frozenset({'DB', 'LO', 'WV', 'MD'})
+_DEPRESSION_STATUS  = frozenset({'TD', 'SD'})
+_STORM_STATUS       = frozenset({'TS', 'SS'})
+_HURRICANE_STATUS   = frozenset({'HU', 'HR', 'TY', 'ST', 'TC'})
+# Anything else (EX, ET, PT, DS, IN, XX, …) is off-axis → excluded (None).
+
+
+def status_sshs_to_class(status, sshs) -> Optional[int]:
+    """Map an IBTrACS row to its ordinal organisation class (1..8), or None.
+
+    STATUS-driven: the agency USA_STATUS code sets the class. USA_SSHS supplies
+    ONLY the hurricane category number (1–5) for hurricane-status rows. Off-axis
+    systems (extratropical, post-tropical, dissipating, inland, extrapolated,
+    unknown) return None and are dropped by TCDataset — they are not described
+    by the tropical-organisation / Saffir-Simpson scale. Class 0 (Background) is
+    assigned elsewhere.
+
+    Parameters
+    ----------
+    status : str
+        USA_STATUS code (e.g. 'TD', 'TS', 'SD', 'SS', 'HU', 'EX').
+    sshs : int or float
+        USA_SSHS value; only its rounded integer matters, and only for
+        hurricane-status rows (the category number).
+
+    Returns
+    -------
+    int or None
+        1..8 for an on-axis TC row; None to exclude the row.
+    """
+    s = str(status).strip().upper()
+    if s in _DISTURBANCE_STATUS:
+        return CLASS_DISTURBANCE
+    if s in _DEPRESSION_STATUS:
+        return CLASS_DEPRESSION
+    if s in _STORM_STATUS:
+        return CLASS_STORM
+    if s in _HURRICANE_STATUS:
+        cat = int(round(float(sshs)))
+        if 1 <= cat <= 5:
+            return CLASS_STORM + cat          # 4..8
+        # Hurricane status but sub-category-1 wind (rare inconsistency): keep it
+        # on the axis as Storm rather than dropping a real cyclone.
+        return CLASS_STORM
+    return None
 
 
 # ---------------------------------------------------------------------------

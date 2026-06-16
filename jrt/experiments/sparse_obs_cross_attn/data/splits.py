@@ -66,7 +66,7 @@ import pandas as pd
 
 from datasets.splitting import assign_groups_by_fraction, validate_disjoint_groups
 from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
-    IBTrACSDataset, SSHS_TO_CLASS, N_CLASSES,
+    IBTrACSDataset, status_sshs_to_class, N_CLASSES,
 )
 from experiments.sparse_obs_cross_attn.data.sources.insitu_land import InsituLandDataset
 
@@ -349,7 +349,17 @@ def _split_manifest_entry(ib: IBTrACSDataset, season_list: list[int]) -> dict:
 
 
 def _per_class_counts(ib: IBTrACSDataset) -> dict[str, int]:
-    """Per-class row counts via SSHS_TO_CLASS. Class 0 ('no storm') never appears here."""
-    sshs    = np.round(ib['USA_SSHS']).astype(int)
-    classes = np.array([SSHS_TO_CLASS.get(int(s), -1) for s in sshs])
-    return {str(c): int((classes == c).sum()) for c in range(N_CLASSES)}
+    """Per-class row counts via status_sshs_to_class.
+
+    Class 0 (Background) never appears for an IBTrACS row. Off-axis rows
+    (status_sshs_to_class → None: extratropical/post-tropical/etc.) are excluded
+    and contribute to no class, so the counts sum to n_rows minus excluded rows.
+    """
+    sshs   = np.round(ib['USA_SSHS']).astype(int)
+    status = ib['USA_STATUS'].astype(str)
+    counts = {str(c): 0 for c in range(N_CLASSES)}
+    for st, sh in zip(status, sshs):
+        lab = status_sshs_to_class(st, sh)
+        if lab is not None:
+            counts[str(lab)] += 1
+    return counts

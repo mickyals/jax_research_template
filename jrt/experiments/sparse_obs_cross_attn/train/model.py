@@ -43,7 +43,11 @@ import flax.linen as nn
 from core.nets.transformers import TransformerEncoder
 from core.embeddings import GaussianFourierEmbedding
 
-N_CLASSES = 11
+# Default label-space size. Canonical label names live in
+# data/sources/ibtracs.CLASS_NAMES; the model stays decoupled from the data
+# source (n_classes is set from config in practice). TargetSpec will make this
+# fully config-driven (plan-encoder-probing-rescope r3).
+N_CLASSES = 9
 
 
 def build_attention_mask(
@@ -133,7 +137,8 @@ class TCClassifier(nn.Module):
     n_obs_features : int
         F, number of observation variables. Default 5.
     n_classes : int
-        Output classes. Default 11.
+        Output classes. Default 9 (ordinal organisation scale; see
+        data/sources/ibtracs.CLASS_NAMES).
     full_self_attention : bool
         False (default) = asymmetric mask: stations contextualise each other
         and the query reads them, but stations never attend to the query.
@@ -164,7 +169,7 @@ class TCClassifier(nn.Module):
     >>> variables = model.init(jax.random.PRNGKey(0), X, train=False)
     >>> logits = model.apply(variables, X, train=False)
     >>> logits.shape
-    (B, 11)
+    (B, 9)
     """
 
     embed_dim:         int

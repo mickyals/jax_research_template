@@ -47,6 +47,7 @@ from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDatase
 from experiments.sparse_obs_cross_attn.data.sources.insitu_land import InsituLandDataset
 from experiments.sparse_obs_cross_attn.data.dataset import TCDataset
 from experiments.sparse_obs_cross_attn.data.splits import resolve_splits
+from experiments.sparse_obs_cross_attn.data.targets import resolve_target
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +487,9 @@ class TCDataModule(BaseDataModule):
                                         ('minmax_01'|'minmax_11'|'standardise')
         obs_bounds               dict  optional — {var: [min, max]} for minmax_*,
                                         {var: [mean, std]} for standardise
+        target                   str   default 'organisation' — prediction
+                                        target, resolved against
+                                        data/targets.TARGET_SCHEMA
     """
 
     @classmethod
@@ -546,6 +550,10 @@ class TCDataModule(BaseDataModule):
         self._min_stations       = min_stations
         self._location_encoding  = location_encoding
         self._obs_normalisation  = obs_normalisation
+        # Prediction target (data.target) — drives the label, head size, loss,
+        # metrics, and class names downstream (see data/targets.py). None →
+        # the default 'organisation' 9-class ordinal scale.
+        self._target_spec        = resolve_target(config.get('target'))
 
         ibtracs_full = IBTrACSDataset(ibtracs_path, multi_path, sid_meta_path)
         insitu_full  = InsituLandDataset(obs_path, meta_path)
@@ -583,6 +591,7 @@ class TCDataModule(BaseDataModule):
                 fov_lon=self._fov_lon,
                 obs_bounds=obs_bounds,
                 obs_normalisation=obs_normalisation,
+                target=self._target_spec,
             )
             setattr(self, f'_{split_name}_ds', ds)
 
@@ -658,6 +667,12 @@ class TCDataModule(BaseDataModule):
     def manifest(self) -> dict:
         """Resolved split seasons/SIDs/row counts — see resolve_splits."""
         return self._manifest
+
+    @property
+    def target_spec(self):
+        """The resolved TargetSpec (data.target) — single source of truth for
+        n_classes, class_names, and the default loss downstream."""
+        return self._target_spec
 
     # ------------------------------------------------------------------
     # Station-count diagnostics

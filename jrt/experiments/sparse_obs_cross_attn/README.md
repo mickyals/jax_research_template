@@ -1,22 +1,22 @@
 # Experiment: sparse_obs_cross_attn — TC Intensity Classifier
 
-**Goal:** Given sparse in-situ land surface observations within a fixed radius of a query position at time *t*, predict the Saffir-Simpson Hurricane Wind Scale (SSHS) intensity class of any tropical cyclone present, or classify the sample as background (no storm).
+**Goal:** Given sparse in-situ land surface observations within a fixed radius of a query position at time *t*, predict the degree of tropical-cyclone organisation of any system present, or classify the sample as background (no storm).
 
-This is a binary + ordinal classification problem over 11 classes:
+This is a binary + ordinal classification problem over **9 classes**, ordered by degree of organisation. The class is STATUS-driven (the agency `USA_STATUS` code sets it); `USA_SSHS` supplies only the hurricane category number. Off-axis systems (extratropical, post-tropical, dissipating, etc.) are excluded from training. The canonical label space lives in `data/sources/ibtracs.py` (`CLASS_NAMES`, `status_sshs_to_class`).
 
-| Class | Meaning | SSHS |
-|------:|---------|------|
-| 0 | No storm (background) | — |
-| 1–3 | Sub-tropical / pre-tropical disturbances | −4 to −2 |
-| 4 | Tropical Depression | −1 |
-| 5 | Tropical Storm | 0 |
-| 6–10 | Category 1–5 Hurricane | +1 to +5 |
+| Class | Name | USA_STATUS | Wind |
+|------:|------|------------|------|
+| 0 | Background | — | no coherent system |
+| 1 | Disturbance | DB / LO / WV / MD | — |
+| 2 | Depression | TD / SD | < 35 kt |
+| 3 | Storm | TS / SS | 35–64 kt |
+| 4–8 | Category 1–5 | HU / TY / ST / … | Saffir-Simpson (from SSHS) |
 
 ---
 
 ## Data sources
 
-**IBTrACS** (`ibtracs_full.npz`) — storm centre position, timestamp, and SSHS class for every 6-hourly TC observation in the training domain. 10,191 rows across all cyclone types.
+**IBTrACS** (`ibtracs_full.npz`) — storm centre position, timestamp, `USA_STATUS`, and `USA_SSHS` for every 6-hourly TC observation in the training domain. 10,191 rows across all cyclone types.
 
 **InsituLand** (`insitu_land_clean.npz` + `insitu_land_station_meta.npz`) — land surface hourly observations from Copernicus C3S for 552 stations in the Caribbean / Gulf domain (LAT 0–30°N, LON 100–45°W). 74.7M observation rows.
 
@@ -139,8 +139,8 @@ sparse_obs_cross_attn/
 │   │                       strategies)
 │   └── sources/
 │       ├── ibtracs.py       IBTrACSDataset — filter primitives (seasons,
-│       │                       SIDs, single/multi-storm), sid-meta
-│       │                       validation, SSHS label mapping
+│       │                       SIDs, single/multi-storm), sid-meta validation,
+│       │                       ordinal organisation labels (status_sshs_to_class)
 │       └── insitu_land.py   InsituLandDataset — haversine spatial filter,
 │                                reliability/year filtering, binary-search time queries
 ├── plotting/
@@ -499,7 +499,7 @@ plt.show()
 | `train/loss` | Training objective from `trainer.loss` (e.g. `cross_entropy`, optionally focal / class-weighted) |
 | `val/loss` | Same objective evaluated on val |
 | `val/cross_entropy` | Validation CE — always reported for cross-run comparability; patience metric for early stopping |
-| `val/accuracy` | Top-1 accuracy over all 11 classes |
+| `val/accuracy` | Top-1 accuracy over all 9 classes |
 | `val/binary_accuracy` | TC vs no-TC (class 0 vs class > 0); random chance = 0.5 |
 | `val/mae_class` | Mean \|predicted class − true class\| in class units |
 | `val/qwk` | Quadratic-weighted kappa (full val set, every `eval_plots_every_n_epochs`) — ordinal agreement; 1 = perfect, 0 = chance, negative = worse than chance |

@@ -115,6 +115,12 @@
           "enum": ["unit_circle", "domain"]
         },
 
+        "target": {
+          "type": "string",
+          "description": "Prediction target, resolved against data/targets.TARGET_SCHEMA. Drives label, head size, default loss, metrics, and class names. Currently only nominal targets are wired; 'organisation' is the default 9-class ordinal scale.",
+          "enum": ["organisation"]
+        },
+
         "obs_normalisation": {
           "type": "string",
           "enum": ["minmax_01", "minmax_11", "standardise"]

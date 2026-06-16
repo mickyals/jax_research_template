@@ -42,7 +42,7 @@ from training.trainer import Trainer, TrainState
 B     = 8    # batch size
 N     = 12   # stations per sample
 F     = 5    # obs features
-N_CLS = 11
+N_CLS = 9
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +388,9 @@ from experiments.sparse_obs_cross_attn.train.train import (   # noqa: E402
     _make_attn_figure_callback,
     _make_grad_flow_callback,
 )
+from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (   # noqa: E402
+    CLASS_NAMES,
+)
 
 
 class _RecordingLogger:
@@ -441,6 +444,7 @@ class TestObservabilityCallbacks:
             model, batch, logger,
             data_config={'location_encoding': 'unit_circle',
                          'radius_km': 500.0},
+            class_names=CLASS_NAMES,
             fig_every=2,
         )
         cb(state, epoch=2, global_step=10)
@@ -453,6 +457,7 @@ class TestObservabilityCallbacks:
         cb = _make_attn_figure_callback(
             model, batch, logger,
             data_config={'location_encoding': 'unit_circle'},
+            class_names=CLASS_NAMES,
             fig_every=5,
         )
         cb(state, epoch=3, global_step=10)   # off-cadence

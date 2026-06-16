@@ -37,7 +37,7 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_class_metrics,
     plot_confusion_matrix,
 )
-from experiments.sparse_obs_cross_attn.train.evaluate import CLASS_NAMES
+from experiments.sparse_obs_cross_attn.data.sources.ibtracs import CLASS_NAMES
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
 
 # ---------------------------------------------------------------------------

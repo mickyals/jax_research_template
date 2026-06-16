@@ -107,6 +107,9 @@ data:
   insitu_obs_path:        E:/sparse_obs/insitu-land/insitu_land_clean.npz
   insitu_meta_path:       E:/sparse_obs/insitu-land/insitu_land_station_meta.npz
 
+  # --- Prediction target (see data/targets.TARGET_SCHEMA) ---
+  target:                 organisation
+
   # --- Train/val/test split ---
   # Independent of tc_classifier.yaml's split (this one currently differs:
   # earlier edge years for a quicker, lower-variance search). Same 'season'
@@ -181,7 +184,7 @@ model:
   missingness_indicator: true  # concat obs_mask as its own channel (missing obs filled 0)
   full_self_attention:  true   # false = asymmetric mask; true = complete self-attention
   n_obs_features:       5
-  n_classes:            11
+  n_classes:            9    # ordinal organisation scale (ibtracs.CLASS_NAMES)
   mlp_ratio:            4.0
   mlp_activation:       gelu
   mlp_initializer:      xavier_uniform

@@ -217,8 +217,8 @@ class TestBinaryMetrics:
 
     def test_counts_add_up_to_total(self):
         rng    = np.random.default_rng(0)
-        preds  = rng.integers(0, 11, size=40).astype(np.int32)
-        labels = rng.integers(0, 11, size=40).astype(np.int32)
+        preds  = rng.integers(0, N_CLASSES, size=40).astype(np.int32)
+        labels = rng.integers(0, N_CLASSES, size=40).astype(np.int32)
         bm = binary_metrics(preds, labels)
         assert bm['tp'] + bm['fp'] + bm['fn'] + bm['tn'] == 40
 

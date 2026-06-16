@@ -8,7 +8,7 @@ Produces
 - Scalar metrics (loss, cross-entropy, accuracy, binary_accuracy, mae_class)
 - Quadratic-weighted kappa (ordinal agreement) and ECE (calibration gap),
   computed over the full accumulated split — see metrics.py
-- 11×11 confusion matrix — row-normalised (recall per class) + raw counts
+- 9×9 confusion matrix — row-normalised (recall per class) + raw counts
 - Per-class precision, recall, F1 bar chart
 - Binary detection summary (TC vs. no-storm)
 
@@ -43,8 +43,9 @@ import matplotlib.pyplot as plt
 import yaml
 
 from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
+from experiments.sparse_obs_cross_attn.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
 from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
+from experiments.sparse_obs_cross_attn.train.model import TCClassifier
 from training.metrics import (
     apply_temperature,
     expected_calibration_error,
@@ -63,24 +64,8 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
 from training.trainer import Trainer
 
 
-# ---------------------------------------------------------------------------
-# Class label names  (label k → SSHS k-5)
-# ---------------------------------------------------------------------------
-
-CLASS_NAMES: list[str] = [
-    'Background',    # 0  — absence (no TC at query); NOT the bottom of the SSHS
-                     #      organisational scale, a categorically separate class
-    'SSHS -4',      # 1
-    'SSHS -3',      # 2
-    'SSHS -2',      # 3
-    'SSHS -1 (TD)', # 4  — tropical depression
-    'SSHS  0 (TS)', # 5  — tropical storm
-    'Cat 1',        # 6
-    'Cat 2',        # 7
-    'Cat 3',        # 8
-    'Cat 4',        # 9
-    'Cat 5',        # 10
-]
+# CLASS_NAMES / N_CLASSES are the canonical label space, imported from
+# data/sources/ibtracs.py (the experiment's single source of truth).
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +359,10 @@ def evaluate(
         config['trainer']['checkpoint_dir'] = str(checkpoint_dir)
 
     dm          = TCDataModule.from_config(config['data'])
+    target_spec = dm.target_spec
+    class_names = target_spec.class_names
+    n_classes   = target_spec.n_classes
+    config['model']['n_classes'] = n_classes
     model       = TCClassifier(**config['model'])
     metrics_fns = build_metrics_fns()
     trainer     = Trainer(model, metrics_fns, config['trainer'])
@@ -397,7 +386,7 @@ def evaluate(
     temperature = fit_temperature(val_logits, val_labels)
 
     print_report(preds, labels, logits, metrics_fns,
-                 split=split, class_names=CLASS_NAMES, n_classes=N_CLASSES,
+                 split=split, class_names=class_names, n_classes=n_classes,
                  temperature=temperature)
 
     if meta is not None:
@@ -410,18 +399,18 @@ def evaluate(
                   f"mae={m['mae_class']:.2f}")
         print()
 
-    cm  = confusion_matrix(preds, labels)
+    cm  = confusion_matrix(preds, labels, n_classes)
     pcm = per_class_metrics(cm)
 
     fig_norm = plot_confusion_matrix(
-        cm, CLASS_NAMES, normalize=True,
+        cm, class_names, normalize=True,
         title=f'Confusion Matrix — {split} (row-normalised)',
     )
     fig_raw = plot_confusion_matrix(
-        cm, CLASS_NAMES, normalize=False,
+        cm, class_names, normalize=False,
         title=f'Confusion Matrix — {split} (counts)',
     )
-    fig_cls = plot_class_metrics(pcm, CLASS_NAMES)
+    fig_cls = plot_class_metrics(pcm, class_names)
 
     if output_dir is not None:
         out = Path(output_dir)
@@ -458,8 +447,8 @@ def evaluate(
         ))
 
         def _sample_title(i: int) -> str:
-            true_c = CLASS_NAMES[int(attn_batch['y'][i])]
-            pred_c = CLASS_NAMES[int(batch_preds[i])]
+            true_c = class_names[int(attn_batch['y'][i])]
+            pred_c = class_names[int(batch_preds[i])]
             sid    = batch_meta['sid'][i] if batch_meta is not None else None
             who    = (f"{sid} {sid_to_name.get(sid, '')}".strip()
                       if sid is not None else 'background')

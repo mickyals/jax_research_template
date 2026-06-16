@@ -41,7 +41,6 @@ import yaml
 
 from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
 from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import N_CLASSES
 from datasets.class_weights import class_weights_from_counts
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier
 from training.tuner import Tuner, apply_search_space
@@ -127,6 +126,10 @@ def tune(
     # TCLoader is re-iterable so calling train_loader_fn() per trial is cheap.
     dm = TCDataModule.from_config(base_config["data"])
 
+    # TargetSpec (data.target) drives the head size — sync n_classes so every
+    # trial's model matches the chosen target (suggest_fn deepcopies this).
+    base_config["model"]["n_classes"] = dm.target_spec.n_classes
+
     _steps_per_epoch = trainer_cfg.get("steps_per_epoch")
 
     def train_loader_fn():
@@ -141,7 +144,7 @@ def tune(
     loss_kwargs = dict(trainer_cfg.get("loss_kwargs") or {})
     cw_scheme   = base_config["data"].get("class_weight_scheme", "none")
     if "class_weights" not in loss_kwargs and cw_scheme != "none":
-        n_classes = base_config["model"].get("n_classes", N_CLASSES)
+        n_classes = dm.target_spec.n_classes
         counts = [int(dm.manifest()["train"]["class_counts"].get(str(c), 0))
                   for c in range(n_classes)]
         loss_kwargs["class_weights"] = class_weights_from_counts(
@@ -150,7 +153,7 @@ def tune(
         ).tolist()
 
     metrics_fns = build_metrics_fns(
-        loss        = trainer_cfg.get("loss", "cross_entropy"),
+        loss        = trainer_cfg.get("loss", dm.target_spec.loss),
         loss_kwargs = loss_kwargs,
     )
 

@@ -27,7 +27,6 @@ import yaml
 
 from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
 from experiments.sparse_obs_cross_attn.train.evaluate import (
-    CLASS_NAMES,
     collect_predictions,
     confusion_matrix,
     per_class_metrics,
@@ -40,7 +39,7 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_confusion_matrix,
 )
 from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
+from experiments.sparse_obs_cross_attn.train.model import TCClassifier
 from datasets.class_weights import class_weights_from_counts
 from training.metrics import (
     cross_entropy,
@@ -105,6 +104,7 @@ def _make_attn_figure_callback(
     probe_batch: dict,
     logger,
     data_config: dict,
+    class_names: list[str],
     fig_every:   int = 5,
 ) -> Callable[[TrainState, int, int], None]:
     """Return an **epoch-level** callback that logs attention figures.
@@ -145,8 +145,8 @@ def _make_attn_figure_callback(
             return
         logits, weights = _attn(state.params)
         weights = np.asarray(weights)               # (L, B, H, N+1, N+1)
-        true_c  = CLASS_NAMES[int(probe_batch['y'][0])]
-        pred_c  = CLASS_NAMES[int(np.asarray(logits)[0].argmax())]
+        true_c  = class_names[int(probe_batch['y'][0])]
+        pred_c  = class_names[int(np.asarray(logits)[0].argmax())]
         title   = f'true: {true_c}, pred: {pred_c}'
 
         fig = plot_attention_geographic(
@@ -240,6 +240,7 @@ def _make_eval_plots_callback(
     model:       TCClassifier,
     val_loader,
     logger,
+    class_names: list[str],
     every_n_epochs: int = 1,
 ) -> Callable[[TrainState, int, int], None]:
     """Return an epoch-level callback that logs confusion matrix and per-class F1.
@@ -276,15 +277,15 @@ def _make_eval_plots_callback(
         logger.log_metrics({'val/qwk': qwk, 'val/ece': ece}, step=global_step)
 
         fig_norm = plot_confusion_matrix(
-            cm, CLASS_NAMES, normalize=True,
+            cm, class_names, normalize=True,
             title=f'Val confusion matrix — epoch {epoch} (recall per class)',
         )
         fig_raw = plot_confusion_matrix(
-            cm, CLASS_NAMES, normalize=False,
+            cm, class_names, normalize=False,
             title=f'Val confusion matrix — epoch {epoch} (counts)',
         )
         fig_cls = plot_class_metrics(
-            pcm, CLASS_NAMES,
+            pcm, class_names,
         )
 
         logger.log_figure('val/confusion_norm',    fig_norm, step=global_step)
@@ -374,6 +375,13 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # ------------------------------------------------------------------
     dm = TCDataModule.from_config(config['data'])
 
+    # TargetSpec (data.target) is the single source of truth for the head size,
+    # class names, and default loss. Sync the model's n_classes to it so the
+    # head always matches the chosen target.
+    target_spec = dm.target_spec
+    class_names = target_spec.class_names
+    config['model']['n_classes'] = target_spec.n_classes
+
     steps_per_epoch = trainer_cfg.get('steps_per_epoch')
     dm.summary(steps_per_epoch=steps_per_epoch)
 
@@ -415,7 +423,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # Precedence: an explicit loss_kwargs.class_weights wins; otherwise a
     # data.class_weight_scheme is computed from the train split's class counts.
     if 'class_weights' not in loss_kwargs and cw_scheme != 'none':
-        n_classes = config['model'].get('n_classes', N_CLASSES)
+        n_classes = target_spec.n_classes
         counts = [int(manifest['train']['class_counts'].get(str(c), 0))
                   for c in range(n_classes)]
         cw = class_weights_from_counts(
@@ -431,7 +439,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
         print(f"  class weighting [{cw_scheme}]: {np.round(cw, 3).tolist()}")
 
     metrics_fns = build_metrics_fns(
-        loss        = trainer_cfg.get('loss', 'cross_entropy'),
+        loss        = trainer_cfg.get('loss', target_spec.loss),
         loss_kwargs = loss_kwargs,
     )
     trainer     = Trainer(model, metrics_fns, trainer_cfg)
@@ -480,8 +488,10 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     epoch_callbacks = [
         _make_attn_figure_callback(model, probe_batch, trainer.logger,
                                    data_config=config['data'],
+                                   class_names=class_names,
                                    fig_every=fig_every),
         _make_eval_plots_callback(model, val_loader, trainer.logger,
+                                  class_names=class_names,
                                   every_n_epochs=eval_plots_every),
         grad_flow_cb,
     ]

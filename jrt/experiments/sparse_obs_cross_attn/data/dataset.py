@@ -50,12 +50,11 @@ from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
-    IBTrACSDataset, SSHS_TO_CLASS,
-)
+from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDataset
 from experiments.sparse_obs_cross_attn.data.sources.insitu_land import (
     InsituLandDataset, DEFAULT_OBS_VARS,
 )
+from experiments.sparse_obs_cross_attn.data.targets import TargetSpec, resolve_target
 from experiments.sparse_obs_cross_attn.data.encoding import (
     encode_domain, encode_unit_circle,
 )
@@ -124,6 +123,11 @@ class TCDataset:
         'minmax_11'  : scale to [-1, 1] using (min, max) bounds.
         'standardise': z-score using (mean, std) bounds.
         Default 'minmax_01'.
+    target : str or TargetSpec or None
+        Prediction target. A name resolved against data/targets.TARGET_SCHEMA,
+        a TargetSpec directly, or None → the default ('organisation', the
+        9-class ordinal scale). The spec's labeller produces each TC sample's
+        label; the model/loss/metrics are selected from it upstream.
     """
 
     def __init__(
@@ -141,6 +145,7 @@ class TCDataset:
         fov_lon:               tuple[float, float] = (-100.0, -45.0),
         obs_bounds:            Optional[dict[str, tuple[float, float]]] = None,
         obs_normalisation:     str = 'minmax_01',
+        target:                Optional[str | TargetSpec] = None,
     ) -> None:
 
         if location_encoding not in ('unit_circle', 'domain'):
@@ -175,6 +180,9 @@ class TCDataset:
         self.fov_lon               = tuple(fov_lon)
         self.obs_bounds            = obs_bounds
         self.obs_normalisation     = obs_normalisation
+        self.target_spec           = (
+            target if isinstance(target, TargetSpec) else resolve_target(target)
+        )
 
         # Pre-compute per-variable normalisation arrays for fast reuse.
         # _obs_lo/_obs_hi store (min, max) for minmax modes and (mean, std)
@@ -188,11 +196,12 @@ class TCDataset:
             self._obs_lo = None
             self._obs_hi = None
 
-        # Cache frequently accessed arrays for fast sample assembly
+        # Cache frequently accessed arrays for fast sample assembly. The label
+        # columns are read by the target spec's labeller straight from
+        # `ibtracs`, so they are not cached here (target-agnostic).
         self._lat  = ibtracs['LAT'].astype(np.float32)
         self._lon  = ibtracs['LON'].astype(np.float32)
         self._time = ibtracs['ISO_TIME']                    # int64 Unix-ns
-        self._sshs = ibtracs['USA_SSHS'].astype(np.float32)
         self._sid  = ibtracs['SID']
 
     def __len__(self) -> int:
@@ -228,18 +237,17 @@ class TCDataset:
 
         Returns
         -------
-        dict | None  — None when matching stations < min_stations or SSHS
-        value is not in SSHS_TO_CLASS.
+        dict | None  — None when matching stations < min_stations or the target
+        spec's labeller drops the row (e.g. organisation excludes off-axis
+        statuses: extratropical, post-tropical, dissipating, etc.).
         """
-        lat      = float(self._lat[idx])
-        lon      = float(self._lon[idx])
-        ts       = int(self._time[idx])
-        sshs_raw = float(self._sshs[idx])
+        lat = float(self._lat[idx])
+        lon = float(self._lon[idx])
+        ts  = int(self._time[idx])
 
-        sshs = int(round(sshs_raw))
-        if sshs not in SSHS_TO_CLASS:
+        label = self.target_spec.labeller(self.ibtracs, idx)
+        if label is None:
             return None
-        label = SSHS_TO_CLASS[sshs]
 
         df = self.insitu.get_obs_near(
             query_lat=lat,
