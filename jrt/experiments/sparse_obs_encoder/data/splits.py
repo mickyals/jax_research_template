@@ -1,5 +1,5 @@
 """
-experiments/sparse_obs_cross_attn/data/splits.py
+experiments/sparse_obs_encoder/data/splits.py
 
 Resolves the YAML data.split block into per-split filtered datasets and a
 JSON-serialisable run manifest.
@@ -51,10 +51,10 @@ from typing import Optional
 import numpy as np
 
 from datasets.splitting import assign_groups_by_fraction
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
+from experiments.sparse_obs_encoder.data.sources.ibtracs import (
     IBTrACSDataset, status_sshs_to_class, N_CLASSES,
 )
-from experiments.sparse_obs_cross_attn.data.sources.insitu_land import InsituLandDataset
+from experiments.sparse_obs_encoder.data.sources.insitu_land import InsituLandDataset
 
 
 SPLIT_NAMES = ('train', 'val', 'test')

@@ -1,7 +1,7 @@
 """
-experiments/sparse_obs_cross_attn/plotting/plotting.py
+experiments/sparse_obs_encoder/plotting/plotting.py
 
-Plotting functions for the sparse_obs_cross_attn experiment: confusion
+Plotting functions for the sparse_obs_encoder experiment: confusion
 matrix / per-class metric charts, and geographic attention visualizations.
 """
 
@@ -13,7 +13,7 @@ import numpy as np
 import jax
 import matplotlib.pyplot as plt
 
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_encoder.train.model import TCEncoder
 from utils.plotting._style import _value_scatter
 from utils.plotting.curves import plot_grouped_bars
 from utils.plotting.fields import plot_heatmap, plot_scatter_overlay
@@ -94,7 +94,7 @@ def plot_class_metrics(
 # ---------------------------------------------------------------------------
 
 def extract_attention_weights(
-    model:     TCClassifier,
+    model:     TCEncoder,
     variables: dict,
     batch:     dict,
 ) -> np.ndarray:
@@ -205,7 +205,7 @@ def plot_attention_mask(
     -------
     plt.Figure
     """
-    from experiments.sparse_obs_cross_attn.train.model import (
+    from experiments.sparse_obs_encoder.train.model import (
         build_attention_mask,
     )
     import jax.numpy as jnp

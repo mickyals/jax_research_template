@@ -240,7 +240,7 @@ class CombinedEmbedding(nn.Module):
     time_embedding : nn.Module, optional
         Applied to x[:, spatial_dim:]. If None, temporal coords
         are concatenated raw. If the auxiliary values are already
-        normalised scalars, leave this as None and they will be
+        normalized scalars, leave this as None and they will be
         concatenated directly.
 
     Notes

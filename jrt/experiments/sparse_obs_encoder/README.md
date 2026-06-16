@@ -45,7 +45,7 @@ This is a binary + ordinal classification problem over **9 classes**, ordered by
 
 ## Architecture
 
-`TCClassifier` is a single `TransformerEncoder` over 1+N tokens, **CLS-first** (ViT-style): one query/CLS token at position 0 followed by N station tokens. An asymmetric attention mask separates the two roles — stations contextualise each other without seeing the query; the query then reads the fully-contextualised station network and drives the classification head (read off token 0).
+`TCEncoder` is a single `TransformerEncoder` over 1+N tokens, **CLS-first** (ViT-style): one query/CLS token at position 0 followed by N station tokens. An asymmetric attention mask separates the two roles — stations contextualise each other without seeing the query; the query then reads the fully-contextualised station network (read off token 0). The normalised CLS embedding `z` is the encoder output; an **optional** head (sized by the TargetSpec) maps it to logits — set `n_classes` for a head, leave it `None` for a headless encoder that returns `z` directly.
 
 ### Token construction
 
@@ -115,24 +115,24 @@ Stations within the radius may have missing values for some variables. Missing e
     query_token = token_proj(query_input)                                  (B, 1, D)
 4.  tokens  = concat([query_token, station_tokens], axis=1)                 (B, 1+N, D)   CLS-first
 5.  encoded = TransformerEncoder(tokens, mask=asymmetric_mask)              (B, 1+N, D)
-6.  z       = LayerNorm(encoded[:, 0, :])                                   (B, D)        TCEncoder output
-7.  logits  = head(z)                                                       (B, 9)        linear probe
+6.  z       = LayerNorm(encoded[:, 0, :])                                   (B, D)        encoder output (headless → returned here)
+7.  logits  = head(z)                                                       (B, C)        optional head (n_classes set); else step 6 is the output
 ```
 
 ### Encoder / head split (frozen-encoder probing)
 
-`TCClassifier` = **`TCEncoder`** (steps 1–6 above: token construction, Transformer, final LayerNorm) + a **pure-linear `nn.Dense` head** (step 7). The param tree therefore splits cleanly:
+`TCEncoder` is **one module**: steps 1–6 (token construction, Transformer, final LayerNorm → the normalised CLS embedding `z`) are the transferable asset, and the head (step 7) is an **optional, separable param leaf**. `n_classes=int` builds a pure-linear `nn.Dense` head (the target-specific probe); `n_classes=None` is **headless** — `__call__` returns `z` directly. The param tree is flat and the head is a single leaf:
 
-| Subtree | Contents | Role |
-|---------|----------|------|
-| `params['encoder']` | `token_proj`, `query_obs_slots`, `[query_pos_slots]`, `transformer`, `norm` | the trained, transferable asset |
-| `params['head']` | `kernel`, `bias` | target-specific linear probe (swappable) |
+| Param leaves | Role |
+|--------------|------|
+| `token_proj`, `query_obs_slots`, `[query_pos_slots]`, `transformer`, `norm` | the trained, transferable encoder asset (every non-`head` leaf) |
+| `head` (`kernel`, `bias`) | target-specific linear probe (swappable; omitted when headless) |
 
-This is the seam for the research question — *does a frozen encoder + a fresh head transfer to another target column?* Three helpers in `model.py` make it a few operations:
+There is **no nested `'encoder'` subtree** — the seam is the **`head` key**. A headless `TCEncoder`'s param tree is exactly the set of encoder leaves, so split params run directly on one. This is the seam for the research question — *does a frozen encoder + a fresh head transfer to another target column?* Three helpers in `model.py` make it a few operations:
 
-- `split_encoder_head(params)` → `(encoder_params, head_params)`
+- `split_encoder_head(params)` → `(encoder_params, head_params)` — slices on the `head` key (`encoder_params` = every other leaf)
 - `attach_encoder(fresh_params, encoder_params)` → load a trained encoder into a freshly-initialised model that carries a new head
-- `encoder_freeze_labels(params)` → an optax `multi_transform` label tree (`'frozen'` encoder / `'trainable'` head) to freeze the encoder during probe training
+- `encoder_freeze_labels(params)` → an optax `multi_transform` label tree (`'frozen'` for every encoder leaf / `'trainable'` for `head`) to freeze the encoder during probe training
 
 The head is a *pure* `Dense` over the normalised CLS embedding (the final norm lives in the encoder), so a probe measures linear separability of the frozen representation. *(The train-time wiring to load an encoder checkpoint and freeze it is added alongside the first probe run — it needs a trained encoder to exist first.)*
 
@@ -177,7 +177,7 @@ sparse_obs_cross_attn/
 │                           attention-matrix grid, and the static
 │                           asymmetric-mask figure
 └── train/
-    ├── model.py         TCClassifier — unified Transformer encoder
+    ├── model.py         TCEncoder — unified Transformer encoder
     ├── metrics.py       build_metrics_fns glue (metrics live in
     │                       jrt/training/metrics.py)
     ├── train.py         CLI entry point + observability callbacks
@@ -263,21 +263,21 @@ $env:PYTHONPATH = "jrt"
 `CFG` below is the config path (positional argument for every entry point):
 
 ```bash
-CFG=jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+CFG=jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
 
 # Train                                  # Resume from latest checkpoint
-python -m experiments.sparse_obs_cross_attn.train.train $CFG
-python -m experiments.sparse_obs_cross_attn.train.train $CFG --resume
+python -m experiments.sparse_obs_encoder.train.train $CFG
+python -m experiments.sparse_obs_encoder.train.train $CFG --resume
 
 # Evaluate (best checkpoint)
-python -m experiments.sparse_obs_cross_attn.train.evaluate $CFG \
+python -m experiments.sparse_obs_encoder.train.evaluate $CFG \
     --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
     --output_dir    runs/tc_classifier/run_01/eval \
     --split test --n_attn_samples 4 --geo --no_show
 
 # Hyperparameter search
-python -m experiments.sparse_obs_cross_attn.train.tune \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+python -m experiments.sparse_obs_encoder.train.tune \
+    jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
     --n_trials 50 \
     --storage sqlite:///runs/tc_classifier/hp_search/study.db \
     --study_name tc_classifier_v1
@@ -313,12 +313,12 @@ reference above):
 
 ```bash
 # First run
-python -m experiments.sparse_obs_cross_attn.train.train \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+python -m experiments.sparse_obs_encoder.train.train \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
 
 # Resume an interrupted run
-python -m experiments.sparse_obs_cross_attn.train.train \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_encoder.train.train \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
     --resume
 ```
 
@@ -340,19 +340,19 @@ The config path is a **positional** argument:
 
 ```bash
 # Evaluate on test split (default)
-python -m experiments.sparse_obs_cross_attn.train.evaluate \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_encoder.train.evaluate \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
     --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
     --output_dir runs/tc_classifier/run_01/eval
 
 # Validation split
-python -m experiments.sparse_obs_cross_attn.train.evaluate \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_encoder.train.evaluate \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
     --split val
 
 # Save plots to disk without displaying
-python -m experiments.sparse_obs_cross_attn.train.evaluate \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_encoder.train.evaluate \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
     --output_dir runs/tc_classifier/run_01/eval \
     --no_show
 ```
@@ -368,13 +368,13 @@ Outputs:
 
 ```bash
 # In-memory search (quick experiments, results lost on exit)
-python -m experiments.sparse_obs_cross_attn.train.tune \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+python -m experiments.sparse_obs_encoder.train.tune \
+    jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
     --n_trials 25
 
 # Persistent search — resume by running the same command again
-python -m experiments.sparse_obs_cross_attn.train.tune \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+python -m experiments.sparse_obs_encoder.train.tune \
+    jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
     --n_trials 50 \
     --storage sqlite:///runs/tc_classifier/hp_search/study.db \
     --study_name tc_classifier_v1
@@ -397,7 +397,7 @@ os.environ['JAX_LOG_COMPILES'] = '0'
 # Cell 2 — load config, override paths for this machine
 import yaml
 
-with open('jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml') as f:
+with open('jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml') as f:
     config = yaml.safe_load(f)
 
 DATA_ROOT = '/data/sparse_obs'   # ← set to your data location
@@ -416,21 +416,21 @@ config['trainer'].setdefault('seed', seed)
 
 ```python
 # Cell 3 — build components
-from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
+from experiments.sparse_obs_encoder.train.model import TCEncoder
 from training.trainer import Trainer
 
-dm           = TCDataModule.from_config(config['data'])
-model        = TCClassifier(**config['model'])
-metrics_fns  = build_metrics_fns()
-trainer      = Trainer(model, metrics_fns, config['trainer'])
+dm = TCDataModule.from_config(config['data'])
+model = TCEncoder(**config['model'])
+metrics_fns = build_metrics_fns()
+trainer = Trainer(model, metrics_fns, config['trainer'])
 train_loader = dm.train_loader(seed=seed, shuffle=True)
-val_loader   = dm.val_loader()
+val_loader = dm.val_loader()
 
 # Sanity-check one batch
 batch = next(iter(train_loader))
-print('station_obs: ', batch['X']['station_obs'].shape)   # (B, N, F)
+print('station_obs: ', batch['X']['station_obs'].shape)  # (B, N, F)
 print('station_mask:', batch['X']['station_mask'].shape)  # (B, N)
 print('y classes:   ', set(batch['y'].tolist()))
 ```
@@ -462,12 +462,12 @@ best_state = trainer.fit(train_loader, val_loader,
 
 ```python
 # Cell 6 — evaluate on test split
-from experiments.sparse_obs_cross_attn.train.evaluate import (
-    collect_predictions, confusion_matrix, per_class_metrics,
-    per_storm_metrics, CLASS_NAMES,
+from experiments.sparse_obs_encoder.train.evaluate import (
+  collect_predictions, confusion_matrix, per_class_metrics,
+  per_storm_metrics, CLASS_NAMES,
 )
-from experiments.sparse_obs_cross_attn.plotting.plotting import (
-    plot_confusion_matrix, plot_class_metrics,
+from experiments.sparse_obs_encoder.plotting.plotting import (
+  plot_confusion_matrix, plot_class_metrics,
 )
 import matplotlib.pyplot as plt
 
@@ -477,7 +477,7 @@ preds, labels, logits, meta = collect_predictions(model, variables, dm.test_load
 # Every prediction is attributable to a named storm (background → sid None)
 storm_metrics = per_storm_metrics(preds, labels, meta['sid'])
 
-cm  = confusion_matrix(preds, labels)
+cm = confusion_matrix(preds, labels)
 pcm = per_class_metrics(cm)
 plot_confusion_matrix(cm, CLASS_NAMES, normalize=True, title='Test — row-normalised')
 plot_class_metrics(pcm, CLASS_NAMES)
@@ -486,14 +486,14 @@ plt.show()
 
 ```python
 # Cell 7 — attention figures
-from experiments.sparse_obs_cross_attn.plotting.plotting import (
-    extract_attention_weights, plot_attention_geographic,
-    plot_attention_matrix_grid, plot_attention_mask,
+from experiments.sparse_obs_encoder.plotting.plotting import (
+  extract_attention_weights, plot_attention_geographic,
+  plot_attention_matrix_grid, plot_attention_mask,
 )
 
-attn_batch   = next(iter(val_loader))
+attn_batch = next(iter(val_loader))
 attn_weights = extract_attention_weights(model, variables, attn_batch)
-print('weights:', attn_weights.shape)   # (num_layers, B, H, N+1, N+1)
+print('weights:', attn_weights.shape)  # (num_layers, B, H, N+1, N+1)
 
 # Geographic map — query row of the last layer (CLS-first: query is token 0).
 # unit_circle needs nothing extra; domain mode requires the caller to decode
@@ -501,12 +501,12 @@ print('weights:', attn_weights.shape)   # (num_layers, B, H, N+1, N+1)
 # evaluate.domain_latlon_for_sample(attn_batch, 0, fov_lat, fov_lon) and pass
 # station_latlon=/query_latlon=.
 fig = plot_attention_geographic(
-    attn_weights[-1][:, :, 0, :], attn_batch,
-    location_encoding = config['data']['location_encoding'],
-    fov_lat           = config['data'].get('fov_lat'),
-    fov_lon           = config['data'].get('fov_lon'),
-    radius_km         = config['data'].get('radius_km', 500.0),
-    sample_idx        = 0,
+  attn_weights[-1][:, :, 0, :], attn_batch,
+  location_encoding=config['data']['location_encoding'],
+  fov_lat=config['data'].get('fov_lat'),
+  fov_lon=config['data'].get('fov_lon'),
+  radius_km=config['data'].get('radius_km', 500.0),
+  sample_idx=0,
 )
 
 # Layers × heads grid of full (N+1)×(N+1) matrices

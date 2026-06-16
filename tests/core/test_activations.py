@@ -325,9 +325,11 @@ class TestWireActivations:
         out = WireRealActivation()(x_real)
         assert not jnp.issubdtype(out.dtype, jnp.complexfloating)
 
-    def test_wire_real_output_is_nonnegative(self, x_real):
-        out = WireRealActivation()(x_real)
-        assert jnp.all(out >= 0.)
+    def test_wire_real_oscillates(self, x_real):
+        # Imaginary part of the Gabor: sin(omega_0 x) exp(...) — oscillates, so
+        # it takes both signs (unlike the old magnitude form).
+        out = WireRealActivation(omega_0=20., sigma_0=10.)(x_real)
+        assert jnp.any(out > 0.) and jnp.any(out < 0.)
 
     def test_wire_real_output_shape(self, x_real):
         assert WireRealActivation()(x_real).shape == x_real.shape
@@ -343,11 +345,11 @@ class TestWireActivations:
         assert jnp.all(jnp.isfinite(grad))
         assert not jnp.issubdtype(grad.dtype, jnp.complexfloating)
 
-    def test_wire_real_matches_abs_of_wire(self, x_real):
-        """WIRE_REAL should equal |WIRE| pointwise."""
-        wire_abs = jnp.abs(WireActivation()(x_real))
+    def test_wire_real_is_imag_part_of_wire(self, x_real):
+        """WIRE_REAL == imaginary part of the complex Gabor: sin(w0 x) exp(-(s0 x)^2)."""
+        wire_imag = jnp.imag(WireActivation()(x_real))
         wire_real = WireRealActivation()(x_real)
-        assert jnp.allclose(wire_abs, wire_real, atol=1e-6)
+        assert jnp.allclose(wire_imag, wire_real, atol=1e-6)
 
     # --- WIRE_FINER (complex output) ---
 
@@ -389,9 +391,9 @@ class TestWireActivations:
         out = WireFinerRealActivation()(x_real)
         assert not jnp.issubdtype(out.dtype, jnp.complexfloating)
 
-    def test_wire_finer_real_output_is_nonnegative(self, x_real):
-        out = WireFinerRealActivation()(x_real)
-        assert jnp.all(out >= 0.)
+    def test_wire_finer_real_oscillates(self, x_real):
+        out = WireFinerRealActivation(sigma_0=10., omega_finer=5.)(x_real)
+        assert jnp.any(out > 0.) and jnp.any(out < 0.)
 
     def test_wire_finer_real_grad(self):
         def f(x):
@@ -401,10 +403,13 @@ class TestWireActivations:
         assert jnp.all(jnp.isfinite(grad))
         assert not jnp.issubdtype(grad.dtype, jnp.complexfloating)
 
-    def test_wire_finer_real_matches_abs_of_wire_finer(self, x_real):
-        finer_abs = jnp.abs(WireFinerActivation()(x_real))
-        finer_real = WireFinerRealActivation()(x_real)
-        assert jnp.allclose(finer_abs, finer_real, atol=1e-6)
+    def test_wire_finer_real_matches_formula(self, x_real):
+        """WIRE_FINER_REAL == sin(w_f(|x|+1)x) * exp(-((s0/w_f) sin(w_f(|x|+1)x))^2)."""
+        sigma_0, w_f = 10., 5.
+        y = jnp.sin(w_f * (jnp.abs(x_real) + 1.) * x_real)
+        expected = y * jnp.exp(-((sigma_0 / w_f) * y) ** 2)
+        out = WireFinerRealActivation(sigma_0=sigma_0, omega_finer=w_f)(x_real)
+        assert jnp.allclose(out, expected, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +497,7 @@ class TestJitCompatibility:
         ("GAUSSIAN", {"sigma": 10.}),
         ("GAUSSIAN_FINER", {"sigma": 10., "omega": 30.}),
         ("WIRE_REAL", {"omega_0": 20., "sigma_0": 10.}),
-        ("WIRE_FINER_REAL", {"omega_0": 20., "sigma_0": 10., "omega_finer": 5.}),
+        ("WIRE_FINER_REAL", {"sigma_0": 10., "omega_finer": 5.}),
         ("HOSC", {"beta": 10.}),
         ("HOSC_FINER", {"beta": 10., "omega": 30.}),
         ("SINC", {"omega": 30.}),

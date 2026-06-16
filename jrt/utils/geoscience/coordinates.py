@@ -1,7 +1,7 @@
 """
 utils/geoscience/coordinates.py
 
-Pure lat/lon coordinate encoders. NumPy, vectorised, accept scalars or arrays.
+Pure lat/lon coordinate encoders. NumPy, vectorized, accept scalars or arrays.
 
 These map geographic (lat, lon) in degrees to model-friendly coordinate
 representations. They live in the geoscience utils — not in the data-loading

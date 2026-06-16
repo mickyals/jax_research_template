@@ -1,18 +1,18 @@
 """
-experiments/sparse_obs_cross_attn/train/tune.py
+experiments/sparse_obs_encoder/train/tune.py
 
-Hyperparameter search for TCClassifier via Optuna.
+Hyperparameter search for TCEncoder via Optuna.
 
 Usage
 -----
     # Fresh search — results lost on exit (quick experiments)
-    python -m experiments.sparse_obs_cross_attn.train.tune \
-        jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+    python -m experiments.sparse_obs_encoder.train.tune \
+        jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
         --n_trials 25
 
     # Persistent search — resume by running the same command again
-    python -m experiments.sparse_obs_cross_attn.train.tune \
-        jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+    python -m experiments.sparse_obs_encoder.train.tune \
+        jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
         --n_trials 50 \
         --storage sqlite:///runs/tc_classifier/hp_search/study.db \
         --study_name tc_classifier_v1
@@ -39,10 +39,10 @@ from pathlib import Path
 
 import yaml
 
-from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
+from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
 from datasets.class_weights import class_weights_from_counts
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_encoder.train.model import TCEncoder
 from training.tuner import Tuner, apply_search_space
 
 
@@ -77,8 +77,8 @@ def suggest_fn(trial, base_config: dict) -> dict:
     return cfg
 
 
-def model_fn(config: dict) -> TCClassifier:
-    return TCClassifier(**config["model"])
+def model_fn(config: dict) -> TCEncoder:
+    return TCEncoder(**config["model"])
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ def tune(
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Hyperparameter search for TCClassifier."
+        description="Hyperparameter search for TCEncoder."
     )
     p.add_argument("config",             type=str,
                    help="Path to tc_tune.yaml")

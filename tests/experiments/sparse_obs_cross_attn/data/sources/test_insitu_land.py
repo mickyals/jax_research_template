@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/data/sources/insitu_land.py.
+Tests for experiments/sparse_obs_encoder/data/sources/insitu_land.py.
 
 All fixtures are synthetic and built in memory.
 """
@@ -7,7 +7,7 @@ All fixtures are synthetic and built in memory.
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.data.sources.insitu_land import (
+from experiments.sparse_obs_encoder.data.sources.insitu_land import (
     InsituLandDataset, ALL_OBS_VARS, DEFAULT_OBS_VARS,
 )
 

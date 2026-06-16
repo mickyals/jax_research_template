@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/data/targets.py.
+Tests for experiments/sparse_obs_encoder/data/targets.py.
 
 No real data files required — the organisation labeller is exercised against a
 plain dict (it only does ``ibtracs[col][idx]`` lookups).
@@ -8,7 +8,7 @@ plain dict (it only does ``ibtracs[col][idx]`` lookups).
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.data.targets import (
+from experiments.sparse_obs_encoder.data.targets import (
     TargetSpec,
     TARGET_SCHEMA,
     DEFAULT_TARGET,
@@ -16,7 +16,7 @@ from experiments.sparse_obs_cross_attn.data.targets import (
     NOMINAL,
     CONTINUOUS,
 )
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
+from experiments.sparse_obs_encoder.data.sources.ibtracs import (
     CLASS_NAMES, N_CLASSES, status_sshs_to_class,
 )
 

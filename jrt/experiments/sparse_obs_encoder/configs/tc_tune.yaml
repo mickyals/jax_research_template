@@ -251,7 +251,7 @@ trainer:
 
   # --- Run directory ---
   # Relative paths resolved against the experiment directory
-  # (sparse_obs_cross_attn/, two levels above train/tune.py).
+  # (sparse_obs_encoder/, two levels above train/tune.py).
   run_dir:              runs/tc_classifier/hp_search-random-station-radius
 
   # --- Logging ---

@@ -327,12 +327,18 @@ class WireActivation:
         return complex_exp * real_exp
 
 
-@register_activation("WIRE_REAL", description="Real-valued WIRE activation (magnitude)")
+@register_activation("WIRE_REAL",
+                     description="Real-valued WIRE (imaginary part of the complex Gabor)")
 class WireRealActivation:
-    """Applies |exp(j * omega_0 * x) * exp(-(sigma_0 * |x|)^2)|.
+    """Applies sin(omega_0 * x) * exp(-(sigma_0 * x)^2).
 
-    Real-valued version of WIRE that returns the magnitude of the complex
-    Gabor wavelet. Safe to use with standard real-valued Dense layers.
+    The real-valued instantiation of WIRE — the imaginary part of the complex
+    Gabor wavelet (Saragadam et al. 2023), for networks that cannot use complex
+    weights. Safe with standard real-valued Dense layers. Note: taking the
+    *magnitude* of the complex Gabor instead would cancel the oscillation and
+    leave only the Gaussian envelope; the imaginary part keeps the wavelet's
+    oscillation. Limiting cases: sigma_0 = 0 reduces to SIREN's sine,
+    omega_0 = 0 to a Gaussian.
 
     Parameters
     ----------
@@ -346,9 +352,7 @@ class WireRealActivation:
         self.sigma_0 = sigma_0
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        complex_exp = jnp.exp(1j * self.omega_0 * x)
-        real_exp = jnp.exp(-(jnp.abs(self.sigma_0 * x)) ** 2)
-        return jnp.abs(complex_exp * real_exp)
+        return jnp.sin(self.omega_0 * x) * jnp.exp(-(self.sigma_0 * x) ** 2)
 
 
 @register_activation("WIRE_FINER", description="FINER WIRE activation")
@@ -385,36 +389,32 @@ class WireFinerActivation:
 
 
 @register_activation("WIRE_FINER_REAL",
-                     description="Real-valued FINER WIRE activation (magnitude)")
+                     description="Real-valued FINER-WIRE (variable-frequency real Gabor)")
 class WireFinerRealActivation:
-    """Real-valued version of WIRE_FINER that returns the magnitude.
+    """Applies sin(w_f (|x|+1) x) * exp(-((sigma_0/w_f) * sin(w_f (|x|+1) x))^2).
 
-    Safe to use with standard real-valued Dense layers.
+    The real-valued FINER variant of WIRE: a variable-frequency wavelet whose
+    instantaneous frequency grows with |x| (FINER-style scaling, alpha = |x|+1)
+    and whose Gaussian envelope is taken over the oscillation itself. Real and
+    safe with standard Dense layers (unlike the complex WIRE_FINER). The
+    complex form's carrier frequency omega_0 is not used here — the FINER factor
+    omega_finer sets the scale.
 
     Parameters
     ----------
-    omega_0 : float
-        Frequency parameter. Default 20.
     sigma_0 : float
         Width parameter. Default 10.
     omega_finer : float
         FINER frequency parameter. Default 5.
     """
-    def __init__(self, omega_0: float = 20.0, sigma_0: float = 10.0,
-                 omega_finer: float = 5.0):
-        self.omega_0 = omega_0
+    def __init__(self, sigma_0: float = 10.0, omega_finer: float = 5.0):
         self.sigma_0 = sigma_0
         self.omega_finer = omega_finer
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        alpha = _generate_alpha(x)
-        z = alpha * x
-        y = jnp.sin(self.omega_finer * z)
-        scaler_omega = self.omega_0 / self.omega_finer
+        y = jnp.sin(self.omega_finer * _generate_alpha(x) * x)   # sin(w_f (|x|+1) x)
         scaler_sigma = self.sigma_0 / self.omega_finer
-        complex_exp = jnp.exp(1j * scaler_omega * y)
-        real_exp = jnp.exp(-(scaler_sigma * jnp.abs(y)) ** 2)
-        return jnp.abs(complex_exp * real_exp)
+        return y * jnp.exp(-(scaler_sigma * y) ** 2)
 
 
 # ===================================================================

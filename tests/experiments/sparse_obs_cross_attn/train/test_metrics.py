@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/train/metrics.py.
+Tests for experiments/sparse_obs_encoder/train/metrics.py.
 
 Generic metric implementations + the METRICS registry are tested in
 tests/training/test_metrics.py. This file covers only the experiment's
@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.train.metrics import (
+from experiments.sparse_obs_encoder.train.metrics import (
     build_metrics_fns, DEFAULT_METRICS,
 )
 

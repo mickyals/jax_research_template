@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/data/sources/ibtracs.py.
+Tests for experiments/sparse_obs_encoder/data/sources/ibtracs.py.
 
 All fixtures are built in memory — no real data files required.
 """
@@ -7,7 +7,7 @@ All fixtures are built in memory — no real data files required.
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
+from experiments.sparse_obs_encoder.data.sources.ibtracs import (
     IBTrACSDataset,
     IBTRACS_PRIMARY_TARGET_COLS,
     IBTRACS_SECONDARY_TARGET_COLS,

@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/data/splits.py.
+Tests for experiments/sparse_obs_encoder/data/splits.py.
 
 Synthetic-data tests use the in-memory fixture builder from test_ibtracs.py.
 The referee tests at the bottom use the real ibtracs_full.npz /
@@ -10,13 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
+from experiments.sparse_obs_encoder.data.sources.ibtracs import (
     IBTrACSDataset,
     IBTRACS_TRAIN_SEASONS,
     IBTRACS_VAL_SEASONS,
     IBTRACS_TEST_SEASONS,
 )
-from experiments.sparse_obs_cross_attn.data.splits import resolve_splits
+from experiments.sparse_obs_encoder.data.splits import resolve_splits
 
 from tests.experiments.sparse_obs_cross_attn.data.sources.test_ibtracs import (
     _make_ibtracs_npz,

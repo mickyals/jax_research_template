@@ -315,9 +315,9 @@ class InstanceNorm(nn.Module):
 
 @register_norm("RMS_NORM", description="RMS normalisation (no mean centering)")
 class RMSNorm(nn.Module):
-    """RMS normalisation.
+    """RMS normalization.
 
-    Normalises by the root mean square of the activations with no mean
+    Normalizes by the root mean square of the activations with no mean
     centering. Used in modern transformer variants (LLaMA, Gemma etc.)
     as a cheaper alternative to LayerNorm.
 

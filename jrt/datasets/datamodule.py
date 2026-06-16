@@ -35,7 +35,7 @@ Uses utils.jax_core.helpers.standardise and helpers.minmax_norm.
 This is a generic, domain-agnostic array DataModule (the template default for
 tabular / array experiments). On-the-fly sample-assembly experiments subclass
 BaseDataModule directly with their own setup/loaders (e.g.
-experiments.sparse_obs_cross_attn.data.datamodule.TCDataModule).
+experiments.sparse_obs_encoder.data.datamodule.TCDataModule).
 
 Config schema  (YAML  data:  block)
 ------------------------------------
@@ -284,7 +284,7 @@ def _apply_norm(
     method: str,
     stats:  dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Fit normalisation on train (or use precomputed stats), apply to all splits.
+    """Fit normalization on train (or use precomputed stats), apply to all splits.
 
     Uses utils.jax_core.helpers for the transform. When ``stats`` is None the
     statistics are fit on ``tr`` with np.nanmean / np.nanstd / np.nanmin /
@@ -355,91 +355,39 @@ def _invert_norm(y: np.ndarray, stats: dict) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 class BaseDataModule(ABC):
-    """Protocol that every DataModule must satisfy.
+    """The contract every DataModule satisfies — exactly what the Trainer needs.
 
-    Primary interface for the Trainer:
+    The Trainer iterates LOADERS; it never touches in-memory arrays. So the
+    abstract surface is just:
         setup(config)
-        train_loader(batch_size, seed, shuffle) → ArrayLoader
-        val_loader(batch_size, shuffle)         → ArrayLoader
-        test_loader(batch_size, shuffle)        → ArrayLoader
+        train_loader(...) / val_loader(...) / test_loader(...)
+            → re-iterable objects yielding batch dicts
+    plus the optional conveniences ``manifest()`` and ``denormalise_targets()``
+    the Trainer calls for the run manifest and physical-unit recovery.
 
-    The array accessors (train_arrays / val_arrays / test_arrays) are kept
-    for inspection and testing but are not passed directly to the Trainer.
+    Array-backed datamodules (the generic tabular ``DataModule`` below) ALSO
+    expose ``train_arrays`` / ``val_arrays`` / ``test_arrays`` for inspection and
+    tests, but those belong to the array path — they are NOT part of this
+    contract. On-the-fly samplers (e.g.
+    experiments.sparse_obs_encoder.data.datamodule.TCDataModule) implement only
+    the loaders, with no arrays to stub out.
     """
 
     @abstractmethod
     def setup(self, config: dict) -> None:
-        """Load, split, and normalise. Called once before Trainer.fit()."""
+        """Load / prepare the splits. Called once before Trainer.fit()."""
 
     @abstractmethod
-    def train_arrays(self) -> dict[str, jnp.ndarray]:
-        """{'X': features, 'y': targets} for the training split (all rows)."""
+    def train_loader(self, batch_size: int, **kwargs):
+        """Re-iterable of training batches — the object Trainer.fit iterates."""
 
     @abstractmethod
-    def val_arrays(self) -> dict[str, jnp.ndarray]:
-        """{'X': features, 'y': targets} for the validation split (all rows)."""
+    def val_loader(self, batch_size: int, **kwargs):
+        """Re-iterable of validation batches."""
 
     @abstractmethod
-    def test_arrays(self) -> dict[str, jnp.ndarray]:
-        """{'X': features, 'y': targets} for the test split (all rows)."""
-
-    # ------------------------------------------------------------------
-    # Loader interface — default implementations wrap the array accessors.
-    # Subclasses may override to customise drop_last, seed, or to serve
-    # data from disk rather than from in-memory arrays.
-    # ------------------------------------------------------------------
-
-    def train_loader(
-        self,
-        batch_size: int,
-        seed:       int  = 0,
-        shuffle:    bool = True,
-    ) -> ArrayLoader:
-        """Return an ArrayLoader over the training split.
-
-        Parameters
-        ----------
-        batch_size : int
-        seed : int
-            Base RNG seed.  Each epoch gets a different shuffle via
-            fold_in so successive passes vary deterministically.
-        shuffle : bool
-            True (default) — reshuffle every epoch.
-            False          — fixed order (e.g. for curriculum learning or
-                             time-series data where order matters).
-        """
-        return ArrayLoader(
-            self.train_arrays(), batch_size,
-            shuffle=shuffle, seed=seed, drop_last=True,
-        )
-
-    def val_loader(
-        self,
-        batch_size: int,
-        shuffle:    bool = False,
-    ) -> ArrayLoader:
-        """Return an ArrayLoader over the validation split.
-
-        drop_last=False so every sample contributes to validation metrics.
-        """
-        return ArrayLoader(
-            self.val_arrays(), batch_size,
-            shuffle=shuffle, drop_last=False,
-        )
-
-    def test_loader(
-        self,
-        batch_size: int,
-        shuffle:    bool = False,
-    ) -> ArrayLoader:
-        """Return an ArrayLoader over the test split.
-
-        drop_last=False so every sample contributes to test metrics.
-        """
-        return ArrayLoader(
-            self.test_arrays(), batch_size,
-            shuffle=shuffle, drop_last=False,
-        )
+    def test_loader(self, batch_size: int, **kwargs):
+        """Re-iterable of test batches — the object Trainer.test iterates."""
 
     @property
     def norm_stats(self) -> dict:
@@ -657,7 +605,7 @@ class DataModule(BaseDataModule):
 # This module ships no built-in dataset factories — keeping it free of any
 # dependency on specific experiments. A dataset source registers itself with
 # @register_dataset("NAME") in its own module (e.g.
-# experiments/sparse_obs_cross_attn/data/sources/ibtracs.py registers
+# experiments/sparse_obs_encoder/data/sources/ibtracs.py registers
 # "IBTRACS"); importing that module before DataModule.from_config() makes the
 # name available.
 # ---------------------------------------------------------------------------

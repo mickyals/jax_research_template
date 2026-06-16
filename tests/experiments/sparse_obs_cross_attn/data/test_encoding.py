@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/data/encoding.py.
+Tests for experiments/sparse_obs_encoder/data/encoding.py.
 
 Round-trip exactness for both encode/decode pairs, the north-seam property
 that motivated the local x-y encoding (decision 17), and convention checks
@@ -9,7 +9,7 @@ that motivated the local x-y encoding (decision 17), and convention checks
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.data.encoding import (
+from experiments.sparse_obs_encoder.data.encoding import (
     encode_unit_circle, decode_unit_circle,
     encode_domain, decode_domain,
 )

@@ -1,25 +1,40 @@
 """
-experiments/sparse_obs_cross_attn/train/model.py
+experiments/sparse_obs_encoder/train/model.py
 
-TCClassifier: sparse station observation encoder for TC detection
-and intensity classification.
+TCEncoder: sparse station observation encoder for TC detection and intensity
+classification, with an OPTIONAL TargetSpec-determined head.
 
-Single TransformerEncoder over 1+N tokens, CLS-first (ViT-style): one query/CLS
-token at position 0 then N station tokens. An asymmetric attention mask ensures
-stations never attend to the query; the query attends to all stations. The
-classification head reads the query/CLS token output (position 0).
+ONE module (r18, 2026-06-16). A single TransformerEncoder over 1+N tokens,
+CLS-first (ViT-style): one query/CLS token at position 0 then N station tokens.
+An asymmetric attention mask ensures stations never attend to the query; the
+query attends to all stations. The module owns the Senseiver single projection,
+the CLS-first token construction, the Transformer, and a final LayerNorm that
+produces the normalized CLS embedding ``z`` (B, embed_dim) — the
+frozen-transferable asset. A head is then OPTIONAL:
 
-Senseiver-style single projection (2023): a station token is one linear map
-over the concatenation [observations; (missingness mask); Fourier(position)] --
+  * ``n_classes=None`` → headless: ``__call__`` returns ``z`` directly (the
+    representation a linear probe / sklearn classifier / embedding export reads).
+  * ``n_classes=int``  → a TargetSpec-determined head (a pure-linear ``nn.Dense``
+    over ``z``) maps the embedding to logits.
+
+The head is a SEPARABLE named leaf of the param tree (``params['head']``); the
+encoder is "everything except ``head``". The frozen-encoder transfer protocol is
+therefore a pure param-tree operation — see split_encoder_head / attach_encoder /
+encoder_freeze_labels — with no separate encoder/head module classes: the seam
+lives in the pytree, and a headless TCEncoder's param tree is exactly the
+encoder subtree of a headed one.
+
+Senseiver-style single projection (2023): a station token is one linear map over
+the concatenation [observations; (missingness mask); Fourier(position)] --
 observations and position are projected jointly, once, rather than through
 separate obs/position layers that are then summed. The query/CLS token passes
 through the SAME projection, with a learned stand-in occupying the obs/mask
 slots and its position slots either learned (learnable_query_pos, unit_circle)
 or supplied by Fourier(query_coords) (domain).
 
-Coordinate handling: whatever station_coords the datamodule supplies (storm-
-centred local x-y for unit_circle, normalised lat/lon for domain) are Fourier-
-embedded and projected the same way. The CLS token differs by encoding: under
+Coordinate handling: whatever station_coords the datamodule supplies (storm-centred
+ local x-y for unit_circle, normalized lat/lon for domain) are Fourier-embedded
+ and projected the same way. The CLS token differs by encoding: under
 unit_circle the query sits at (0,0), so its position slots are a fully learnable
 vector (Fourier((0,0)) is a constant a learned vector subsumes); under domain
 the CLS uses Fourier(query_coords) so it carries the absolute query location.
@@ -38,6 +53,8 @@ model treats both identically -- it just projects whatever coords it receives):
 
 from __future__ import annotations
 
+from typing import Optional
+
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
@@ -47,8 +64,8 @@ from core.embeddings import GaussianFourierEmbedding
 
 # Default label-space size. Canonical label names live in
 # data/sources/ibtracs.CLASS_NAMES; the model stays decoupled from the data
-# source (n_classes is set from config in practice). TargetSpec will make this
-# fully config-driven (plan-encoder-probing-rescope r3).
+# source (n_classes is set from config / TargetSpec in practice — see
+# train/tune/evaluate, which source it from dm.target_spec.n_classes).
 N_CLASSES = 9
 
 
@@ -58,8 +75,8 @@ def build_attention_mask(
 ) -> jax.Array:
     """Build the (1+N)-token attention mask from a station mask.
 
-    Single source of truth — used by TCClassifier's forward pass and by
-    the mask-visualisation figure (plotting.plot_attention_mask).
+    Single source of truth — used by TCEncoder's forward pass and by
+    the mask-visualization figure (plotting.plot_attention_mask).
 
     Token layout is **CLS-first** (ViT-style): token 0 = query/CLS,
     tokens 1..N = stations.
@@ -68,7 +85,7 @@ def build_attention_mask(
     False = blocked (-inf before softmax).
 
     Default (asymmetric) pattern:
-        stations → stations: True   (stations contextualise each other)
+        stations → stations: True   (stations contextualize each other)
         query    → stations: True   (query reads the station network)
         query    → self:     True   (query self-attention)
         stations → query:    False  (stations never peek at the query)
@@ -113,24 +130,94 @@ def build_attention_mask(
 
 
 # ---------------------------------------------------------------------------
-# TCEncoder — the sparse-observation encoder (the frozen-transferable asset)
+# TCEncoder — the sparse-observation encoder, with an optional head
 # ---------------------------------------------------------------------------
 
+# noinspection PyUnboundLocalVariable
 class TCEncoder(nn.Module):
-    """Sparse-observation encoder: batch dict → normalised CLS representation.
+    """Sparse-observation encoder: batch dict → normalized CLS embedding (+ optional head).
 
-    This is the asset the project cares about (plan r4/r5): a target-agnostic
-    encoder whose CLS embedding is read by a swappable linear probe head. It
-    owns the Senseiver single projection, the CLS-first token construction, the
-    Transformer, and a final LayerNorm. ``TCClassifier = TCEncoder + Dense head``,
-    so the param tree splits cleanly into ``params['encoder']`` (this module)
-    and ``params['head']`` — see split_encoder_head / attach_encoder /
-    encoder_freeze_labels for the frozen-encoder transfer protocol.
+    The encoder is the asset the project cares about (plan r1/r4/r5): a
+    target-agnostic encoder whose normalized CLS embedding ``z`` is read by a
+    swappable linear probe head. It owns the Senseiver single projection, the
+    CLS-first token construction, the Transformer, and the final LayerNorm. The
+    head is OPTIONAL and, when present, a pure-linear ``nn.Dense`` over ``z`` (a
+    separable ``params['head']`` leaf) — see split_encoder_head / attach_encoder /
+    encoder_freeze_labels for the frozen-encoder transfer protocol (r18: the seam
+    lives in the param pytree, not in separate module classes).
 
-    Field meanings match TCClassifier (minus n_classes). ``__call__`` returns the
-    normalised CLS embedding ``z`` of shape (B, embed_dim); with
-    return_weights it also returns the full per-layer attention matrices
-    (num_layers, B, num_heads, 1+N, 1+N).
+    Parameters
+    ----------
+    embed_dim : int
+        Token dimensionality.
+    num_heads : int
+        Attention heads. Must divide embed_dim.
+    num_layers : int
+        Total encoder layers.
+    mlp_ratio : float
+        FFN hidden dim = mlp_ratio * embed_dim. Default 4.0.
+    mlp_activation : str
+    mlp_initializer : str
+    dropout_rate : float
+    attn_dropout_rate : float
+    fourier_dim : int
+        Gaussian Fourier embedding output dim. Must be even. Default 64.
+    fourier_scale : float
+    n_obs_features : int
+        F, number of observation variables. Default 5.
+    n_classes : int or None
+        Head size, determined by the TargetSpec. None (default) = HEADLESS: no
+        head is created and ``__call__`` returns the normalized CLS embedding
+        ``z`` (B, embed_dim). An int = a ``nn.Dense(n_classes)`` head producing
+        logits (B, n_classes). train/tune/evaluate source this from
+        dm.target_spec.n_classes (nominal targets).
+    full_self_attention : bool
+        False (default) = asymmetric mask: stations contextualize each other
+        and the query reads them, but stations never attend to the query.
+        True = complete self-attention over all N+1 tokens (every token attends
+        to every other, modulo padding) — i.e. the standard, unrestricted
+        Transformer pattern.
+    missingness_indicator : bool
+        True (default) = concatenate obs_mask (as 0./1.) as its own channel in
+        the token-projection input, so a missing feature (filled with 0) is
+        distinguishable from a real observation that equals 0. False drops the
+        mask channel, reproducing the aliased behaviour where missing == 0 ==
+        observed-zero.
+    learnable_query_pos : bool
+        How the CLS/query token's positional slots are produced.
+        True (default, unit_circle): the position slots are a learned parameter
+        (query_pos_slots) — the whole CLS input [obs; mask; pos] is learnable.
+        The query sits at the storm origin (0,0), so its Fourier position is a
+        constant that a learned vector subsumes (strictly more expressive).
+        False (domain): the position slots come from Fourier(query_coords), so
+        the CLS carries the absolute query location; only its obs/mask slots are
+        learned. The experiment entry points derive this from location_encoding;
+        the two settings have different parameter trees (so checkpoints are not
+        interchangeable across the flag).
+
+    Notes
+    -----
+    Batch dict X must contain:
+        station_obs    (B, N, F)  normalized obs, missing → 0 from datamodule
+        station_coords (B, N, 2)  encoded station positions
+        station_mask   (B, N)     bool True=real station, False=padding
+        obs_mask       (B, N, F)  bool True=measurement present
+        query_coords   (B, 2)     (0,0) for unit_circle; encoded pos for domain.
+                                  Ignored when learnable_query_pos=True.
+
+    Output: (B, n_classes) raw logits if n_classes is set, else (B, embed_dim)
+    normalized CLS embedding z.
+
+    Example
+    -------
+    >>> model = TCEncoder(embed_dim=128, num_heads=4, num_layers=2, n_classes=9)
+    >>> variables = model.init(jax.random.PRNGKey(0), X, train=False)
+    >>> logits = model.apply(variables, X, train=False)
+    >>> logits.shape
+    (B, 9)
+    >>> # Headless: same architecture, returns the CLS embedding.
+    >>> enc = TCEncoder(embed_dim=128, num_heads=4, num_layers=2)  # n_classes=None
+    >>> z = enc.apply(variables_without_head, X, train=False)      # (B, 128)
     """
     embed_dim:         int
     num_heads:         int
@@ -143,6 +230,7 @@ class TCEncoder(nn.Module):
     fourier_dim:       int   = 64
     fourier_scale:     float = 1.0
     n_obs_features:    int   = 5
+    n_classes:         Optional[int] = None
     full_self_attention: bool = False
     missingness_indicator: bool = True
     learnable_query_pos: bool = True
@@ -171,7 +259,7 @@ class TCEncoder(nn.Module):
 
         # Learnable CLS position slots (learnable_query_pos, unit_circle); under
         # domain the position slots come from Fourier(query_coords) instead and
-        # this parameter is not created. See TCClassifier for the full rationale.
+        # this parameter is not created.
         if self.learnable_query_pos:
             self.query_pos_slots = self.param(
                 'query_pos_slots',
@@ -192,8 +280,14 @@ class TCEncoder(nn.Module):
         )
 
         # Final norm — part of the encoder asset, so a probe head is a pure
-        # Dense over a normalised representation (clean linear-probe semantics).
+        # Dense over a normalized representation (clean linear-probe semantics).
         self.norm = nn.LayerNorm()
+
+        # Optional TargetSpec-determined head (separable 'head' param leaf).
+        # None → headless (the encoder asset). The transfer helpers below slice
+        # the param tree on this key.
+        if self.n_classes is not None:
+            self.head = nn.Dense(self.n_classes)
 
     def __call__(
         self,
@@ -201,6 +295,28 @@ class TCEncoder(nn.Module):
         train:          bool = True,
         return_weights: bool = False,
     ):
+        """
+        Parameters
+        ----------
+        X : dict
+            Batch dict from TCDataModule.
+        train : bool
+        return_weights : bool
+            If True, also return the full attention matrices from EVERY
+            encoder layer: shape (num_layers, B, num_heads, 1+N, 1+N).
+            CLS-first: the query row is [..., 0, :]; its FIRST element
+            ([..., 0, 0]) is the query's self-attention weight — a useful
+            diagnostic (high = model relies on CLS prior; low = trusts
+            stations).
+
+        Returns
+        -------
+        jax.Array or tuple[jax.Array, jax.Array]
+            If n_classes is set: logits (B, n_classes). If headless
+            (n_classes=None): the normalized CLS embedding z (B, embed_dim).
+            With return_weights, also the attention matrices
+            (num_layers, B, num_heads, 1+N, 1+N).
+        """
         station_obs    = X['station_obs']     # (B, N, F)
         station_coords = X['station_coords']  # (B, N, 2)
         station_mask   = X['station_mask']    # (B, N) bool
@@ -262,216 +378,63 @@ class TCEncoder(nn.Module):
         else:
             encoded = out                        # (B, 1+N, D)
 
-        # 8. Normalised CLS representation (token 0).
+        # 8. Normalised CLS representation (token 0) — the encoder asset.
         z = self.norm(encoded[:, 0, :])                                 # (B, D)
-        if return_weights:
-            return z, attn_weights
-        return z
 
-
-# ---------------------------------------------------------------------------
-# TCClassifier
-# ---------------------------------------------------------------------------
-
-class TCClassifier(nn.Module):
-    """Sparse-observation TC classifier = TCEncoder + linear probe head.
-
-    A thin wrapper: a TCEncoder (the frozen-transferable asset) produces the
-    normalised CLS embedding, and a single ``nn.Dense`` head maps it to logits.
-    The param tree therefore splits cleanly into ``params['encoder']`` and
-    ``params['head']`` — see split_encoder_head / attach_encoder /
-    encoder_freeze_labels for the frozen-encoder transfer protocol.
-
-    The encoder is a unified Transformer over 1+N tokens, CLS-first (ViT-style):
-    one query/CLS token at position 0 then N station tokens. An asymmetric
-    attention mask separates "contextualise the observation network" (station
-    self-attention) from "classify" (query reads all stations); the head reads
-    the query/CLS token (position 0).
-
-    Parameters
-    ----------
-    embed_dim : int
-        Token dimensionality.
-    num_heads : int
-        Attention heads. Must divide embed_dim.
-    num_layers : int
-        Total encoder layers.
-    mlp_ratio : float
-        FFN hidden dim = mlp_ratio * embed_dim. Default 4.0.
-    mlp_activation : str
-    mlp_initializer : str
-    dropout_rate : float
-    attn_dropout_rate : float
-    fourier_dim : int
-        Gaussian Fourier embedding output dim. Must be even. Default 64.
-    fourier_scale : float
-    n_obs_features : int
-        F, number of observation variables. Default 5.
-    n_classes : int
-        Output classes. Default 9 (ordinal organisation scale; see
-        data/sources/ibtracs.CLASS_NAMES).
-    full_self_attention : bool
-        False (default) = asymmetric mask: stations contextualise each other
-        and the query reads them, but stations never attend to the query.
-        True = complete self-attention over all N+1 tokens (every token attends
-        to every other, modulo padding) — i.e. the standard, unrestricted
-        Transformer pattern.
-    missingness_indicator : bool
-        True (default) = concatenate obs_mask (as 0./1.) as its own channel in
-        the token-projection input, so a missing feature (filled with 0) is
-        distinguishable from a real observation that equals 0. False drops the
-        mask channel, reproducing the aliased behaviour where missing == 0 ==
-        observed-zero.
-    learnable_query_pos : bool
-        How the CLS/query token's positional slots are produced.
-        True (default, unit_circle): the position slots are a learned parameter
-        (query_pos_slots) — the whole CLS input [obs; mask; pos] is learnable.
-        The query sits at the storm origin (0,0), so its Fourier position is a
-        constant that a learned vector subsumes (strictly more expressive).
-        False (domain): the position slots come from Fourier(query_coords), so
-        the CLS carries the absolute query location; only its obs/mask slots are
-        learned. The experiment entry points derive this from location_encoding;
-        the two settings have different parameter trees (so checkpoints are not
-        interchangeable across the flag).
-
-    Notes
-    -----
-    Batch dict X must contain:
-        station_obs    (B, N, F)  normalised obs, missing → 0 from datamodule
-        station_coords (B, N, 2)  encoded station positions
-        station_mask   (B, N)     bool True=real station, False=padding
-        obs_mask       (B, N, F)  bool True=measurement present
-        query_coords   (B, 2)     (0,0) for unit_circle; encoded pos for domain.
-                                  Ignored when learnable_query_pos=True.
-
-    Output: (B, n_classes) raw logits.
-
-    Example
-    -------
-    >>> model = TCClassifier(embed_dim=128, num_heads=4, num_layers=2)
-    >>> variables = model.init(jax.random.PRNGKey(0), X, train=False)
-    >>> logits = model.apply(variables, X, train=False)
-    >>> logits.shape
-    (B, 9)
-    """
-
-    embed_dim:         int
-    num_heads:         int
-    num_layers:        int
-    mlp_ratio:         float = 4.0
-    mlp_activation:    str   = 'gelu'
-    mlp_initializer:   str   = 'xavier_uniform'
-    dropout_rate:      float = 0.0
-    attn_dropout_rate: float = 0.0
-    fourier_dim:       int   = 64
-    fourier_scale:     float = 1.0
-    n_obs_features:    int   = 5
-    n_classes:         int   = N_CLASSES
-    full_self_attention: bool = False
-    missingness_indicator: bool = True
-    learnable_query_pos: bool = True
-
-    def setup(self):
-        # The encoder is the frozen-transferable asset (one param subtree);
-        # the head is the swappable, target-specific linear probe.
-        self.encoder = TCEncoder(
-            embed_dim             = self.embed_dim,
-            num_heads             = self.num_heads,
-            num_layers            = self.num_layers,
-            mlp_ratio             = self.mlp_ratio,
-            mlp_activation        = self.mlp_activation,
-            mlp_initializer       = self.mlp_initializer,
-            dropout_rate          = self.dropout_rate,
-            attn_dropout_rate     = self.attn_dropout_rate,
-            fourier_dim           = self.fourier_dim,
-            fourier_scale         = self.fourier_scale,
-            n_obs_features        = self.n_obs_features,
-            full_self_attention   = self.full_self_attention,
-            missingness_indicator = self.missingness_indicator,
-            learnable_query_pos   = self.learnable_query_pos,
-        )
-        # Pure-linear probe head over the encoder's normalised CLS embedding.
-        self.head = nn.Dense(self.n_classes)
-
-    def __call__(
-        self,
-        X:              dict,
-        train:          bool = True,
-        return_weights: bool = False,
-    ):
-        """
-        Parameters
-        ----------
-        X : dict
-            Batch dict from TCDataModule.
-        train : bool
-        return_weights : bool
-            If True, also return the full attention matrices from EVERY
-            encoder layer: shape (num_layers, B, num_heads, 1+N, 1+N).
-            CLS-first: the query row is [..., 0, :]; its FIRST element
-            ([..., 0, 0]) is the query's self-attention weight — a useful
-            diagnostic (high = model relies on CLS prior; low = trusts
-            stations).
-
-        Returns
-        -------
-        jax.Array or tuple[jax.Array, jax.Array]
-            Logits (B, n_classes), and optionally weights
-            (num_layers, B, num_heads, 1+N, 1+N).
-        """
-        out = self.encoder(X, train=train, return_weights=return_weights)
-        if return_weights:
-            z, attn_weights = out                # (B, D), (L, B, H, 1+N, 1+N)
-        else:
-            z = out                              # (B, D)
-
-        logits = self.head(z)                                           # (B, n_classes)
+        # 9. Optional head. Headless (n_classes=None) returns z directly.
+        out_repr = z if self.n_classes is None else self.head(z)        # (B, D) or (B, C)
 
         if return_weights:
-            return logits, attn_weights
-        return logits
+            return out_repr, attn_weights
+        return out_repr
 
 
 # ---------------------------------------------------------------------------
-# Frozen-encoder / linear-probe helpers (plan-encoder-probing-rescope r4/r5)
+# Frozen-encoder / linear-probe helpers (plan-encoder-probing-rescope r4/r5/r18)
 # ---------------------------------------------------------------------------
-# The TCClassifier param tree separates into the encoder asset and the
-# target-specific head. These helpers make "train encoder+head on target A →
-# freeze the encoder → train a fresh head on target B" a few clean operations.
-# They all operate on the param dict (the tree under ``variables['params']``).
+# The TCEncoder param tree separates into the encoder asset (every leaf except
+# the head) and the target-specific head leaf. These helpers make "train
+# encoder+head on target A → freeze the encoder → train a fresh head on target
+# B" a few clean operations. They all operate on the param dict (the tree under
+# ``variables['params']``). r18: the seam is the ``head`` KEY, not a nested
+# 'encoder' subtree.
 
-ENCODER_KEY = 'encoder'
+HEAD_KEY = 'head'
 
 
 def split_encoder_head(params: dict) -> tuple[dict, dict]:
-    """Split a TCClassifier param tree into (encoder_params, head_params).
+    """Split a TCEncoder param tree into (encoder_params, head_params).
 
-    encoder_params is the frozen-transferable asset (the TCEncoder subtree);
-    head_params is everything outside it (the linear probe head). Pass the
+    encoder_params is the frozen-transferable asset — every leaf EXCEPT the
+    head; head_params is ``{'head': <head subtree>}``. The encoder_params tree
+    is exactly the param tree of a HEADLESS TCEncoder (n_classes=None), so it
+    can be applied directly to one to recover the CLS embedding z. Pass the
     tree under ``variables['params']``.
     """
-    encoder = params[ENCODER_KEY]
-    head    = {k: v for k, v in params.items() if k != ENCODER_KEY}
+    encoder = {k: v for k, v in params.items() if k != HEAD_KEY}
+    head    = {HEAD_KEY: params[HEAD_KEY]}
     return encoder, head
 
 
 def attach_encoder(fresh_params: dict, encoder_params: dict) -> dict:
-    """Return ``fresh_params`` with its encoder subtree replaced by
-    ``encoder_params``.
+    """Return ``fresh_params`` with its encoder leaves replaced by
+    ``encoder_params``, keeping the fresh head.
 
     Loads a trained/frozen encoder (e.g. from a checkpoint of a model trained
-    on target A) into a freshly initialised TCClassifier that carries a new,
+    on target A) into a freshly initialised TCEncoder that carries a new,
     target-specific head — one operation for the frozen-encoder transfer
-    protocol. The head keeps its fresh initialisation.
+    protocol. The head keeps its fresh initialization. ``encoder_params`` must
+    not contain the head key (it is the output of split_encoder_head).
     """
     out = dict(fresh_params)
-    out[ENCODER_KEY] = encoder_params
+    for k, v in encoder_params.items():
+        out[k] = v
     return out
 
 
 def encoder_freeze_labels(params: dict) -> dict:
-    """Label pytree (matching ``params``) marking the encoder subtree 'frozen'
-    and everything else 'trainable'.
+    """Label pytree (matching ``params``) marking every encoder leaf 'frozen'
+    and the head leaves 'trainable'.
 
     Feed to optax to freeze the encoder during linear-probe / transfer
     training::
@@ -482,7 +445,7 @@ def encoder_freeze_labels(params: dict) -> dict:
     """
     return {
         k: jax.tree_util.tree_map(
-            lambda _: ('frozen' if k == ENCODER_KEY else 'trainable'), v
+            lambda _: ('trainable' if k == HEAD_KEY else 'frozen'), v
         )
         for k, v in params.items()
     }

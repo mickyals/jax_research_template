@@ -1,19 +1,19 @@
 """
-experiments/sparse_obs_cross_attn/data/sources/ibtracs.py
+experiments/sparse_obs_encoder/data/sources/ibtracs.py
 
 IBTrACSDataset: NpzDataset subclass for IBTrACS best-track data.
 
 Column constants and label mappings live here alongside the class so that
 imports are self-contained:
 
-    from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
+    from experiments.sparse_obs_encoder.data.sources.ibtracs import (
         IBTrACSDataset, status_sshs_to_class, CLASS_NAMES, N_CLASSES,
     )
 
 Splitting is not a dataset concern: this class exposes filter primitives
 (filter_years, filter_sids, filter_single_storm, filter_multi_storm) and
 the split policy lives in the data.split config block, resolved by
-experiments.sparse_obs_cross_attn.data.splits.resolve_splits. The
+experiments.sparse_obs_encoder.data.splits.resolve_splits. The
 IBTRACS_*_SEASONS constants remain only as the reference values of the
 original split (used by the config defaults and the resolver's referee test).
 """

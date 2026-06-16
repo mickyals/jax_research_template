@@ -1,5 +1,5 @@
 """
-experiments/sparse_obs_cross_attn/train/metrics.py
+experiments/sparse_obs_encoder/train/metrics.py
 
 Experiment-specific metrics glue for the TC classification task. The generic
 metric implementations and their registry (METRICS) live in training/metrics.py

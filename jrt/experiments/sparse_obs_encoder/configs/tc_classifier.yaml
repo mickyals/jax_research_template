@@ -36,7 +36,7 @@ data:
   # Selects what the model predicts, resolved against data/targets.TARGET_SCHEMA.
   # Drives the label, head size (n_classes), default loss, metrics, and class
   # names — so switching targets is a config change, not a code change.
-  # 'organisation' = the 9-class ordinal organisation scale (default).
+  # 'organization' = the 9-class ordinal organization scale (default).
   # Continuous (regression) targets are reserved, not yet wired.
   target:                 organisation
 
@@ -255,9 +255,9 @@ trainer:
 
   # --- Run directory ---
   # Relative paths are resolved against the experiment directory
-  # (sparse_obs_cross_attn/, two levels above train/train.py), so
+  # (sparse_obs_encoder/, two levels above train/train.py), so
   # runs/tc_classifier/run_01 always expands to
-  #   jrt/experiments/sparse_obs_cross_attn/runs/tc_classifier/run_01
+  #   jrt/experiments/sparse_obs_encoder/runs/tc_classifier/run_01
   # regardless of where the CLI is invoked from.  Absolute paths are used as-is.
   run_dir:              runs/tc_classifier/run_05
 

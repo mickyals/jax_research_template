@@ -55,29 +55,29 @@ pip install --upgrade "jax[cuda12]"   # CUDA 12.x
 
 ```bash
 # Edit data paths in the config
-jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
 
 # Put jrt/ on the Python path once (packages are rooted there):
 #   export PYTHONPATH=jrt        (bash)   |   $env:PYTHONPATH="jrt"   (PowerShell)
 
 # Train
-python -m experiments.sparse_obs_cross_attn.train.train \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+python -m experiments.sparse_obs_encoder.train.train \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
 
 # Resume interrupted training
-python -m experiments.sparse_obs_cross_attn.train.train \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_encoder.train.train \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
     --resume
 
 # Evaluate (config path is positional)
-python -m experiments.sparse_obs_cross_attn.train.evaluate \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_encoder.train.evaluate \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
     --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
     --output_dir runs/tc_classifier/run_01/eval
 
 # Hyperparameter search
-python -m experiments.sparse_obs_cross_attn.train.tune \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+python -m experiments.sparse_obs_encoder.train.tune \
+    jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
     --n_trials 25 \
     --storage sqlite:///runs/tc_classifier/hp_search/study.db
 ```

@@ -1,5 +1,5 @@
 """
-Integration tests: Trainer + TCClassifier end-to-end training.
+Integration tests: Trainer + TCEncoder end-to-end training.
 
 All tests use synthetic in-memory data — no disk access required.
 
@@ -30,8 +30,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
+from experiments.sparse_obs_encoder.train.model import TCEncoder, N_CLASSES
 from training.trainer import Trainer, TrainState
 
 
@@ -161,13 +161,14 @@ class _FakeTCLoader:
 
 def _make_model(
     embed_dim:         int = 32,
-) -> TCClassifier:
-    return TCClassifier(
+) -> TCEncoder:
+    return TCEncoder(
         embed_dim         = embed_dim,
         num_heads         = 2,
         num_layers        = 2,
         fourier_dim       = 16,     # must be even
         n_obs_features    = F,
+        n_classes         = N_CLASSES,
     )
 
 
@@ -388,13 +389,13 @@ class TestLossVariation:
 import matplotlib
 matplotlib.use('Agg')   # headless — set before train.py pulls in pyplot
 
-from experiments.sparse_obs_cross_attn.train.train import (   # noqa: E402
+from experiments.sparse_obs_encoder.train.train import (   # noqa: E402
     _make_attn_entropy_callback,
     _make_attn_figure_callback,
     _make_grad_flow_callback,
     _log_diagnostics,
 )
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (   # noqa: E402
+from experiments.sparse_obs_encoder.data.sources.ibtracs import (   # noqa: E402
     CLASS_NAMES,
 )
 
@@ -480,7 +481,7 @@ class TestObservabilityCallbacks:
         tags = [t for t, _, _ in logger.histograms]
         # Named by tree path under the grad_flow/ prefix
         assert all(t.startswith('grad_flow/') for t in tags)
-        assert any('encoder' in t for t in tags)
+        assert any('transformer' in t for t in tags)  # encoder body submodule
         assert any(t.endswith('kernel') for t in tags)
         # One histogram per parameter leaf
         n_leaves = len(jax.tree_util.tree_leaves(state.params))

@@ -1,8 +1,8 @@
 """
-experiments/sparse_obs_cross_attn/data/datamodule.py
+experiments/sparse_obs_encoder/data/datamodule.py
 
 TCDataModule: coordinates IBTrACSDataset and InsituLandDataset into
-Trainer-compatible loaders for the sparse_obs_cross_attn experiment.
+Trainer-compatible loaders for the sparse_obs_encoder experiment.
 
 As additional data sources are added (reanalysis, radar, satellite) they
 appear alongside ibtracs and insitu_land in setup(), each contributing
@@ -41,13 +41,13 @@ import numpy as np
 
 from datasets.datamodule import BaseDataModule
 from utils.jax_core.helpers import create_rng
-from utils.sampling.coordinate import _key_to_seed, lhs_sample_regional
+from utils.sampling.spatial import _key_to_seed, lhs_sample_regional
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDataset
-from experiments.sparse_obs_cross_attn.data.sources.insitu_land import InsituLandDataset
-from experiments.sparse_obs_cross_attn.data.dataset import TCDataset
-from experiments.sparse_obs_cross_attn.data.splits import resolve_splits
-from experiments.sparse_obs_cross_attn.data.targets import resolve_target
+from experiments.sparse_obs_encoder.data.sources.ibtracs import IBTrACSDataset
+from experiments.sparse_obs_encoder.data.sources.insitu_land import InsituLandDataset
+from experiments.sparse_obs_encoder.data.dataset import TCDataset
+from experiments.sparse_obs_encoder.data.splits import resolve_splits
+from experiments.sparse_obs_encoder.data.targets import resolve_target
 
 
 # ---------------------------------------------------------------------------
@@ -430,13 +430,13 @@ class TCLoader:
 # ---------------------------------------------------------------------------
 
 class TCDataModule(BaseDataModule):
-    """DataModule for the sparse_obs_cross_attn experiment.
+    """DataModule for the sparse_obs_encoder experiment.
 
     Subclasses BaseDataModule. Because samples are assembled on-the-fly from
-    two large datasets (74 M obs rows), this module overrides train_loader /
+    two large datasets (74 M obs rows), this module implements train_loader /
     val_loader / test_loader to return TCLoader instances rather than
-    ArrayLoaders. The in-memory array accessors (train_arrays etc.) are not
-    applicable and raise NotImplementedError.
+    ArrayLoaders. There are no in-memory array accessors — the base contract is
+    loaders only (r20), so nothing to stub out.
 
     Config keys (data: block in YAML)
     ----------------------------------
@@ -446,7 +446,7 @@ class TCDataModule(BaseDataModule):
         insitu_obs_path          str
         insitu_meta_path         str
         split                    dict  required — see
-                                        experiments.sparse_obs_cross_attn.data.splits
+                                        experiments.sparse_obs_encoder.data.splits
         reliability_levels       list  default [always_active, mostly_active]
         obs_vars                 list  default DEFAULT_OBS_VARS (from insitu_land)
         radius_km                float default 500.0
@@ -473,25 +473,6 @@ class TCDataModule(BaseDataModule):
         dm = cls()
         dm.setup(config)
         return dm
-
-    # ------------------------------------------------------------------
-    # BaseDataModule abstract methods — not applicable for on-the-fly sampling
-    # ------------------------------------------------------------------
-
-    def train_arrays(self) -> dict:
-        raise NotImplementedError(
-            "TCDataModule assembles samples on-the-fly. Use train_loader() instead."
-        )
-
-    def val_arrays(self) -> dict:
-        raise NotImplementedError(
-            "TCDataModule assembles samples on-the-fly. Use val_loader() instead."
-        )
-
-    def test_arrays(self) -> dict:
-        raise NotImplementedError(
-            "TCDataModule assembles samples on-the-fly. Use test_loader() instead."
-        )
 
     def setup(self, config: dict) -> None:
         ibtracs_path      = config['ibtracs_path']

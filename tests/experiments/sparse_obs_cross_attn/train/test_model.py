@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/train/model.py.
+Tests for experiments/sparse_obs_encoder/train/model.py.
 
 Fake-data tests: no disk access, run always.
 Real-data tests: require E:/sparse_obs data files, skipped if absent.
@@ -12,8 +12,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from experiments.sparse_obs_cross_attn.train.model import (
-    TCClassifier,
+from experiments.sparse_obs_encoder.train.model import (
+    TCEncoder,
     N_CLASSES,
 )
 
@@ -74,20 +74,24 @@ def _fake_batch(
     }
 
 
-def _make_model(**kwargs) -> TCClassifier:
+def _make_model(**kwargs) -> TCEncoder:
+    # n_classes is set by default so the classifier tests get a head; the
+    # headless path (n_classes=None → returns z) is exercised in the
+    # split/attach roundtrip test.
     defaults = dict(
         embed_dim=EMBED,
         num_heads=HEADS,
         num_layers=LAYERS,
         fourier_dim=16,
         n_obs_features=F,
+        n_classes=N_CLASSES,
     )
     defaults.update(kwargs)
-    return TCClassifier(**defaults)
+    return TCEncoder(**defaults)
 
 
 # ---------------------------------------------------------------------------
-# TCClassifier — fake data
+# TCEncoder — fake data
 # ---------------------------------------------------------------------------
 
 # Two coordinate conventions — the single coordinate-agnostic architecture
@@ -97,7 +101,7 @@ _LOCATIONS = ['unit_circle', 'domain']
 
 
 @pytest.mark.parametrize('loc', _LOCATIONS, ids=_LOCATIONS)
-class TestTCClassifierFakeData:
+class TestTCEncoderFakeData:
 
     def _init(self, loc, **extra):
         model = _make_model(**extra)
@@ -263,7 +267,7 @@ def test_missingness_indicator_false_runs():
 
 def test_build_attention_mask_pattern():
     """build_attention_mask: CLS-first asymmetry + padding blocking, exact pattern."""
-    from experiments.sparse_obs_cross_attn.train.model import (
+    from experiments.sparse_obs_encoder.train.model import (
         build_attention_mask,
     )
     N_t = 4
@@ -285,7 +289,7 @@ def test_build_attention_mask_pattern():
 
 def test_build_attention_mask_full_self_attention():
     """full_self_attention=True opens the stations→query block; padding stays blocked."""
-    from experiments.sparse_obs_cross_attn.train.model import (
+    from experiments.sparse_obs_encoder.train.model import (
         build_attention_mask,
     )
     N_t = 4
@@ -309,7 +313,7 @@ def test_full_self_attention_flag_changes_station_outputs():
     X = _fake_batch()
     # build_attention_mask is exercised inside apply; compare the masks the
     # two models produce for the same station_mask.
-    from experiments.sparse_obs_cross_attn.train.model import build_attention_mask
+    from experiments.sparse_obs_encoder.train.model import build_attention_mask
     sm = X['station_mask']
     m_asym = np.asarray(build_attention_mask(sm, False))
     m_full = np.asarray(build_attention_mask(sm, True))
@@ -343,7 +347,7 @@ def test_asymmetric_mask_station_independent_of_query():
     tokens_a = jnp.concatenate([query_a, stations], axis=1)  # CLS-first (B, 1+N, D)
     tokens_b = jnp.concatenate([query_b, stations], axis=1)
 
-    # Asymmetric mask, CLS-first: same construction as TCClassifier
+    # Asymmetric mask, CLS-first: same construction as TCEncoder
     mask = jnp.zeros((B_t, 1, N_t + 1, N_t + 1), dtype=bool)
     mask = mask.at[:, :, 1:, 1:].set(True)   # station → station
     mask = mask.at[:, :, 0,  1:].set(True)   # query   → stations
@@ -369,7 +373,7 @@ def test_learnable_query_pos_ignores_query_coords():
     X2 = dict(X); X2['query_coords'] = X['query_coords'] + 1.0
     out1 = model.apply(vs, X2, train=False)
     assert jnp.allclose(out0, out1), "learnable CLS must ignore query_coords"
-    assert 'query_pos_slots' in vs['params']['encoder']
+    assert 'query_pos_slots' in vs['params']
 
 
 def test_query_pos_from_coords_uses_query_coords():
@@ -382,47 +386,50 @@ def test_query_pos_from_coords_uses_query_coords():
     X2 = dict(X); X2['query_coords'] = X['query_coords'] + 1.0
     out1 = model.apply(vs, X2, train=False)
     assert not jnp.allclose(out0, out1), "CLS must use query_coords under domain"
-    assert 'query_pos_slots' not in vs['params']['encoder']
+    assert 'query_pos_slots' not in vs['params']
 
 
 # ---------------------------------------------------------------------------
 # Encoder / head split — frozen-encoder probing (r4/r5)
 # ---------------------------------------------------------------------------
 
-def test_param_tree_splits_encoder_and_head():
-    """TCClassifier params have exactly an 'encoder' subtree and a 'head'."""
+def test_param_tree_head_is_separable_leaf():
+    """r18: flat param tree — the head is a separable 'head' leaf and the
+    encoder is every OTHER leaf (no nested 'encoder' subtree)."""
     model = _make_model()
     X  = _fake_batch()
     vs = model.init(KEY, X, train=False)
-    assert set(vs['params'].keys()) == {'encoder', 'head'}
+    keys = set(vs['params'].keys())
+    assert 'head' in keys and 'encoder' not in keys
     # head is a pure linear Dense (kernel + bias), no LayerNorm in the head
     assert set(vs['params']['head'].keys()) == {'kernel', 'bias'}
-    # the final norm lives inside the encoder asset
-    assert 'norm' in vs['params']['encoder']
+    # the final norm is a top-level encoder leaf
+    assert 'norm' in keys
 
 
 def test_split_and_attach_encoder_roundtrip():
     """split_encoder_head + attach_encoder transplant the encoder into a fresh
     model with a new head — the frozen-encoder transfer operation."""
-    from experiments.sparse_obs_cross_attn.train.model import (
+    from experiments.sparse_obs_encoder.train.model import (
         split_encoder_head, attach_encoder, TCEncoder,
     )
     model = _make_model()
     X  = _fake_batch()
     vs = model.init(KEY, X, train=False)
     enc_params, head_params = split_encoder_head(vs['params'])
-    assert 'head' in head_params and 'encoder' not in head_params
+    assert 'head' in head_params and 'head' not in enc_params
 
-    # The standalone encoder runs on the split params → (B, D) CLS embedding.
+    # A HEADLESS encoder (n_classes=None) runs on the split params → (B, D).
     encoder = TCEncoder(embed_dim=EMBED, num_heads=HEADS, num_layers=LAYERS,
-                        fourier_dim=16, n_obs_features=F)
+                        fourier_dim=16, n_obs_features=F)   # n_classes=None
     z = encoder.apply({'params': enc_params}, X, train=False)
     assert z.shape == (B, EMBED) and jnp.all(jnp.isfinite(z))
 
     # Attach the trained encoder into a freshly initialised model (new head).
     fresh  = _make_model().init(jax.random.PRNGKey(7), X, train=False)['params']
     merged = attach_encoder(fresh, enc_params)
-    assert merged['encoder'] is enc_params                       # encoder transplanted
+    # encoder leaves come from enc_params; the head keeps its fresh init.
+    assert merged['transformer'] is enc_params['transformer']    # encoder transplanted
     # the head keeps its fresh init (differs from the original model's head)
     assert not jnp.allclose(merged['head']['kernel'],
                             vs['params']['head']['kernel'])
@@ -433,19 +440,20 @@ def test_split_and_attach_encoder_roundtrip():
 def test_encoder_freeze_labels_partition():
     """encoder_freeze_labels marks every encoder leaf 'frozen' and the head
     leaves 'trainable', matching the param structure."""
-    from experiments.sparse_obs_cross_attn.train.model import encoder_freeze_labels
+    from experiments.sparse_obs_encoder.train.model import encoder_freeze_labels
     model = _make_model()
     X  = _fake_batch()
     vs = model.init(KEY, X, train=False)
     labels = encoder_freeze_labels(vs['params'])
-    enc_labels  = set(jax.tree_util.tree_leaves(labels['encoder']))
     head_labels = set(jax.tree_util.tree_leaves(labels['head']))
+    enc_labels  = set(jax.tree_util.tree_leaves(
+        {k: v for k, v in labels.items() if k != 'head'}))
     assert enc_labels == {'frozen'}
     assert head_labels == {'trainable'}
 
 
 # ---------------------------------------------------------------------------
-# TCClassifier — real data (skipped if files absent)
+# TCEncoder — real data (skipped if files absent)
 # ---------------------------------------------------------------------------
 
 _REAL_DATA_PATHS = {
@@ -468,11 +476,11 @@ _skip_real = pytest.mark.skipif(
 
 
 @_skip_real
-class TestTCClassifierRealData:
+class TestTCEncoderRealData:
 
     @pytest.fixture(scope='class')
     def loader(self):
-        from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
+        from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
         config = {
             **_REAL_DATA_PATHS,
             'reliability_levels':   ['always_active', 'mostly_active'],

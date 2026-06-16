@@ -235,7 +235,7 @@ __pycache__/
 
 # Experiment run artifacts (checkpoints, logs, tuning databases).
 # **/runs/ matches runs/ at any depth — covers both a top-level runs/ and
-# per-experiment runs dirs (e.g. jrt/experiments/sparse_obs_cross_attn/runs/).
+# per-experiment runs dirs (e.g. jrt/experiments/sparse_obs_encoder/runs/).
 **/runs/
 *.db
 **/wandb/

@@ -64,7 +64,7 @@ def get_embedding(name: str, **kwargs):
     rather than forwarded to prevent a TypeError at instantiation.
 
     In Flax Linen, instantiating a module does not run any computation --
-    call ``module.init(key, *inputs)`` to initialise parameters and
+    call ``module.init(key, *inputs)`` to initialize parameters and
     ``module.apply(variables, *inputs)`` to run a forward pass.
 
     Parameters
@@ -268,8 +268,10 @@ class PositionalEmbedding(nn.Module):
 
     Constructs a fixed frequency matrix where frequencies are spaced as
     scale^(j / mapping_dim) for j = 0 ... mapping_dim-1, broadcast across
-    all input dimensions. With scale=1 this reduces to standard sinusoidal
-    positional encoding.
+    all input dimensions. Larger scale spreads the frequency bank over a wider
+    geometric range (like the 10000-base spacing of Vaswani-style encodings);
+    scale=1 collapses every frequency to 1 (a degenerate single-frequency bank),
+    so use scale > 1 for a multiscale encoding.
 
     Following Tancik et al. 2020 (https://arxiv.org/abs/2006.10739).
 
@@ -324,7 +326,7 @@ class PositionalEmbedding(nn.Module):
     description="Sphere2Vec grid embedding (Mai et al. 2023)",
 )
 class SphericalGridEmbedding(nn.Module):
-    """Independent multi-scale sinusoidal encoding of lat and lon.
+    """Independent multiscale sinusoidal encoding of lat and lon.
 
     Applies a geometric frequency bank independently to lat and lon and
     concatenates sin and cos for each. No cross-terms between lat and lon.
@@ -390,7 +392,7 @@ class SphericalGridEmbedding(nn.Module):
     description="Sphere2Vec Cartesian embedding (Mai et al. 2023)",
 )
 class SphericalCartesianEmbedding(nn.Module):
-    """Multi-scale encoding of the 3D unit Cartesian vector.
+    """Multiscale encoding of the 3D unit Cartesian vector.
 
     Converts (lat, lon) to unit sphere Cartesian coordinates
     (cos(lat)cos(lon), cos(lat)sin(lon), sin(lat)) and applies a geometric
@@ -457,9 +459,9 @@ class SphericalCartesianEmbedding(nn.Module):
     description="Sphere2Vec multi-scale embedding (Mai et al. 2023)",
 )
 class SphericalMultiScaleEmbedding(nn.Module):
-    """Multi-scale encoding mixing transformed and raw spherical coordinates.
+    """Multiscale encoding mixing transformed and raw spherical coordinates.
 
-    Combines multi-scale transformed lat terms with raw lon (and vice versa)
+    Combines multiscale transformed lat terms with raw lon (and vice versa)
     to capture interactions between the two coordinates at different scales.
 
     output_dim = 5 * scale
@@ -777,7 +779,7 @@ class SphericalHarmonicsEmbedding(nn.Module):
     Internally converts to colatitude theta in [0, pi] and
     longitude phi in [0, 2*pi] as required by the SH convention.
 
-    Normalisation constants are precomputed in setup() using plain Python
+    Normalization constants are precomputed in setup() using plain Python
     math and stored as a static jnp.array. This avoids math.factorial
     being called inside JAX-traced code which would cause a TypeError.
     """
@@ -788,7 +790,7 @@ class SphericalHarmonicsEmbedding(nn.Module):
         return self.legendre_polys ** 2
 
     def setup(self):
-        """Precompute normalisation constants K_l^m for all (l, m) pairs.
+        """Precompute normalization constants K_l^m for all (l, m) pairs.
 
         Uses plain Python math.factorial which is safe here because setup()
         runs at module construction time, not inside a JAX-traced call.
@@ -983,7 +985,7 @@ class LearnedPosEncoding(nn.Module):
     embed_dim : int
         Embedding dimensionality.
     init_stddev : float
-        Standard deviation for truncated normal initialisation. Default 0.02.
+        Standard deviation for truncated normal initialization. Default 0.02.
 
     Notes
     -----
@@ -1050,7 +1052,7 @@ class LearnedPosEncoding2D(nn.Module):
     embed_dim : int
         Channel dimension C.
     init_stddev : float
-        Standard deviation for truncated normal initialisation. Default 0.02.
+        Standard deviation for truncated normal initialization. Default 0.02.
 
     Notes
     -----

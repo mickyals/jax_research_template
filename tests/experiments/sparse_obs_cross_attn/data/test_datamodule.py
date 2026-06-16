@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/data/datamodule.py.
+Tests for experiments/sparse_obs_encoder/data/datamodule.py.
 
 Verifies background pool construction, collation, and loader batch shapes.
 No real data files required.
@@ -8,10 +8,10 @@ No real data files required.
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDataset
-from experiments.sparse_obs_cross_attn.data.sources.insitu_land import InsituLandDataset
-from experiments.sparse_obs_cross_attn.data.dataset import TCDataset
-from experiments.sparse_obs_cross_attn.data.datamodule import (
+from experiments.sparse_obs_encoder.data.sources.ibtracs import IBTrACSDataset
+from experiments.sparse_obs_encoder.data.sources.insitu_land import InsituLandDataset
+from experiments.sparse_obs_encoder.data.dataset import TCDataset
+from experiments.sparse_obs_encoder.data.datamodule import (
     _build_background_pool,
     _collate,
     TCLoader,
@@ -150,7 +150,7 @@ class TestBackgroundPool:
     def test_pool_only_synoptic_hours(self, tmp_path):
         # Insitu fixture is hourly; only timestamps on the exact 3-hour
         # grid (00/03/.../21 UTC, zero minutes/seconds) may survive.
-        from experiments.sparse_obs_cross_attn.data.datamodule import (
+        from experiments.sparse_obs_encoder.data.datamodule import (
             SYNOPTIC_STEP_NS,
         )
         ib_p, ms_p, tc_times = _make_ibtracs(tmp_path, seasons=(2019,),
@@ -414,7 +414,7 @@ class _MockDS:
 
 def _make_summary_dm():
     """Build a TCDataModule with injected stub datasets."""
-    from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
+    from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
     dm = TCDataModule()
     dm._location_encoding = 'unit_circle'
     dm._obs_normalisation = 'minmax_11'
@@ -522,7 +522,7 @@ class TestTCDataModuleSummary:
 
     def test_stored_attributes_after_setup(self, tmp_path):
         """Attributes added to setup() are present on the datamodule."""
-        from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
+        from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
         # Use the synthetic builders to create real npz files
         ib_p, ms_p, tc_times = _make_ibtracs(tmp_path, seasons=(2019, 2021, 2023))
         obs_p, meta_p, _     = _make_insitu(tmp_path, tc_times[0], n_hours=60)

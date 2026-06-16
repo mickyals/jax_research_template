@@ -1,3 +1,4 @@
+# noinspection SpellCheckingInspection
 """
 training/optimizers.py
 
@@ -91,7 +92,8 @@ def get_optimizer(
 
     Example
     -------
-    >>> opt = get_optimizer("adamw", learning_rate=1e-3, weight_decay=1e-4)
+    >>> # noinspection SpellCheckingInspection
+opt = get_optimizer("adamw", learning_rate=1e-3, weight_decay=1e-4)
     >>> opt = get_optimizer("adam", learning_rate=get_scheduler("cosine_decay",
     ...                             init_value=1e-3, decay_steps=10_000))
     """

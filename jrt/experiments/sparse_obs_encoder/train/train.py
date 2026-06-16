@@ -1,16 +1,16 @@
 """
-experiments/sparse_obs_cross_attn/train/train.py
+experiments/sparse_obs_encoder/train/train.py
 
-Entry point for the sparse_obs_cross_attn experiment.
+Entry point for the sparse_obs_encoder experiment.
 
 Usage
 -----
-    python -m experiments.sparse_obs_cross_attn.train.train \
-        jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+    python -m experiments.sparse_obs_encoder.train.train \
+        jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
 
     # Resume an interrupted run
-    python -m experiments.sparse_obs_cross_attn.train.train \
-        jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+    python -m experiments.sparse_obs_encoder.train.train \
+        jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
         --resume
 """
 
@@ -25,22 +25,22 @@ import jax
 import jax.numpy as jnp
 import yaml
 
-from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
-from experiments.sparse_obs_cross_attn.train.evaluate import (
+from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
+from experiments.sparse_obs_encoder.train.evaluate import (
     collect_predictions,
     confusion_matrix,
     domain_latlon_for_sample,
     per_class_metrics,
 )
-from experiments.sparse_obs_cross_attn.plotting.plotting import (
+from experiments.sparse_obs_encoder.plotting.plotting import (
     plot_attention_geographic,
     plot_attention_mask,
     plot_attention_matrix_grid,
     plot_class_metrics,
     plot_confusion_matrix,
 )
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
+from experiments.sparse_obs_encoder.train.model import TCEncoder
 from datasets.class_weights import class_weights_from_counts
 from training.metrics import (
     cross_entropy,
@@ -62,7 +62,7 @@ from utils.jax_core.diagnostics import (
 # ---------------------------------------------------------------------------
 
 def _make_attn_entropy_callback(
-    model:       TCClassifier,
+    model:       TCEncoder,
     probe_batch: dict,
     logger,
 ) -> Callable[[TrainState, int, int], None]:
@@ -77,7 +77,7 @@ def _make_attn_entropy_callback(
 
     Parameters
     ----------
-    model : TCClassifier
+    model : TCEncoder
     probe_batch : dict
         A fixed validation batch held in memory for the run duration.
     logger : experiment logger
@@ -107,7 +107,7 @@ def _make_attn_entropy_callback(
 
 
 def _make_attn_figure_callback(
-    model:       TCClassifier,
+    model:       TCEncoder,
     probe_batch: dict,
     logger,
     data_config: dict,
@@ -124,7 +124,7 @@ def _make_attn_figure_callback(
 
     Parameters
     ----------
-    model : TCClassifier
+    model : TCEncoder
     probe_batch : dict
         A fixed validation batch held in memory for the run duration.
     logger : experiment logger
@@ -194,7 +194,7 @@ def _make_attn_figure_callback(
 # ---------------------------------------------------------------------------
 
 def _make_grad_flow_callback(
-    model:       TCClassifier,
+    model:       TCEncoder,
     probe_batch: dict,
     logger,
     every_n_epochs: int = 5,
@@ -203,7 +203,7 @@ def _make_grad_flow_callback(
 
     Computes jax.grad of the cross-entropy loss on a fixed TRAIN probe
     batch and pushes one histogram per parameter leaf, named by its tree
-    path (e.g. ``grad_flow/encoder/blocks_0/attn/query/kernel``), via
+    path (e.g. ``grad_flow/transformer/blocks_0/attn/query/kernel``), via
     ``logger.log_histogram``. Vanishing/exploding layers show up as
     histograms collapsing to 0 or blowing up across depth.
 
@@ -212,7 +212,7 @@ def _make_grad_flow_callback(
 
     Parameters
     ----------
-    model : TCClassifier
+    model : TCEncoder
     probe_batch : dict
         A fixed TRAINING batch held in memory for the run duration
         (gradient flow is a training diagnostic — never wired to val/test).
@@ -252,7 +252,7 @@ def _make_grad_flow_callback(
 
 
 def _make_eval_plots_callback(
-    model:       TCClassifier,
+    model:       TCEncoder,
     val_loader,
     logger,
     class_names: list[str],
@@ -268,7 +268,7 @@ def _make_eval_plots_callback(
 
     Parameters
     ----------
-    model : TCClassifier
+    model : TCEncoder
     val_loader : TCLoader
         Re-iterable val loader — iterated fresh on each callback invocation.
     logger : experiment logger
@@ -315,7 +315,7 @@ def _make_eval_plots_callback(
 # ---------------------------------------------------------------------------
 
 def _log_diagnostics(
-    model:       TCClassifier,
+    model:       TCEncoder,
     params:      dict,
     train_probe: dict,
     val_probe:   dict,
@@ -414,7 +414,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     config['data']['location_encoding']  = loc_enc
     # CLS position handling is derived from the encoding: unit_circle puts the
     # query at the origin → a fully learnable CLS position; domain feeds the
-    # query's encoded coords into the CLS. (See TCClassifier.learnable_query_pos.)
+    # query's encoded coords into the CLS. (See TCEncoder.learnable_query_pos.)
     config['model']['learnable_query_pos'] = (loc_enc == 'unit_circle')
 
     # ------------------------------------------------------------------
@@ -458,7 +458,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
-    model = TCClassifier(**config['model'])
+    model = TCEncoder(**config['model'])
 
     # Print a per-layer shape + parameter count table before training.
     # Peek a small batch (4 samples) so Flax can trace all tensor shapes.
@@ -468,7 +468,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     _exmp  = {k: v[:4] for k, v in train_probe_batch['X'].items()}
     print()
     print("─" * 58)
-    print("Model  (TCClassifier)")
+    print("Model  (TCEncoder)")
     model_tabulate(model, _exmp, False)   # args: X dict, train=False
     del _exmp
 
@@ -635,7 +635,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Train TCClassifier for sparse_obs_cross_attn experiment."
+        description="Train TCEncoder for sparse_obs_encoder experiment."
     )
     parser.add_argument(
         "config",

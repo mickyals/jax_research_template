@@ -1,5 +1,5 @@
 """
-experiments/sparse_obs_cross_attn/data/targets.py
+experiments/sparse_obs_encoder/data/targets.py
 
 TargetSpec — declarative description of a prediction target.
 
@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
+from experiments.sparse_obs_encoder.data.sources.ibtracs import (
     CLASS_NAMES, N_CLASSES, status_sshs_to_class,
 )
 

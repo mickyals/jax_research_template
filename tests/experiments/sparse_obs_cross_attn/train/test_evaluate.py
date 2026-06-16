@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/train/evaluate.py.
+Tests for experiments/sparse_obs_encoder/train/evaluate.py.
 
 All tests use synthetic in-memory data — no disk access required.
 
@@ -24,7 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.train.evaluate import (
+from experiments.sparse_obs_encoder.train.evaluate import (
     binary_metrics,
     collect_predictions,
     confusion_matrix,
@@ -32,8 +32,8 @@ from experiments.sparse_obs_cross_attn.train.evaluate import (
     per_storm_metrics,
     print_report,
 )
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
+from experiments.sparse_obs_encoder.train.model import TCEncoder, N_CLASSES
 
 # ---------------------------------------------------------------------------
 # Shared constants and helpers
@@ -46,14 +46,15 @@ HEADS = 2
 EMBED = 32
 
 
-def _init_model() -> tuple[TCClassifier, dict]:
-    """Return a tiny TCClassifier and its initialized variables."""
-    model = TCClassifier(
+def _init_model() -> tuple[TCEncoder, dict]:
+    """Return a tiny TCEncoder and its initialized variables."""
+    model = TCEncoder(
         embed_dim       = EMBED,
         num_heads       = HEADS,
         num_layers      = 1,
         fourier_dim     = 16,
         n_obs_features  = F,
+        n_classes       = N_CLASSES,
     )
     rng  = np.random.default_rng(0)
     obs  = jnp.array(rng.standard_normal((B, N, F)).astype(np.float32))

@@ -1,7 +1,7 @@
 """
-experiments/sparse_obs_cross_attn/train/evaluate.py
+experiments/sparse_obs_encoder/train/evaluate.py
 
-Post-training evaluation for TCClassifier.
+Post-training evaluation for TCEncoder.
 
 Produces
 --------
@@ -14,19 +14,19 @@ Produces
 
 CLI
 ---
-    python -m experiments.sparse_obs_cross_attn.train.evaluate \\
-        jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+    python -m experiments.sparse_obs_encoder.train.evaluate \\
+        jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
 
     # Override checkpoint directory
-    python -m experiments.sparse_obs_cross_attn.train.evaluate \\
+    python -m experiments.sparse_obs_encoder.train.evaluate \\
         jrt/.../tc_classifier.yaml --checkpoint_dir runs/exp01/checkpoints
 
     # Save plots to disk instead of displaying
-    python -m experiments.sparse_obs_cross_attn.train.evaluate \\
+    python -m experiments.sparse_obs_encoder.train.evaluate \\
         jrt/.../tc_classifier.yaml --output_dir runs/exp01/eval --no_show
 
     # Evaluate on validation split instead of test
-    python -m experiments.sparse_obs_cross_attn.train.evaluate \\
+    python -m experiments.sparse_obs_encoder.train.evaluate \\
         jrt/.../tc_classifier.yaml --split val
 """
 
@@ -42,11 +42,11 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import yaml
 
-from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
-from experiments.sparse_obs_cross_attn.data.encoding import decode_domain
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
+from experiments.sparse_obs_encoder.data.encoding import decode_domain
+from experiments.sparse_obs_encoder.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
+from experiments.sparse_obs_encoder.train.model import TCEncoder
 from training.metrics import (
     apply_temperature,
     expected_calibration_error,
@@ -54,7 +54,7 @@ from training.metrics import (
     maximum_calibration_error,
     quadratic_weighted_kappa,
 )
-from experiments.sparse_obs_cross_attn.plotting.plotting import (
+from experiments.sparse_obs_encoder.plotting.plotting import (
     plot_confusion_matrix,
     plot_class_metrics,
     extract_attention_weights,
@@ -92,7 +92,7 @@ def domain_latlon_for_sample(batch, sample_idx, fov_lat, fov_lon):
 # ---------------------------------------------------------------------------
 
 def collect_predictions(
-    model:     TCClassifier,
+    model:     TCEncoder,
     variables: dict,
     loader:    Any,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Optional[dict]]:
@@ -100,7 +100,7 @@ def collect_predictions(
 
     Parameters
     ----------
-    model : TCClassifier
+    model : TCEncoder
     variables : dict
         Flax variables dict, e.g. ``{'params': state.params}``.
     loader : iterable
@@ -300,7 +300,7 @@ def print_report(
 
     w = 62
     print(f"\n{'='*w}")
-    print(f"  TCClassifier — {split.upper()} evaluation")
+    print(f"  TCEncoder — {split.upper()} evaluation")
     print(f"{'='*w}")
     print(f"  Samples : {len(preds)}")
 
@@ -389,7 +389,7 @@ def evaluate(
     class_names = target_spec.class_names
     n_classes   = target_spec.n_classes
     config['model']['n_classes'] = n_classes
-    model       = TCClassifier(**config['model'])
+    model       = TCEncoder(**config['model'])
     metrics_fns = build_metrics_fns(metrics=config['trainer'].get('metrics'))
     trainer     = Trainer(model, metrics_fns, config['trainer'])
 
@@ -542,7 +542,7 @@ def evaluate(
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Evaluate a trained TCClassifier from its best checkpoint."
+        description="Evaluate a trained TCEncoder from its best checkpoint."
     )
     parser.add_argument(
         'config', type=str,

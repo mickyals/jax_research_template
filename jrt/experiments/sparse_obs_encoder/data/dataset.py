@@ -1,5 +1,5 @@
 """
-experiments/sparse_obs_cross_attn/data/dataset.py
+experiments/sparse_obs_encoder/data/dataset.py
 
 TCDataset: pairs IBTrACSDataset + InsituLandDataset into per-sample dicts.
 
@@ -50,12 +50,12 @@ from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDataset
-from experiments.sparse_obs_cross_attn.data.sources.insitu_land import (
+from experiments.sparse_obs_encoder.data.sources.ibtracs import IBTrACSDataset
+from experiments.sparse_obs_encoder.data.sources.insitu_land import (
     InsituLandDataset, DEFAULT_OBS_VARS,
 )
-from experiments.sparse_obs_cross_attn.data.targets import TargetSpec, resolve_target
-from experiments.sparse_obs_cross_attn.data.encoding import (
+from experiments.sparse_obs_encoder.data.targets import TargetSpec, resolve_target
+from experiments.sparse_obs_encoder.data.encoding import (
     encode_domain, encode_unit_circle,
 )
 from utils.geoscience.geodesic import vincenty_np
