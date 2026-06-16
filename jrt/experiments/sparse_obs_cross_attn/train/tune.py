@@ -111,6 +111,8 @@ def tune(
     # datamodule's coordinate convention.
     loc_enc = base_config.get("location_encoding", "unit_circle")
     base_config["data"]["location_encoding"]  = loc_enc
+    # CLS position handling derived from the encoding (see learnable_query_pos).
+    base_config["model"]["learnable_query_pos"] = (loc_enc == "unit_circle")
 
     # Resolve run_dir relative to the experiment root (two levels up from
     # this script, which lives in train/), NOT the config file directory

@@ -358,6 +358,13 @@ def evaluate(
     if checkpoint_dir is not None:
         config['trainer']['checkpoint_dir'] = str(checkpoint_dir)
 
+    # Coordinate convention (top-level) drives the datamodule encoding and the
+    # CLS position handling — must match training for the checkpoint to load.
+    loc_enc = config.get('location_encoding',
+                         config['data'].get('location_encoding', 'unit_circle'))
+    config['data']['location_encoding'] = loc_enc
+    config['model']['learnable_query_pos'] = (loc_enc == 'unit_circle')
+
     dm          = TCDataModule.from_config(config['data'])
     target_spec = dm.target_spec
     class_names = target_spec.class_names
@@ -470,7 +477,7 @@ def evaluate(
                 if batch_meta is not None else None
             )
             fig_a   = plot_attention_geographic(
-                attn_weights[-1][:, :, -1, :], attn_batch,  # last layer, query row
+                attn_weights[-1][:, :, 0, :], attn_batch,  # last layer, query row (CLS = token 0)
                 location_encoding=loc_enc,
                 fov_lat=fov_lat,
                 fov_lon=fov_lon,

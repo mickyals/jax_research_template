@@ -82,9 +82,9 @@ def _make_attn_entropy_callback(
     def _attn(params):
         _, weights = model.apply({'params': params}, probe_X,
                                  train=False, return_weights=True)
-        # Query row of the LAST layer — preserves the metric's original
-        # definition now that weights cover all layers.
-        return weights[-1][:, :, -1, :]  # (B, H, N+1)
+        # Query row of the LAST layer (CLS-first: query is token 0) — preserves
+        # the metric's original definition now that weights cover all layers.
+        return weights[-1][:, :, 0, :]  # (B, H, 1+N)
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
         weights = np.asarray(_attn(state.params))          # (B, H, N+1)
@@ -150,7 +150,7 @@ def _make_attn_figure_callback(
         title   = f'true: {true_c}, pred: {pred_c}'
 
         fig = plot_attention_geographic(
-            weights[-1][:, :, -1, :], probe_batch,   # last layer, query row
+            weights[-1][:, :, 0, :], probe_batch,   # last layer, query row (CLS = token 0)
             location_encoding=loc_enc,
             fov_lat=fov_lat,
             fov_lon=fov_lon,
@@ -354,6 +354,10 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # whatever coords it is handed), so it is injected into the data block only.
     loc_enc = config.get('location_encoding', 'unit_circle')
     config['data']['location_encoding']  = loc_enc
+    # CLS position handling is derived from the encoding: unit_circle puts the
+    # query at the origin → a fully learnable CLS position; domain feeds the
+    # query's encoded coords into the CLS. (See TCClassifier.learnable_query_pos.)
+    config['model']['learnable_query_pos'] = (loc_enc == 'unit_circle')
 
     # ------------------------------------------------------------------
     # Resolve run_dir relative to the experiment root (two levels up from

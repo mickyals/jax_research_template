@@ -173,7 +173,7 @@ class TestPlotAttentionGeographic:
         batch   = _fake_batch()
         all_w   = extract_attention_weights(model, variables, batch)
         # plot_attention_geographic takes the query row of one layer
-        weights = all_w[-1][:, :, -1, :]   # (B, H, N+1)
+        weights = all_w[-1][:, :, 0, :]   # (B, H, N+1)
         return weights, batch
 
     def test_unit_circle_returns_figure(self, weights_and_batch):
@@ -191,7 +191,7 @@ class TestPlotAttentionGeographic:
     def test_domain_encoding_returns_figure(self):
         model, variables = _init_model()
         batch   = _fake_batch(location_encoding='domain')
-        weights = extract_attention_weights(model, variables, batch)[-1][:, :, -1, :]
+        weights = extract_attention_weights(model, variables, batch)[-1][:, :, 0, :]
         fig = plot_attention_geographic(
             weights, batch,
             location_encoding='domain',
@@ -209,7 +209,7 @@ class TestPlotAttentionGeographic:
 
         model, variables = _init_model()
         batch   = _fake_batch(location_encoding='domain')
-        weights = extract_attention_weights(model, variables, batch)[-1][:, :, -1, :]
+        weights = extract_attention_weights(model, variables, batch)[-1][:, :, 0, :]
         fig = plot_attention_geographic(
             weights, batch,
             location_encoding='domain',
@@ -317,23 +317,23 @@ class TestPlotAttentionMask:
     def test_rendered_mask_matches_model_pattern(self):
         station_mask = np.array([True, True, False, True])
         fig = plot_attention_mask(station_mask)
-        img = fig.axes[0].images[0].get_array().data   # (N+1, N+1)
+        img = fig.axes[0].images[0].get_array().data   # (1+N, 1+N)
         N_t = 4
         assert img.shape == (N_t + 1, N_t + 1)
-        # stations → query column blocked; query self-attention allowed
-        assert not img[:N_t, N_t].any()
-        assert img[N_t, N_t] == 1.0
-        # padding column blocked for everyone
-        assert not img[:, 2].any()
+        # CLS-first: token 0 = query, tokens 1..4 = stations (token 3 = padding).
+        # stations → query column (col 0) blocked; query self-attention allowed
+        assert not img[1:, 0].any()
+        assert img[0, 0] == 1.0
+        # padding column (token 3) blocked for everyone
+        assert not img[:, 3].any()
         plt.close('all')
 
     def test_full_self_attention_opens_query_column(self):
         station_mask = np.array([True, True, False, True])
         fig = plot_attention_mask(station_mask, full_self_attention=True)
         img = fig.axes[0].images[0].get_array().data
-        N_t = 4
-        # real stations now attend to the query column
-        assert img[0, N_t] == 1.0 and img[1, N_t] == 1.0 and img[3, N_t] == 1.0
-        # padding column still blocked
-        assert not img[:, 2].any()
+        # CLS-first: real stations (tokens 1,2,4) now attend to the query col (0)
+        assert img[1, 0] == 1.0 and img[2, 0] == 1.0 and img[4, 0] == 1.0
+        # padding column (token 3) still blocked
+        assert not img[:, 3].any()
         plt.close('all')

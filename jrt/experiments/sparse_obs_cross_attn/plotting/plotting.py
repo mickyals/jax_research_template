@@ -103,11 +103,11 @@ def extract_attention_weights(
 
     Returns
     -------
-    np.ndarray float32 (num_layers, B, num_heads, N+1, N+1)
-        Full attention matrices from every encoder layer.
-        N = max_stations; token N (the last) is the query. The query row
-        of layer l is ``weights[l, :, :, -1, :]`` — its last element is
-        the query's self-attention weight; padding positions carry ≈ 0.
+    np.ndarray float32 (num_layers, B, num_heads, 1+N, 1+N)
+        Full attention matrices from every encoder layer. CLS-first:
+        token 0 is the query, tokens 1..N are stations (N = max_stations).
+        The query row of layer l is ``weights[l, :, :, 0, :]`` — its first
+        element is the query's self-attention weight; padding positions ≈ 0.
     """
     apply_fn = jax.jit(
         lambda X: model.apply(variables, X, train=False, return_weights=True)
@@ -125,10 +125,10 @@ def plot_attention_matrix_grid(
     """Layers × heads grid of full (N+1)×(N+1) attention matrices.
 
     One panel per (layer, head) for a single sample, plain ``imshow`` with
-    NO per-token tick labels (unreadable at N+1 = 65) and a shared colour
-    scale. The query row/column (last token) is marked with dashed lines —
-    the all-False stations→query column should read as an empty last
-    column, and padding stations as empty trailing rows/columns.
+    NO per-token tick labels (unreadable at 1+N = 65) and a shared colour
+    scale. CLS-first: the query row/column (first token, top-left) is marked
+    with dashed lines — the all-False stations→query column reads as an empty
+    first column, and padding stations as empty rows/columns.
 
     Parameters
     ----------
@@ -158,9 +158,9 @@ def plot_attention_matrix_grid(
             im = ax.imshow(w[l, h], cmap=cmap, vmin=0.0, vmax=vmax,
                            origin='upper', aspect='equal',
                            interpolation='nearest')
-            # Query token = last row/column
-            ax.axhline(T - 1.5, color='w', linewidth=0.6, linestyle='--')
-            ax.axvline(T - 1.5, color='w', linewidth=0.6, linestyle='--')
+            # Query/CLS token = first row/column (CLS-first, top-left)
+            ax.axhline(0.5, color='w', linewidth=0.6, linestyle='--')
+            ax.axvline(0.5, color='w', linewidth=0.6, linestyle='--')
             ax.set_xticks([])
             ax.set_yticks([])
             if l == 0:
@@ -187,11 +187,12 @@ def plot_attention_mask(
 
     Renders the exact boolean mask the model builds (single source of
     truth: model.build_attention_mask) for one sample's station_mask.
-    Default: stations are blocked from attending to the query (empty last
-    column except the query's own self-attention cell); with
-    ``full_self_attention=True`` that block opens (complete self-attention).
-    Padding-station columns are blocked for every token. Plain imshow, no
-    per-token tick labels; the query row/column is marked with dashed lines.
+    CLS-first: token 0 is the query. Default: stations are blocked from
+    attending to the query (empty first column except the query's own
+    self-attention cell); with ``full_self_attention=True`` that block opens
+    (complete self-attention). Padding-station columns are blocked for every
+    token. Plain imshow, no per-token tick labels; the query row/column
+    (top-left) is marked with dashed lines.
 
     Parameters
     ----------
@@ -224,12 +225,12 @@ def plot_attention_mask(
     fig, ax = plt.subplots(figsize=(6.5, 6))
     im = ax.imshow(mask.astype(float), cmap='Greys_r', vmin=0.0, vmax=1.0,
                    origin='upper', aspect='equal', interpolation='nearest')
-    ax.axhline(T - 1.5, color='red', linewidth=0.8, linestyle='--')
-    ax.axvline(T - 1.5, color='red', linewidth=0.8, linestyle='--')
+    ax.axhline(0.5, color='red', linewidth=0.8, linestyle='--')
+    ax.axvline(0.5, color='red', linewidth=0.8, linestyle='--')
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_xlabel('to token (last = query)')
-    ax.set_ylabel('from token (last = query)')
+    ax.set_xlabel('to token (first = query)')
+    ax.set_ylabel('from token (first = query)')
     ax.set_title(
         f'Attention mask — white = allowed, black = blocked\n'
         f'{_desc}; {T - 1 - n_real} padding columns blocked',
@@ -267,10 +268,10 @@ def plot_attention_geographic(
 
     Parameters
     ----------
-    weights : np.ndarray (B, H, N+1)
+    weights : np.ndarray (B, H, 1+N)
         Query-row attention of ONE layer — slice the output of
-        extract_attention_weights(), e.g. ``all_w[-1][:, :, -1, :]`` for
-        the last layer's query row.
+        extract_attention_weights(), e.g. ``all_w[-1][:, :, 0, :]`` for
+        the last layer's query row (CLS-first: the query is token 0).
     batch : dict
         Raw batch dict (contains 'X' with station_coords, station_mask,
         query_coords).
@@ -303,11 +304,11 @@ def plot_attention_geographic(
     mask         = np.asarray(X['station_mask'][sample_idx])     # (N,) bool
     query_coords = np.asarray(X['query_coords'][sample_idx])     # (2,)
 
-    # Aggregate attention over heads: (H, N+1) → (N+1,) then drop query self-weight
-    w = weights[sample_idx]                                       # (H, N+1)
+    # Aggregate attention over heads: (H, 1+N) → (1+N,) then drop query self-weight.
+    # CLS-first: token 0 is the query's self-attention, tokens 1..N are stations.
+    w = weights[sample_idx]                                       # (H, 1+N)
     w_station = w.mean(axis=0) if head_agg == 'mean' else w.max(axis=0)
-    N = mask.shape[0]
-    w_station = w_station[:N]                                     # (N,) drop query self-attn
+    w_station = w_station[1:]                                     # (N,) drop query self-attn
     w_real = w_station[mask]                                      # (n_real,)
 
     if location_encoding == 'unit_circle':

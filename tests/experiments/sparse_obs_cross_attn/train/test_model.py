@@ -157,15 +157,16 @@ class TestTCClassifierFakeData:
         assert weights.shape == (LAYERS, B, HEADS, N + 1, N + 1)
         row_sums = weights.sum(axis=-1)
         assert jnp.allclose(row_sums, jnp.ones_like(row_sums), atol=1e-5)
-        # Query row of the last layer is a distribution over N+1 tokens
-        q_row = weights[-1][:, :, -1, :]
+        # CLS-first: the query is token 0; its row is a distribution over 1+N
+        q_row = weights[-1][:, :, 0, :]
         assert q_row.shape == (B, HEADS, N + 1)
 
     def test_return_weights_stations_blocked_from_query(self, loc):
-        # Station rows must place ZERO weight on the query column (token N)
+        # CLS-first: stations are rows 1..N, the query is column 0. Station rows
+        # must place ZERO weight on the query column.
         model, vs, X = self._init(loc)
         _, weights = model.apply(vs, X, train=False, return_weights=True)
-        station_rows_query_col = weights[:, :, :, :N, N]
+        station_rows_query_col = weights[:, :, :, 1:, 0]
         assert jnp.allclose(station_rows_query_col, 0.0, atol=1e-6)
 
     def test_gradient_flows(self, loc):
@@ -261,23 +262,25 @@ def test_missingness_indicator_false_runs():
 
 
 def test_build_attention_mask_pattern():
-    """build_attention_mask: asymmetry + padding blocking, exact pattern."""
+    """build_attention_mask: CLS-first asymmetry + padding blocking, exact pattern."""
     from experiments.sparse_obs_cross_attn.train.model import (
         build_attention_mask,
     )
     N_t = 4
-    station_mask = jnp.array([[True, True, False, True]])   # one padding col
+    station_mask = jnp.array([[True, True, False, True]])   # one padding station
     mask = build_attention_mask(station_mask)               # (1, 1, 5, 5)
     assert mask.shape == (1, 1, N_t + 1, N_t + 1)
     m = np.asarray(mask)[0, 0]
-    # stations → query column blocked
-    assert not m[:N_t, N_t].any()
-    # query row: self True, real stations True, padding station False
-    assert bool(m[N_t, N_t])
-    assert bool(m[N_t, 0]) and bool(m[N_t, 1]) and bool(m[N_t, 3])
-    assert not m[:, 2].any()        # padding column blocked for everyone
-    # real station ↔ real station allowed
-    assert bool(m[0, 1]) and bool(m[1, 0])
+    # CLS-first: token 0 = query; tokens 1..4 = stations; token 3 = padding.
+    # stations → query column (col 0) blocked
+    assert not m[1:, 0].any()
+    # query row (row 0): self True, real stations True, padding station False
+    assert bool(m[0, 0])
+    assert bool(m[0, 1]) and bool(m[0, 2]) and bool(m[0, 4])
+    assert not bool(m[0, 3])
+    assert not m[:, 3].any()        # padding column (token 3) blocked for everyone
+    # real station ↔ real station allowed (tokens 1, 2)
+    assert bool(m[1, 2]) and bool(m[2, 1])
 
 
 def test_build_attention_mask_full_self_attention():
@@ -286,16 +289,15 @@ def test_build_attention_mask_full_self_attention():
         build_attention_mask,
     )
     N_t = 4
-    station_mask = jnp.array([[True, True, False, True]])   # one padding col
+    station_mask = jnp.array([[True, True, False, True]])   # one padding station
     m = np.asarray(build_attention_mask(
         station_mask, full_self_attention=True))[0, 0]
-    # real stations now DO attend to the query column (rows 0,1,3)
-    assert bool(m[0, N_t]) and bool(m[1, N_t]) and bool(m[3, N_t])
-    # padding station (row 2) attends to query too (it's a real from-row),
-    # but the padding *column* (col 2) is still blocked for everyone
-    assert not m[:, 2].any()
+    # CLS-first: real stations (tokens 1,2,4) now attend to the query col (col 0)
+    assert bool(m[1, 0]) and bool(m[2, 0]) and bool(m[4, 0])
+    # padding station column (token 3) is still blocked for everyone
+    assert not m[:, 3].any()
     # every non-padding (from, to) pair is allowed → complete self-attention
-    keep = [0, 1, 3, N_t]   # drop padding station index 2
+    keep = [0, 1, 2, 4]   # query + 3 real stations (drop padding token 3)
     sub = m[np.ix_(keep, keep)]
     assert sub.all()
 
@@ -321,9 +323,10 @@ def test_full_self_attention_flag_changes_station_outputs():
 def test_asymmetric_mask_station_independent_of_query():
     """Swapping the query token must not change station token outputs.
 
-    Tests the asymmetric mask directly on TransformerEncoder: with the
-    mask set so stations cannot attend to query, changing the query token
-    in position N must leave positions 0..N-1 unchanged.
+    Tests the asymmetric mask directly on TransformerEncoder. CLS-first:
+    the query is at position 0, stations 1..N. With the mask set so stations
+    cannot attend to the query, changing the query token in position 0 must
+    leave positions 1..N unchanged.
     """
     from core.nets.transformers import TransformerEncoder
 
@@ -337,23 +340,49 @@ def test_asymmetric_mask_station_independent_of_query():
     query_a  = jnp.array(rng.standard_normal((B_t, 1, D)).astype(np.float32))
     query_b  = jnp.array(rng.standard_normal((B_t, 1, D)).astype(np.float32))
 
-    tokens_a = jnp.concatenate([stations, query_a], axis=1)  # (B, N+1, D)
-    tokens_b = jnp.concatenate([stations, query_b], axis=1)
+    tokens_a = jnp.concatenate([query_a, stations], axis=1)  # CLS-first (B, 1+N, D)
+    tokens_b = jnp.concatenate([query_b, stations], axis=1)
 
-    # Asymmetric mask: same construction as TCClassifier
+    # Asymmetric mask, CLS-first: same construction as TCClassifier
     mask = jnp.zeros((B_t, 1, N_t + 1, N_t + 1), dtype=bool)
-    mask = mask.at[:, :, :N_t, :N_t].set(True)
-    mask = mask.at[:, :,  N_t, :N_t].set(True)
-    mask = mask.at[:, :,  N_t,  N_t].set(True)
+    mask = mask.at[:, :, 1:, 1:].set(True)   # station → station
+    mask = mask.at[:, :, 0,  1:].set(True)   # query   → stations
+    mask = mask.at[:, :, 0,  0 ].set(True)   # query   → self
 
     vs    = encoder.init(KEY, tokens_a, mask=mask, train=False)
     out_a = encoder.apply(vs, tokens_a, mask=mask, train=False)
     out_b = encoder.apply(vs, tokens_b, mask=mask, train=False)
 
-    assert jnp.allclose(out_a[:, :N_t, :], out_b[:, :N_t, :], atol=1e-5), \
+    assert jnp.allclose(out_a[:, 1:, :], out_b[:, 1:, :], atol=1e-5), \
         "station representations changed when query token changed — mask is broken"
-    assert not jnp.allclose(out_a[:, N_t, :], out_b[:, N_t, :]), \
+    assert not jnp.allclose(out_a[:, 0, :], out_b[:, 0, :]), \
         "query representations should differ for different query tokens"
+
+
+def test_learnable_query_pos_ignores_query_coords():
+    """learnable_query_pos=True (unit_circle): the CLS position is a learned
+    parameter, so changing query_coords must NOT change the output."""
+    model = _make_model(learnable_query_pos=True)
+    X  = _fake_batch(location_encoding='domain')   # nonzero query_coords
+    vs = model.init(KEY, X, train=False)
+    out0 = model.apply(vs, X, train=False)
+    X2 = dict(X); X2['query_coords'] = X['query_coords'] + 1.0
+    out1 = model.apply(vs, X2, train=False)
+    assert jnp.allclose(out0, out1), "learnable CLS must ignore query_coords"
+    assert 'query_pos_slots' in vs['params']
+
+
+def test_query_pos_from_coords_uses_query_coords():
+    """learnable_query_pos=False (domain): the CLS position comes from
+    query_coords, so changing them changes the output; no query_pos_slots."""
+    model = _make_model(learnable_query_pos=False)
+    X  = _fake_batch(location_encoding='domain')
+    vs = model.init(KEY, X, train=False)
+    out0 = model.apply(vs, X, train=False)
+    X2 = dict(X); X2['query_coords'] = X['query_coords'] + 1.0
+    out1 = model.apply(vs, X2, train=False)
+    assert not jnp.allclose(out0, out1), "CLS must use query_coords under domain"
+    assert 'query_pos_slots' not in vs['params']
 
 
 # ---------------------------------------------------------------------------

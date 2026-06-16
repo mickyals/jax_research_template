@@ -45,7 +45,7 @@ This is a binary + ordinal classification problem over **9 classes**, ordered by
 
 ## Architecture
 
-`TCClassifier` is a single `TransformerEncoder` over N+1 tokens: N station tokens followed by one query/CLS token. An asymmetric attention mask separates the two roles — stations contextualise each other without seeing the query; the query then reads the fully-contextualised station network and drives the classification head.
+`TCClassifier` is a single `TransformerEncoder` over 1+N tokens, **CLS-first** (ViT-style): one query/CLS token at position 0 followed by N station tokens. An asymmetric attention mask separates the two roles — stations contextualise each other without seeing the query; the query then reads the fully-contextualised station network and drives the classification head (read off token 0).
 
 ### Token construction
 
@@ -58,30 +58,35 @@ station_tokens = token_proj(station_input)                                 # (B,
 
 Missing observations are filled with 0; the concatenated mask channel — not the fill value — disambiguates "observed 0" from "absent" (the mask's projection weights carry the distinction). No learned or constant sentinel is needed.
 
-**Query token** — the *same* `token_proj`, applied to a learned stand-in `query_obs_slots` (ξ) occupying the obs/mask slots, with `Fourier(query_coords)` supplying the position slots:
+**Query/CLS token** — the *same* `token_proj`, applied to a learned stand-in `query_obs_slots` (ξ) occupying the obs/mask slots. The **position slots** depend on `learnable_query_pos` (derived from the encoding):
 
 ```
+# unit_circle (learnable_query_pos=True): the whole CLS input is learnable
+query_input = concat([query_obs_slots, query_pos_slots])                    # (B, 2F+K)
+# domain (learnable_query_pos=False): position from the query's coords
 query_input = concat([query_obs_slots, Fourier(query_coords)])             # (B, 2F+K)
 query_token = token_proj(query_input)                                      # (B, 1, D)
 ```
 
-There is no separate query projection. For `unit_circle` the query sits at `(0,0)`, so its position features are constant and the learned ξ carries the query identity. The model is **coordinate-agnostic** — it projects whatever `station_coords`/`query_coords` the datamodule supplies, so the location-encoding choice lives only in the data config.
+There is no separate query projection. For `unit_circle` the query sits at `(0,0)`, so `Fourier((0,0))` is a constant — a fully learnable position slot (`query_pos_slots`) subsumes it and is strictly more expressive. For `domain` the CLS uses `Fourier(query_coords)` so it carries the absolute query location. The station tokens are coordinate-agnostic regardless; only the CLS construction differs by encoding.
 
 ### Asymmetric attention mask
 
+CLS-first (token 0 = query, tokens 1..N = stations):
+
 ```
                   attend to →
-              station_0 … station_N-1   query
+              query   station_1 … station_N
               ─────────────────────────────────
-station_0  │      ✓              ✓        ✗
-    ⋮      │      ✓              ✓        ✗    ← stations can't see query
-station_N-1│      ✓              ✓        ✗
-query      │      ✓              ✓        ✓    ← query reads everything
+query      │    ✓         ✓            ✓     ← query reads everything
+station_1  │    ✗         ✓            ✓
+    ⋮      │    ✗         ✓            ✓     ← stations can't see query
+station_N  │    ✗         ✓            ✓
 ```
 
 Padding stations (where `station_mask = False`) have their entire column blocked — no token can attend to a padding position.
 
-Set `model.full_self_attention: true` to open the `stations → query` block (the `✗` column above), giving complete self-attention over all N+1 tokens — the standard unrestricted Transformer pattern. Default `false` keeps the asymmetric mask. Both paths go through `build_attention_mask` (the single source of truth, also used by `plot_attention_mask`).
+Set `model.full_self_attention: true` to open the `stations → query` block (the `✗` column above), giving complete self-attention over all 1+N tokens — the standard unrestricted Transformer pattern. Default `false` keeps the asymmetric mask. Both paths go through `build_attention_mask` (the single source of truth, also used by `plot_attention_mask`).
 
 ### Location encoding modes
 
@@ -89,8 +94,8 @@ Set in `data.location_encoding` only — the model is coordinate-agnostic and pr
 
 | Mode | `station_coords` | `query_coords` |
 |------|-----------------|----------------|
-| `unit_circle` | `[x, y]` storm-centred local map (`norm_dist·sin(bearing), norm_dist·cos(bearing)`), each in [-1, 1] | `[0, 0]` = storm position; Fourier features constant, so ξ carries query identity |
-| `domain` | `[norm_lat_rad, norm_lon_rad]` absolute | same encoding; `Fourier(query_coords)` varies and feeds the shared `token_proj` |
+| `unit_circle` | `[x, y]` storm-centred local map (`norm_dist·sin(bearing), norm_dist·cos(bearing)`), each in [-1, 1] | `[0, 0]` = storm position; CLS position slot is fully learnable (`learnable_query_pos=True`), so the constant `Fourier((0,0))` is subsumed |
+| `domain` | `[norm_lat_rad, norm_lon_rad]` absolute | same encoding; CLS uses `Fourier(query_coords)` (`learnable_query_pos=False`) so it carries the absolute query location |
 
 `unit_circle` is rotation-equivariant (the storm is always "at the origin"). `domain` retains absolute geographic position.
 
@@ -106,11 +111,11 @@ Stations within the radius may have missing values for some variables. Missing e
 1.  obs_zeroed = where(obs_mask, station_obs, 0)                            (B, N, F)
 2.  station_input  = concat([obs_zeroed, obs_mask, Fourier(station_coords)])  (B, N, 2F+K)
     station_tokens = token_proj(station_input)                             (B, N, D)
-3.  query_input = concat([query_obs_slots, Fourier(query_coords)])         (B, 2F+K)
+3.  query_input = concat([query_obs_slots, query_pos_slots | Fourier(query_coords)])  (B, 2F+K)
     query_token = token_proj(query_input)                                  (B, 1, D)
-4.  tokens  = concat([station_tokens, query_token], axis=1)                 (B, N+1, D)
-5.  encoded = TransformerEncoder(tokens, mask=asymmetric_mask)              (B, N+1, D)
-6.  logits  = head(LayerNorm(encoded[:, N, :]))                             (B, 11)
+4.  tokens  = concat([query_token, station_tokens], axis=1)                 (B, 1+N, D)   CLS-first
+5.  encoded = TransformerEncoder(tokens, mask=asymmetric_mask)              (B, 1+N, D)
+6.  logits  = head(LayerNorm(encoded[:, 0, :]))                             (B, 9)
 ```
 
 ---
@@ -429,7 +434,7 @@ import numpy as np
 def attn_callback(state, epoch, global_step):
     _, w = model.apply({'params': state.params}, batch['X'],
                        train=False, return_weights=True)
-    w       = np.asarray(w)[-1][:, :, -1, :]   # last layer, query row → (B, H, N+1)
+    w       = np.asarray(w)[-1][:, :, 0, :]   # last layer, query row (CLS=token 0) → (B, H, 1+N)
     entropy = float(-np.sum(w * np.log(w + 1e-12), axis=-1).mean())
     print(f'  epoch {epoch:3d}  val/attn_entropy = {entropy:.4f}')
 
@@ -510,7 +515,7 @@ plt.show()
 - A model that always predicts class 0 achieves `binary_accuracy = 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
 - `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tracks ordinal agreement (rewards near misses over far misses) independent of the training loss; `val/ece` (mean) and the test report's `mce` (worst-bin) are the calibration measurements.
 - **Temperature scaling** (Guo et al. 2017): `evaluate.py` fits a single temperature `T` on the **val** split (`fit_temperature`, an exact ternary search since NLL is convex in `1/T`) and `print_report` prints both `<split>/ece` and `<split>/ece_tempscaled` with the fitted `T`. `T` divides the logits, so it recalibrates confidence without changing the argmax — accuracy, QWK and the per-class table are identical. For `--split test` this is the proper val→test transfer; for `--split val` it is an in-sample check.
-- `val/attn_entropy` includes the query's self-attention weight (the last of N+1 positions). A high self-attention weight early in training is expected — the model is relying on its learned query prior (`query_obs_slots`). Expect it to decrease as the model learns to trust station data.
+- `val/attn_entropy` includes the query's self-attention weight (the first of 1+N positions, CLS-first). A high self-attention weight early in training is expected — the model is relying on its learned query prior (`query_obs_slots`). Expect it to decrease as the model learns to trust station data.
 
 ---
 
