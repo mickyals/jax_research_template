@@ -402,7 +402,7 @@ class _MockDS:
     def __len__(self) -> int:
         return self._n
 
-    def get_tc_sample(self, idx: int, rng=None):
+    def get_tc_sample(self, idx: int):
         # Deterministic fake counts for station_diagnostics: candidates
         # cycle 5..14, capped at 8 used stations.
         n_avail = 5 + (idx % 10)
@@ -585,7 +585,7 @@ class TestEvalDeterminism:
         return TCLoader(
             ds, batch_size=4, tc_fraction=0.5, shuffle=False, seed=0,
             fov_lat=self._FOV_LAT, fov_lon=self._FOV_LON,
-            station_selection='nearest', freeze_backgrounds=True,
+            freeze_backgrounds=True,
         )
 
     @staticmethod
@@ -652,7 +652,7 @@ class TestEvalDeterminism:
             ds, batch_size=4, tc_fraction=0.5, seed=0,
             fov_lat=self._FOV_LAT, fov_lon=self._FOV_LON,
             steps_per_epoch=3,
-            station_selection='random', freeze_backgrounds=False,
+            freeze_backgrounds=False,
         )
         epoch1 = list(loader)
         epoch2 = list(loader)
@@ -660,11 +660,6 @@ class TestEvalDeterminism:
         lats1 = np.concatenate([b['meta']['query_lat'] for b in epoch1])
         lats2 = np.concatenate([b['meta']['query_lat'] for b in epoch2])
         assert not np.array_equal(lats1, lats2)
-
-    def test_invalid_station_selection_raises(self, tmp_path):
-        ds = self._make_dataset(tmp_path)
-        with pytest.raises(ValueError, match='station_selection'):
-            TCLoader(ds, batch_size=4, station_selection='closest')
 
     def test_len_includes_flush_batch(self, tmp_path):
         loader = self._make_eval_loader(tmp_path, n_per_season=5)

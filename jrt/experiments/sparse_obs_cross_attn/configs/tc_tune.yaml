@@ -151,11 +151,9 @@ data:
     wind_north:                [-115.0,  115.0]
 
   # --- Token padding / truncation ---
+  # All stations within radius used; >max_stations → nearest-trim (no random).
   max_stations:           16
   min_stations:           1
-
-  # Train-loader station subsampling; val/test always 'nearest'.
-  station_selection:      random
 
   # --- Batch construction ---
   # batch_size is set in trainer: and propagated here by tune.py.

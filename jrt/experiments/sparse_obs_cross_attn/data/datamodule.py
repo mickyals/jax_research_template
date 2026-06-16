@@ -174,11 +174,13 @@ class TCLoader:
     **Random mode** (``steps_per_epoch=N`` — training)
         Draws TC samples uniformly at random *with replacement* for exactly
         ``steps_per_epoch`` gradient steps.  TC events are reused across
-        steps; each reuse receives a fresh background sample and (when
-        more stations are available than max_stations) a different random
-        station subset, providing implicit augmentation.  Background
+        steps; each reuse receives a fresh background sample.  Background
         samples are drawn fresh every step (uniform position + random
         pool timestamp), giving maximum diversity.
+
+    Stations are always taken nearest-first up to max_stations (the dataset
+    uses every station within radius and the region is sparse, so the cap
+    rarely binds) — no random station subsampling, so eval is reproducible.
 
     Parameters
     ----------
@@ -194,11 +196,6 @@ class TCLoader:
     steps_per_epoch : int or None
         If set, enables random mode and controls epoch length exactly.
         If None, sequential mode is used.
-    station_selection : {'random', 'nearest'}
-        How stations are chosen when a sample has more candidates than
-        max_stations. 'random' = epoch-varying random subset (train
-        augmentation); 'nearest' = deterministic nearest-N by distance
-        (deployment policy — eval default).
     freeze_backgrounds : bool
         If True (val/test), ONE background set is pre-drawn on first
         iteration — positions via Latin Hypercube, timestamps fixed-seed
@@ -221,16 +218,10 @@ class TCLoader:
         fov_lat:            tuple[float, float] = (0.0, 30.0),
         fov_lon:            tuple[float, float] = (-100.0, -45.0),
         steps_per_epoch:    Optional[int] = None,
-        station_selection:  str   = 'random',
         freeze_backgrounds: bool  = False,
     ) -> None:
         if not (0.0 < tc_fraction < 1.0):
             raise ValueError(f"tc_fraction must be in (0, 1), got {tc_fraction}")
-        if station_selection not in ('random', 'nearest'):
-            raise ValueError(
-                f"station_selection must be 'random' or 'nearest', "
-                f"got '{station_selection}'."
-            )
         self._dataset            = dataset
         self._batch_size         = batch_size
         self._tc_half            = max(1, round(batch_size * tc_fraction))
@@ -240,7 +231,6 @@ class TCLoader:
         self._fov_lat            = fov_lat
         self._fov_lon            = fov_lon
         self._steps_per_epoch    = steps_per_epoch
-        self._station_selection  = station_selection
         self._freeze_backgrounds = freeze_backgrounds
         self._frozen_bg: Optional[list[dict]] = None
         self._epoch              = 0
@@ -248,12 +238,6 @@ class TCLoader:
     # ------------------------------------------------------------------
     # Helpers shared by both modes
     # ------------------------------------------------------------------
-
-    def _station_rng(
-        self, rng: np.random.Generator
-    ) -> Optional[np.random.Generator]:
-        """Epoch rng for 'random' station selection, None for 'nearest'."""
-        return rng if self._station_selection == 'random' else None
 
     def _background_pool(self) -> np.ndarray:
         pool = self._dataset.background_timestamps
@@ -288,9 +272,7 @@ class TCLoader:
             lat = float(rng.uniform(self._fov_lat[0], self._fov_lat[1]))
             lon = float(rng.uniform(self._fov_lon[0], self._fov_lon[1]))
             ts  = int(rng.choice(pool))
-            bg  = self._dataset.get_background_sample(
-                lat, lon, ts, rng=self._station_rng(rng),
-            )
+            bg  = self._dataset.get_background_sample(lat, lon, ts)
             if bg is not None:
                 bg_buf.append(bg)
         return bg_buf, True
@@ -327,7 +309,7 @@ class TCLoader:
             if len(frozen) == n_needed:
                 break
             bg = self._dataset.get_background_sample(
-                float(lat), float(lon), int(ts), rng=None,
+                float(lat), float(lon), int(ts),
             )
             if bg is not None:
                 frozen.append(bg)
@@ -378,8 +360,7 @@ class TCLoader:
             tc_buf: list[dict] = []
             while len(tc_buf) < self._tc_half:
                 idx    = int(rng.integers(0, n_tc))
-                sample = self._dataset.get_tc_sample(
-                    idx, rng=self._station_rng(rng))
+                sample = self._dataset.get_tc_sample(idx)
                 if sample is not None:
                     tc_buf.append(sample)
 
@@ -421,8 +402,7 @@ class TCLoader:
             return buf[:n_bg]
 
         for idx in indices:
-            sample = self._dataset.get_tc_sample(
-                int(idx), rng=self._station_rng(rng))
+            sample = self._dataset.get_tc_sample(int(idx))
             if sample is None:
                 continue
             tc_buf.append(sample)
@@ -478,10 +458,6 @@ class TCDataModule(BaseDataModule):
         fov_lat                  list  default [0.0, 30.0]
         fov_lon                  list  default [-100.0, -45.0]
         background_buffer_hours  float default 6.0
-        station_selection        str   default 'random' ('random'|'nearest') —
-                                        TRAIN loader station subsampling;
-                                        val/test loaders are 'nearest' by
-                                        default regardless (decision 9)
         location_encoding        str   default 'unit_circle' ('unit_circle'|'domain')
         obs_normalisation        str   default 'minmax_01'
                                         ('minmax_01'|'minmax_11'|'standardise')
@@ -532,9 +508,6 @@ class TCDataModule(BaseDataModule):
         buf_hours         = float(config.get('background_buffer_hours', 6.0))
         location_encoding = config.get('location_encoding', 'unit_circle')
         obs_normalisation = config.get('obs_normalisation', 'minmax_01')
-        # Train-loader station selection; eval loaders are always 'nearest'
-        # by default (deterministic deployment policy, decision 9).
-        self._station_selection = config.get('station_selection', 'random')
 
         # obs_bounds: dict[var, [min, max]] or dict[var, [mean, std]] for standardise
         obs_bounds_raw = config.get('obs_bounds', None)
@@ -615,20 +588,16 @@ class TCDataModule(BaseDataModule):
             fov_lat            = self._fov_lat,
             fov_lon            = self._fov_lon,
             steps_per_epoch    = steps_per_epoch,
-            station_selection  = self._station_selection,
             freeze_backgrounds = False,
         )
 
     def val_loader(
         self,
-        batch_size:        Optional[int] = None,
-        shuffle:           bool = False,
-        station_selection: str  = 'nearest',
+        batch_size: Optional[int] = None,
+        shuffle:    bool = False,
     ) -> TCLoader:
-        """Deterministic eval loader: nearest-N stations + frozen
-        backgrounds, so two iterations yield identical batches.
-        station_selection='random' override exists for the
-        nearest-vs-random comparison runs (decision 13)."""
+        """Deterministic eval loader: nearest-N stations + frozen backgrounds,
+        so two iterations yield identical batches."""
         return TCLoader(
             self._val_ds,
             batch_size or self._batch_size,
@@ -637,15 +606,13 @@ class TCDataModule(BaseDataModule):
             seed=0,
             fov_lat=self._fov_lat,
             fov_lon=self._fov_lon,
-            station_selection=station_selection,
             freeze_backgrounds=True,
         )
 
     def test_loader(
         self,
-        batch_size:        Optional[int] = None,
-        shuffle:           bool = False,
-        station_selection: str  = 'nearest',
+        batch_size: Optional[int] = None,
+        shuffle:    bool = False,
     ) -> TCLoader:
         """Deterministic eval loader — see val_loader."""
         return TCLoader(
@@ -656,7 +623,6 @@ class TCDataModule(BaseDataModule):
             seed=0,
             fov_lat=self._fov_lat,
             fov_lon=self._fov_lon,
-            station_selection=station_selection,
             freeze_backgrounds=True,
         )
 
@@ -702,7 +668,7 @@ class TCDataModule(BaseDataModule):
         avail = []
         used  = []
         for i in idx:
-            s = ds.get_tc_sample(int(i), rng=None)
+            s = ds.get_tc_sample(int(i))
             if s is None:
                 continue
             avail.append(int(s['n_available']))

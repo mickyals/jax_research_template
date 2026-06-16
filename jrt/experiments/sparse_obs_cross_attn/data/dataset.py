@@ -91,8 +91,9 @@ class TCDataset:
         time. Each station contributes at most one report — the one
         nearest in time (see InsituLandDataset.get_obs_near).
     max_stations : int
-        Fixed sample size for batching — real stations are padded or subsampled
-        to exactly this count.
+        Cap on station tokens per sample (for batching). All stations within
+        radius are used; samples with fewer than this are zero-padded, and
+        samples with more are trimmed to the nearest max_stations by distance.
     min_stations : int
         Samples with fewer matching stations return None.
     obs_vars : list[str] or None
@@ -219,21 +220,17 @@ class TCDataset:
     # TC sample
     # ------------------------------------------------------------------
 
-    def get_tc_sample(
-        self,
-        idx: int,
-        rng: Optional[np.random.Generator] = None,
-    ) -> Optional[dict]:
+    def get_tc_sample(self, idx: int) -> Optional[dict]:
         """Assemble one TC sample from IBTrACS row idx.
+
+        All stations within radius_km are used; when more than max_stations
+        match, the nearest max_stations by distance are kept (the candidate
+        frame from get_obs_near is distance-sorted).
 
         Parameters
         ----------
         idx : int
             Row index into the IBTrACS split.
-        rng : np.random.Generator, optional
-            When more stations match than max_stations, used for random
-            subsampling (train augmentation). If None the closest stations
-            by distance are kept.
 
         Returns
         -------
@@ -260,7 +257,7 @@ class TCDataset:
         if len(df) < self.min_stations:
             return None
 
-        return self._build_sample(df, lat, lon, label, rng,
+        return self._build_sample(df, lat, lon, label,
                                   sid=str(self._sid[idx]), iso_time=ts)
 
     # ------------------------------------------------------------------
@@ -272,13 +269,13 @@ class TCDataset:
         lat:          float,
         lon:          float,
         timestamp_ns: int,
-        rng:          Optional[np.random.Generator] = None,
     ) -> Optional[dict]:
         """Assemble one background (no-storm) sample at a given point/time.
 
         Pure assembly: the query position and timestamp are ARGUMENTS —
         sampling policy (uniform vs LHS positions, pool draws, frozen eval
-        sets) lives in the loader (TCLoader), not here.
+        sets) lives in the loader (TCLoader), not here. Stations are taken
+        nearest-first up to max_stations (same as get_tc_sample).
 
         Parameters
         ----------
@@ -287,9 +284,6 @@ class TCDataset:
         timestamp_ns : int
             Query timestamp, Unix-ns (typically drawn from the loader's
             background pool).
-        rng : np.random.Generator, optional
-            Station subsampling rng — same semantics as get_tc_sample
-            (None = deterministic nearest-N).
 
         Returns
         -------
@@ -310,7 +304,7 @@ class TCDataset:
         if len(df) < self.min_stations:
             return None
 
-        return self._build_sample(df, lat, lon, 0, rng, sid=None, iso_time=ts)
+        return self._build_sample(df, lat, lon, 0, sid=None, iso_time=ts)
 
     # ------------------------------------------------------------------
     # Shared sample builder
@@ -322,7 +316,6 @@ class TCDataset:
         query_lat: float,
         query_lon: float,
         label:     int,
-        rng:       Optional[np.random.Generator],
         sid:       Optional[str],
         iso_time:  int,
     ) -> dict:
@@ -338,13 +331,12 @@ class TCDataset:
         n_available = len(df)
         F = len(self.obs_vars)
 
-        # Subsample or trim to max_stations
+        # Use all stations within radius; when over max_stations keep the
+        # NEAREST (df from get_obs_near is sorted by distance). No random
+        # subsampling — the region is large and stations sparse, so the cap
+        # rarely binds and deterministic selection keeps eval reproducible.
         if n_available > self.max_stations:
-            if rng is not None:
-                chosen = rng.choice(n_available, self.max_stations, replace=False)
-                df = df.iloc[chosen]
-            else:
-                df = df.iloc[:self.max_stations]
+            df = df.iloc[:self.max_stations]
             n_real = self.max_stations
         else:
             n_real = n_available

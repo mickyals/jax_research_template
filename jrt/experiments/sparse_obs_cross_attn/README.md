@@ -39,7 +39,7 @@ This is a binary + ordinal classification problem over **9 classes**, ordered by
 - Test: 2023–2025
 - Hard test: multi-storm timestamps (870 times when ≥2 storms were active simultaneously) — held out entirely
 
-**Batching:** each batch is 1:1 balanced — half TC samples (storm centre as query), half background samples (domain point during non-TC periods). Train backgrounds are fresh uniform draws each step; val/test loaders use ONE frozen background set (Latin-Hypercube positions + fixed-seed synoptic timestamps) reused every epoch, plus deterministic nearest-N station selection, so eval differences are purely model change. Sequential (eval) epochs yield every valid TC sample — the final partial batch is flushed with proportionally fewer backgrounds.
+**Batching:** each batch is 1:1 balanced — half TC samples (storm centre as query), half background samples (domain point during non-TC periods). All stations within `radius_km` are used; when a sample has more than `max_stations`, the nearest `max_stations` by distance are kept (no random subsampling — the region is large and stations sparse, so the cap rarely binds, and deterministic selection keeps eval reproducible). Train backgrounds are fresh uniform draws each step; val/test loaders use ONE frozen background set (Latin-Hypercube positions + fixed-seed synoptic timestamps) reused every epoch, so eval differences are purely model change. Sequential (eval) epochs yield every valid TC sample — the final partial batch is flushed with proportionally fewer backgrounds.
 
 ---
 
@@ -152,7 +152,7 @@ sparse_obs_cross_attn/
 │   ├── dataset.py       TCDataset — joins IBTrACS + InsituLand per sample,
 │   │                       coordinate encoding, obs normalisation
 │   ├── datamodule.py    TCDataModule + TCLoader — balanced TC/background
-│   │                       batches, station_selection (nearest/random),
+│   │                       batches, nearest-N station cap,
 │   │                       frozen LHS eval backgrounds, partial-batch flush
 │   ├── encoding.py      encode/decode pairs (unit_circle local x-y,
 │   │                       domain FOV-normalised) — exact inverses shared
@@ -546,9 +546,8 @@ Key fields in `tc_classifier.yaml`:
 | `seed` | 3678 | Single seed for model init, dropout, and data shuffle |
 | `data.radius_km` | 500 | Stations outside this radius are excluded |
 | `data.time_window_hours` | 0.1 | Temporal tolerance (±) for matching obs to the query time; each station contributes only its report nearest in time |
-| `data.max_stations` | 64 | Padding / truncation limit |
+| `data.max_stations` | 64 | Cap on station tokens; all within radius are used, more are nearest-trimmed, fewer are zero-padded |
 | `data.min_stations` | 1 | Samples with fewer stations are dropped |
-| `data.station_selection` | `random` | TRAIN-loader station subsampling above `max_stations`: `random` (epoch-varying augmentation) or `nearest`. Val/test loaders always default to `nearest` (deterministic) |
 | `data.location_encoding` | `unit_circle` | `unit_circle` or `domain`; model is coordinate-agnostic, so this lives in the data block only |
 | `data.obs_normalisation` | `minmax_11` | `minmax_01` / `minmax_11` / `standardise` |
 | `data.class_weight_scheme` | `none` | `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` / `median_freq` — computes `class_weights` at setup from train-split counts (stored in manifest); overridden by an explicit `trainer.loss_kwargs.class_weights` |

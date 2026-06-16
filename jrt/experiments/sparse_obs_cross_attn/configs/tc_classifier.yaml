@@ -97,14 +97,11 @@ data:
     wind_north:                [-115.0,  115.0]         # m/s (max observed speed ~224 kt)
 
   # --- Token padding / truncation ---
-  max_stations:           10          # pad or truncate every sample to this many station tokens
+  # All stations within radius_km are used; samples with more than max_stations
+  # are trimmed to the NEAREST max_stations by distance (no random subsampling —
+  # the region is large and stations sparse, so the cap rarely binds).
+  max_stations:           10          # cap on station tokens; pad below, nearest-trim above
   min_stations:           1          # samples with fewer real stations are discarded
-
-  # How the TRAIN loader picks stations when more than max_stations match:
-  # random  = fresh random subset each epoch (subsampling augmentation)
-  # nearest = deterministic nearest-N by distance
-  # Val/test loaders always use 'nearest' (deterministic deployment policy).
-  station_selection:      nearest
 
   # --- Batch construction ---
   # batch_size is NOT set here — it flows down from trainer.batch_size automatically.
