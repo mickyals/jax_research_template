@@ -273,6 +273,36 @@ class TestApplyNorm:
         assert float(tr_n.max()) <= 1.0 + 1e-6
         assert stats["method"] == "minmax"
 
+    def test_minmax_01_alias(self):
+        tr, va, te = self._make()
+        tr_n, _, _, stats = _apply_norm(tr, va, te, "minmax_01")
+        assert stats["method"] == "minmax_01"
+        assert float(tr_n.min()) >= -1e-6 and float(tr_n.max()) <= 1.0 + 1e-6
+
+    def test_minmax_11_range(self):
+        tr, va, te = self._make()
+        tr_n, _, _, stats = _apply_norm(tr, va, te, "minmax_11")
+        assert stats["method"] == "minmax_11"
+        assert float(tr_n.min()) >= -1.0 - 1e-6
+        assert float(tr_n.max()) <=  1.0 + 1e-6
+        # the column min/max actually reach the endpoints
+        assert np.allclose(tr_n.min(axis=0), -1.0, atol=1e-5)
+        assert np.allclose(tr_n.max(axis=0),  1.0, atol=1e-5)
+
+    def test_precomputed_standard_stats_skip_fitting(self):
+        tr, va, te = self._make()
+        # Deliberately "wrong" stats — the function must use them, not fit.
+        pre = {"mean": np.zeros(3), "std": np.ones(3)}
+        tr_n, _, _, stats = _apply_norm(tr, va, te, "standard", stats=pre)
+        assert np.allclose(stats["mean"], 0.0) and np.allclose(stats["std"], 1.0)
+        assert np.allclose(tr_n, tr, atol=1e-5)   # (x-0)/1 == x
+
+    def test_precomputed_minmax_stats_skip_fitting(self):
+        tr, va, te = self._make()
+        pre = {"min": np.zeros(3), "max": np.full(3, 10.0)}
+        _, _, _, stats = _apply_norm(tr, va, te, "minmax", stats=pre)
+        assert np.allclose(stats["min"], 0.0) and np.allclose(stats["max"], 10.0)
+
     def test_none_passthrough(self):
         tr, va, te = self._make()
         tr_n, va_n, te_n, stats = _apply_norm(tr, va, te, "none")
@@ -319,6 +349,10 @@ class TestInvertNorm:
 
     def test_minmax_round_trip(self):
         orig, norm, stats = self._round_trip("minmax")
+        assert np.allclose(_invert_norm(norm, stats), orig, atol=1e-5)
+
+    def test_minmax_11_round_trip(self):
+        orig, norm, stats = self._round_trip("minmax_11")
         assert np.allclose(_invert_norm(norm, stats), orig, atol=1e-5)
 
     def test_none_passthrough(self):

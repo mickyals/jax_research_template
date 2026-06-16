@@ -25,6 +25,15 @@ Vincenty is more accurate than Haversine near the poles and for antipodal points
 
 Meteorological unit and variable conversions (temperature scales, pressure conversions, dewpoint/RH relationships, wind components, etc.).
 
+### `coordinates.py`
+
+Pure lat/lon coordinate encoders (NumPy, vectorised) for feature matrices — kept here so the data-loading framework stays domain-agnostic.
+
+| Function | Description |
+|----------|-------------|
+| `lat_lon_to_unit_sphere(lat, lon)` | (lat, lon)° → 3-D unit-sphere Cartesian `(x, y, z)`; no pole/meridian discontinuities |
+| `lat_lon_to_domain_normalised(lat, lon, fov_lat, fov_lon)` | (lat, lon)° → `[-1, 1]²` over a field-of-view box `(min, max)` |
+
 ---
 
 ## `jax_core/`
