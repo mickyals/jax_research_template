@@ -11,7 +11,7 @@ imports are self-contained:
     )
 
 Splitting is not a dataset concern: this class exposes filter primitives
-(filter_seasons, filter_sids, filter_single_storm, filter_multi_storm) and
+(filter_years, filter_sids, filter_single_storm, filter_multi_storm) and
 the split policy lives in the data.split config block, resolved by
 experiments.sparse_obs_cross_attn.data.splits.resolve_splits. The
 IBTRACS_*_SEASONS constants remain only as the reference values of the
@@ -280,8 +280,8 @@ class IBTrACSDataset(NpzDataset):
     # Filtering
     # ------------------------------------------------------------------
 
-    def filter_seasons(self, seasons: list[int]) -> IBTrACSDataset:
-        """Keep rows whose ISO_TIME calendar year is in ``seasons``.
+    def filter_years(self, years: list[int]) -> IBTrACSDataset:
+        """Keep rows whose ISO_TIME calendar year is in ``years``.
 
         Filters on the observation timestamp's year (not the SEASON column), so
         the TC split aligns with the insitu/background stream (also split by
@@ -289,8 +289,8 @@ class IBTrACSDataset(NpzDataset):
         (SEASON 2005, track Jan 2006) goes to the 2006 split, matching its
         actual observation times.
         """
-        years = self.iso_time.year.to_numpy()
-        return self._mask_to_dataset(np.isin(years, list(seasons)))
+        row_years = self.iso_time.year.to_numpy()
+        return self._mask_to_dataset(np.isin(row_years, list(years)))
 
     def filter_sids(self, sids: list[str]) -> IBTrACSDataset:
         """Keep rows whose SID is in sids."""

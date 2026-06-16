@@ -33,10 +33,10 @@ This is a binary + ordinal classification problem over **9 classes**, ordered by
   stays missing. `obs_bounds` for the components are signed symmetric
   (±115 m/s) so 0 m/s normalises to exactly 0 under `minmax_11`.
 
-**Splits:**
-- Train: IBTrACS seasons 2005–2020
-- Val: 2021–2022
-- Test: 2023–2025
+**Splits** (by ISO_TIME calendar year; default `year` strategy):
+- Train: years 2005–2022
+- Val: 2023–2024
+- Test: 2025
 - Hard test: multi-storm timestamps (870 times when ≥2 storms were active simultaneously) — held out entirely
 
 **Batching:** each batch is 1:1 balanced — half TC samples (storm centre as query), half background samples (domain point during non-TC periods). All stations within `radius_km` are used; when a sample has more than `max_stations`, the nearest `max_stations` by distance are kept (no random subsampling — the region is large and stations sparse, so the cap rarely binds, and deterministic selection keeps eval reproducible). Train backgrounds are fresh uniform draws each step; val/test loaders use ONE frozen background set (Latin-Hypercube positions + fixed-seed synoptic timestamps) reused every epoch, so eval differences are purely model change. Sequential (eval) epochs yield every valid TC sample — the final partial batch is flushed with proportionally fewer backgrounds.
@@ -158,10 +158,10 @@ sparse_obs_cross_attn/
 │   │                       domain FOV-normalised) — exact inverses shared
 │   │                       by dataset + plotting
 │   ├── splits.py        resolve_splits — data.split config → per-split
-│   │                       datasets + run manifest ('season' and 'sid'
+│   │                       datasets + run manifest ('year' and 'year_random'
 │   │                       strategies)
 │   └── sources/
-│       ├── ibtracs.py       IBTrACSDataset — filter primitives (seasons,
+│       ├── ibtracs.py       IBTrACSDataset — filter primitives (years,
 │       │                       SIDs, single/multi-storm), sid-meta validation,
 │       │                       ordinal organisation labels (status_sshs_to_class)
 │       └── insitu_land.py   InsituLandDataset — haversine spatial filter,
@@ -235,7 +235,7 @@ jrt/experiments/sparse_obs_cross_attn/configs/*_local.yaml
 
 The only required edits before a first run are the five `data:` paths. Key flags to understand:
 
-- `data.split` is required — resolved by `data/splits.py` into filtered datasets plus a run manifest written next to the checkpoints. Two strategies: `season` (per-split IBTrACS season lists, disjoint, validated — the default config reproduces the original hardcoded split: train 2005–2020, val 2021–2022, test 2023–2025, `hard_test: multi_storm`) and `sid` (hybrid: `test.seasons` lists edge years, with membership decided by track calendar years from the sid-meta table; remaining interior storms are assigned train/val by SID at `val.fraction`, seeded, stratified by `val.stratify_by`, train being the implicit remainder; train and val deliberately share the interior-year insitu stream — only test is time-separated)
+- `data.split` is required — resolved by `data/splits.py` into filtered datasets plus a run manifest written next to the checkpoints. Splits are by **ISO_TIME calendar year** (not the IBTrACS SEASON column), so the TC and insitu/background streams stay year-aligned. Two strategies: `year` (explicit disjoint year lists per split, validated — e.g. train 2005–2022, val 2023–2024, test 2025, `hard_test: multi_storm`) and `year_random` (`train_val.years` pooled + a disjoint `test.years`; the pooled rows are split into train/val by `val.fraction`/`val.seed` at the **row/timestep** level — adjacent points of one storm may fall in both train and val, a mild deliberate train↔val leakage; test stays the clean held-out years, and train/val share the train+val-year insitu stream; no `train` block — train is the random remainder)
 - `data.location_encoding` — `unit_circle` (default) or `domain`; the model is coordinate-agnostic so this lives in the data block only
 - `model.missingness_indicator: true` (default) — concatenate the obs mask as its own channel (missing obs filled with 0); `false` drops it (ablation only)
 - `trainer.run_dir` — change per run to avoid overwriting checkpoints

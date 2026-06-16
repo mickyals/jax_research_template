@@ -631,7 +631,7 @@ class TCDataModule(BaseDataModule):
     # ------------------------------------------------------------------
 
     def manifest(self) -> dict:
-        """Resolved split seasons/SIDs/row counts — see resolve_splits."""
+        """Resolved split years/SIDs/row counts — see resolve_splits."""
         return self._manifest
 
     @property
@@ -714,15 +714,15 @@ class TCDataModule(BaseDataModule):
         print()
         print("─" * 58)
         print(f"Data  ({self._location_encoding} · {self._obs_normalisation})")
-        print(f"  {'split':<6}  {'seasons':>16}  {'SIDs':>6}")
+        print(f"  {'split':<6}  {'years':>16}  {'SIDs':>6}")
         for name in ('train', 'val', 'test'):
             entry = self._manifest[name]
-            seasons = entry['seasons']
-            season_str = (
-                f"{seasons[0]}-{seasons[-1]}" if len(seasons) > 1
-                else str(seasons[0]) if seasons else "-"
+            years = entry['years']
+            year_str = (
+                f"{years[0]}-{years[-1]}" if len(years) > 1
+                else str(years[0]) if years else "-"
             )
-            print(f"  {name:<6}  {season_str:>16}  {entry['n_sids']:>6,}")
+            print(f"  {name:<6}  {year_str:>16}  {entry['n_sids']:>6,}")
         if 'hard_test' in self._manifest:
             ht = self._manifest['hard_test']
             print(f"  {'hard_test (multi-storm)':<24}  rows={ht['n_rows']:,}  SIDs={ht['n_sids']:,}")

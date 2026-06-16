@@ -40,7 +40,7 @@ def _make_ibtracs_npz(tmp_path, n_per_season=8):
         for i in range(n_per_season):
             sids.append(f"{s}A" if i < n_per_season // 2 else f"{s}B")
 
-    # ISO_TIME year aligned with SEASON (filter_seasons now filters on the
+    # ISO_TIME year aligned with SEASON (filter_years filters on the
     # observation year, not the SEASON column).
     iso_times = np.array([
         np.datetime64(f"{s}-09-01", "ns").astype(np.int64)
@@ -306,8 +306,8 @@ class TestIBTrACSInit:
 
 class TestFiltering:
 
-    def test_filter_seasons_count(self, ds):
-        sub = ds.filter_seasons([2019])
+    def test_filter_years_count(self, ds):
+        sub = ds.filter_years([2019])
         assert len(sub) == 8
 
     def test_filter_single_storm(self, ds):
@@ -321,11 +321,11 @@ class TestFiltering:
         assert len(sub) == 3
 
     def test_filter_preserves_multi_times(self, ds):
-        sub = ds.filter_seasons([2019])
+        sub = ds.filter_years([2019])
         assert sub._multi_times is not None
 
     def test_filter_returns_ibtracs_type(self, ds):
-        assert type(ds.filter_seasons([2019])) is IBTrACSDataset
+        assert type(ds.filter_years([2019])) is IBTrACSDataset
 
     def test_filter_sids(self, ds):
         sub = ds.filter_sids(['2019A'])
@@ -366,7 +366,7 @@ class TestSidMeta:
     def test_filter_preserves_sid_meta(self, ibtracs_paths, sid_meta_path):
         npz, ms, *_ = ibtracs_paths
         ds = IBTrACSDataset(npz, ms, sid_meta_path)
-        sub = ds.filter_seasons([2019])
+        sub = ds.filter_years([2019])
         assert sub._sid_meta is not None
 
     def test_no_validation_without_sid_meta_path(self, ds):

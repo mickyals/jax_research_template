@@ -22,58 +22,64 @@
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "strategy": { "type": "string", "enum": ["season", "sid"] }
+            "strategy": { "type": "string", "enum": ["year", "year_random"] }
           },
           "oneOf": [
             {
-              "description": "season strategy: disjoint explicit season lists per split",
+              "description": "year strategy: disjoint explicit calendar-year lists per split",
               "required": ["train", "val", "test"],
               "properties": {
-                "strategy": { "const": "season" },
+                "strategy": { "const": "year" },
                 "train": {
                   "type": "object",
-                  "required": ["seasons"],
+                  "required": ["years"],
                   "properties": {
-                    "seasons": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                    "years": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
                   }
                 },
                 "val": {
                   "type": "object",
-                  "required": ["seasons"],
+                  "required": ["years"],
                   "properties": {
-                    "seasons": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                    "years": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
                   }
                 },
                 "test": {
                   "type": "object",
-                  "required": ["seasons"],
+                  "required": ["years"],
                   "properties": {
-                    "seasons":   { "type": "array", "minItems": 1, "items": { "type": "integer" } },
+                    "years":     { "type": "array", "minItems": 1, "items": { "type": "integer" } },
                     "hard_test": { "type": "string", "enum": ["multi_storm"] }
                   }
                 }
               }
             },
             {
-              "description": "sid strategy: edge-year test (by track years) + seeded stratified SID train/val over the interior; train is the implicit remainder (no train block). Requires data.ibtracs_sid_meta_path.",
-              "required": ["strategy", "val", "test"],
+              "description": "year_random strategy: pooled train+val calendar years + a disjoint test year range; the pooled rows are split into train/val by a seeded fraction (row level). No train block — train is the random remainder.",
+              "required": ["strategy", "train_val", "val", "test"],
               "not": { "required": ["train"] },
               "properties": {
-                "strategy": { "const": "sid" },
+                "strategy": { "const": "year_random" },
+                "train_val": {
+                  "type": "object",
+                  "required": ["years"],
+                  "properties": {
+                    "years": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                  }
+                },
                 "val": {
                   "type": "object",
-                  "required": ["fraction", "seed", "stratify_by"],
+                  "required": ["fraction", "seed"],
                   "properties": {
-                    "fraction":    { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
-                    "seed":        { "type": "integer", "minimum": 0 },
-                    "stratify_by": { "type": "string" }
+                    "fraction": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+                    "seed":     { "type": "integer", "minimum": 0 }
                   }
                 },
                 "test": {
                   "type": "object",
-                  "required": ["seasons"],
+                  "required": ["years"],
                   "properties": {
-                    "seasons":   { "type": "array", "minItems": 1, "items": { "type": "integer" } },
+                    "years":     { "type": "array", "minItems": 1, "items": { "type": "integer" } },
                     "hard_test": { "type": "string", "enum": ["multi_storm"] }
                   }
                 }

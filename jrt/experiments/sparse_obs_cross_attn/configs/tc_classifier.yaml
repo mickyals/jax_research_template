@@ -41,26 +41,29 @@ data:
   target:                 organisation
 
   # --- Train/val/test split ---
-  # season strategy: disjoint sets of IBTrACS seasons per split. Multi-storm
-  # timesteps are excluded from train/val/test (when multi_storm_path is set)
-  # and test.hard_test selects them as a separate held-out evaluation set.
+  # Splits are by ISO_TIME calendar YEAR (not the IBTrACS SEASON column), so the
+  # TC and insitu/background streams stay year-aligned. Multi-storm timesteps are
+  # excluded from train/val/test (when multi_storm_path is set) and
+  # test.hard_test selects them as a separate held-out evaluation set.
   #
-  # Alternative 'sid' strategy (see data/splits.py): test = edge years by
-  # track-year membership; interior storms assigned train/val by SID,
-  # seeded + stratified; train is the implicit remainder (no train block):
+  # 'year'        — explicit disjoint year lists per split (below).
+  # 'year_random' — pooled train+val years + a disjoint test year range; the
+  #                 pooled rows are split into train/val by a seeded fraction
+  #                 (row level, mild train/val leakage; test stays clean):
   #   split:
-  #     strategy: sid
-  #     test: {seasons: [2005, 2025], hard_test: multi_storm}
-  #     val:  {fraction: 0.2, seed: 42, stratify_by: peak_sshs}
+  #     strategy: year_random
+  #     train_val: {years: [2005, ..., 2024]}
+  #     test:      {years: [2025], hard_test: multi_storm}
+  #     val:       {fraction: 0.2, seed: 42}
   split:
-    strategy: season
+    strategy: year
     train:
-      seasons: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014,
-                2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022]
+      years: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014,
+              2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022]
     val:
-      seasons: [2023, 2024]
+      years: [2023, 2024]
     test:
-      seasons: [2025]
+      years: [2025]
       hard_test: multi_storm
 
   # --- Station filtering ---

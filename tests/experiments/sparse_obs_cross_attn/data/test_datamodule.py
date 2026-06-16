@@ -426,10 +426,10 @@ def _make_summary_dm():
     dm._val_ds            = _MockDS(n_tc=20,  n_bg=100)
     dm._test_ds           = _MockDS(n_tc=10,  n_bg=50)
     dm._manifest = {
-        'strategy': 'season',
-        'train': {'seasons': [2019], 'sids': [], 'n_rows': 100, 'n_sids': 30, 'class_counts': {}},
-        'val':   {'seasons': [2021], 'sids': [], 'n_rows': 20,  'n_sids': 8,  'class_counts': {}},
-        'test':  {'seasons': [2023], 'sids': [], 'n_rows': 10,  'n_sids': 4,  'class_counts': {}},
+        'strategy': 'year',
+        'train': {'years': [2019], 'sids': [], 'n_rows': 100, 'n_sids': 30, 'class_counts': {}},
+        'val':   {'years': [2021], 'sids': [], 'n_rows': 20,  'n_sids': 8,  'class_counts': {}},
+        'test':  {'years': [2023], 'sids': [], 'n_rows': 10,  'n_sids': 4,  'class_counts': {}},
     }
     return dm
 
@@ -538,10 +538,10 @@ class TestTCDataModuleSummary:
             'batch_size':   4,
             'tc_fraction':  0.5,
             'split': {
-                'strategy': 'season',
-                'train': {'seasons': [2019]},
-                'val':   {'seasons': [2021]},
-                'test':  {'seasons': [2023], 'hard_test': 'multi_storm'},
+                'strategy': 'year',
+                'train': {'years': [2019]},
+                'val':   {'years': [2021]},
+                'test':  {'years': [2023], 'hard_test': 'multi_storm'},
             },
         }
         dm = TCDataModule.from_config(cfg)
