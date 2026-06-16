@@ -29,7 +29,6 @@ from typing import Optional, Union
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-import warnings
 
 from core.attention import (
     MultiHeadAttention,

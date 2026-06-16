@@ -1,6 +1,4 @@
 # core/pooling.py
-import inspect
-import warnings
 from typing import Sequence, Union
 
 import jax

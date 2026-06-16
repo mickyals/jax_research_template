@@ -279,7 +279,8 @@ class TestRMSNorm:
     def test_scale_is_learnable(self, x_2d):
         norm = get_norm("RMS_NORM", use_scale=True)
         variables = norm.init(KEY, x_2d)
-        assert 'scale' in variables['params']
+        # flax.linen.RMSNorm wrapped under the 'norm' submodule (r16)
+        assert 'scale' in variables['params']['norm']
 
     def test_no_scale(self, x_2d):
         norm = get_norm("RMS_NORM", use_scale=False)

@@ -1,6 +1,5 @@
 # core/nets/conv.py
 import inspect
-import warnings
 from typing import Optional
 
 import jax

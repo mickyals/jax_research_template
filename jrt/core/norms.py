@@ -1,5 +1,4 @@
 import jax
-import jax.numpy as jnp
 import flax.linen as nn
 
 from utils.registry import Registry
@@ -186,8 +185,8 @@ class InstanceNorm(nn.Module):
 
     Notes
     -----
-    Implemented via nn.GroupNorm with num_groups=None and group_size=1,
-    which is the idiomatic Flax way to achieve per-channel normalisation.
+    Thin wrapper over flax.linen.InstanceNorm (r16; previously hand-rolled via
+    GroupNorm(group_size=1)). Same per-sample, per-channel normalisation.
 
     Example
     -------
@@ -199,16 +198,14 @@ class InstanceNorm(nn.Module):
     epsilon: float = 1e-6
 
     def setup(self):
-        self.gn = nn.GroupNorm(
-            num_groups=None,
-            group_size=1,
+        self.norm = nn.InstanceNorm(
             epsilon=self.epsilon,
             use_scale=self.use_scale,
             use_bias=self.use_bias,
         )
 
     def __call__(self, x: jax.Array, train: bool = True) -> jax.Array:
-        return self.gn(x)
+        return self.norm(x)
 
 
 @register_norm("RMS_NORM", description="RMS normalisation (no mean centering)")
@@ -219,8 +216,8 @@ class RMSNorm(nn.Module):
     centering. Used in modern transformer variants (LLaMA, Gemma etc.)
     as a cheaper alternative to LayerNorm.
 
-    Not natively available in Flax linen as of the current version.
-    This is a minimal manual implementation sufficient for standard use.
+    Thin wrapper over flax.linen.RMSNorm (r16; previously hand-rolled). The
+    learnable scale lives under the ``norm`` submodule (``params['norm']['scale']``).
 
     Parameters
     ----------
@@ -236,10 +233,6 @@ class RMSNorm(nn.Module):
     RMSNorm has no bias term by design -- the absence of mean centering
     makes a bias redundant. use_bias is not supported.
 
-    The feature dimension (last axis of x) is inferred at first call
-    and fixed thereafter. Do not reuse this module with inputs of
-    different feature dimensions.
-
     Example
     -------
     >>> norm = get_norm("RMS_NORM")
@@ -248,11 +241,8 @@ class RMSNorm(nn.Module):
     use_scale: bool = True
     epsilon: float = 1e-6
 
-    @nn.compact
+    def setup(self):
+        self.norm = nn.RMSNorm(epsilon=self.epsilon, use_scale=self.use_scale)
+
     def __call__(self, x: jax.Array, train: bool = True) -> jax.Array:
-        rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + self.epsilon)
-        x_norm = x / rms
-        if self.use_scale:
-            scale = self.param('scale', nn.initializers.ones, (x.shape[-1],))
-            x_norm = x_norm * scale
-        return x_norm
+        return self.norm(x)
