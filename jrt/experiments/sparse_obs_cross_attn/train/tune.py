@@ -157,6 +157,7 @@ def tune(
     metrics_fns = build_metrics_fns(
         loss        = trainer_cfg.get("loss", dm.target_spec.loss),
         loss_kwargs = loss_kwargs,
+        metrics     = trainer_cfg.get("metrics"),
     )
 
     tuner = Tuner(

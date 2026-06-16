@@ -230,10 +230,13 @@ trainer:
   # --- Loss ---
   # Fixed for this sweep (not a suggest_fn dimension yet). See
   # training/losses.py LOSSES registry; cross_entropy composes focal_gamma +
-  # class_weights via loss_kwargs. val/cross_entropy is always reported
-  # separately for cross-run comparability.
+  # class_weights via loss_kwargs.
   loss:                 cross_entropy
   loss_kwargs:          {}
+
+  # Reported metrics (METRICS registry). cross_entropy is the patience metric +
+  # comparability anchor — keep it listed.
+  metrics:              [cross_entropy, binary_accuracy, mae_class]
 
   # --- Early stopping ---
   patience:             8

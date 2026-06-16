@@ -44,6 +44,11 @@ N     = 12   # stations per sample
 F     = 5    # obs features
 N_CLS = 9
 
+# Full per-batch metric set — these Trainer tests patience on val/cross_entropy
+# and assert the complete metric dict, so they request every metric explicitly
+# (build_metrics_fns now defaults to just binary_accuracy + mae_class).
+_ALL_METRICS = ['cross_entropy', 'accuracy', 'binary_accuracy', 'mae_class']
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -198,7 +203,7 @@ class TestOneForwardBackwardPass:
     @pytest.fixture
     def trainer_state(self, tmp_path):
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         batch   = _fake_batch()
         state   = trainer._init_state(batch)
         return trainer, state
@@ -250,7 +255,7 @@ class TestOneForwardBackwardPass:
     def test_domain_encoding_forward_and_backward(self, tmp_path):
         """domain coordinate convention (varied query_coords) trains without error."""
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         batch   = _fake_batch(location_encoding='domain')
         state   = trainer._init_state(batch)
         new_state, metrics = trainer._train_step(state, batch)
@@ -261,7 +266,7 @@ class TestOneForwardBackwardPass:
     def test_missing_obs_mask_is_handled(self, tmp_path):
         """~30% of observations missing (obs_mask False) — no NaN produced."""
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         rng     = np.random.default_rng(7)
         X       = _fake_X(rng=rng)
         X['obs_mask'] = jnp.array(rng.random((B, N, F)) > 0.3)
@@ -273,7 +278,7 @@ class TestOneForwardBackwardPass:
     def test_padded_station_mask_is_handled(self, tmp_path):
         """Only 5 of 12 stations are real; the rest are padding — no NaN."""
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         rng     = np.random.default_rng(9)
         X       = _fake_X(rng=rng)
         mask    = np.zeros((B, N), dtype=bool)
@@ -295,7 +300,7 @@ class TestLossVariation:
     def test_loss_changes_across_steps(self, tmp_path):
         """Loss at step 1 and step 10 are not identical."""
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         batch   = _fake_batch()
         state   = trainer._init_state(batch)
         _, m0   = trainer._train_step(state, batch)
@@ -306,7 +311,7 @@ class TestLossVariation:
 
     def test_train_epoch_returns_correct_key_and_finite_value(self, tmp_path):
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         loader  = _FakeTCLoader(n_batches=4)
         state   = trainer._init_state(next(iter(loader)))
         _, metrics = trainer._train_epoch(state, loader, epoch=0)
@@ -315,7 +320,7 @@ class TestLossVariation:
 
     def test_eval_model_returns_all_five_val_metrics(self, tmp_path):
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         loader  = _FakeTCLoader(n_batches=4)
         state   = trainer._init_state(next(iter(loader)))
         metrics = trainer._eval_model(state, loader, prefix='val')
@@ -329,7 +334,7 @@ class TestLossVariation:
     def test_fit_completes_and_returns_train_state(self, tmp_path):
         model   = _make_model()
         cfg     = _trainer_config(tmp_path, num_epochs=3, patience=10)
-        trainer = Trainer(model, build_metrics_fns(), cfg)
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), cfg)
         loader  = _FakeTCLoader(n_batches=4)
         result  = trainer.fit(loader, loader)
         assert isinstance(result, TrainState)
@@ -343,7 +348,7 @@ class TestLossVariation:
 
         model   = _make_model()
         cfg     = _trainer_config(tmp_path, num_epochs=4, patience=10)
-        trainer = Trainer(model, build_metrics_fns(), cfg)
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), cfg)
         loader  = _FakeTCLoader(n_batches=4)
         trainer.fit(loader, loader, epoch_callbacks=[cb])
         assert recorded == [0, 1, 2, 3]
@@ -358,7 +363,7 @@ class TestLossVariation:
             patience=25,
             scheduler_kwargs={"value": 1e-2},  # higher LR for faster convergence
         )
-        trainer = Trainer(model, build_metrics_fns(), cfg)
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), cfg)
 
         train_loader = _FakeTCLoader(n_batches=8, batch_size=16, learnable=True, seed=0)
         val_loader   = _FakeTCLoader(n_batches=4, batch_size=16, learnable=True, seed=1)

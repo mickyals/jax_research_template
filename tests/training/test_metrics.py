@@ -31,12 +31,15 @@ import numpy as np
 import pytest
 
 from training.metrics import (
+    METRICS,
     accuracy,
     apply_temperature,
     binary_accuracy,
     cross_entropy,
     expected_calibration_error,
     fit_temperature,
+    get_metric,
+    list_metrics,
     mae_class,
     maximum_calibration_error,
     quadratic_weighted_kappa,
@@ -377,3 +380,39 @@ class TestTemperatureScaling:
         logits = np.asarray(_rand_logits())
         labels = np.asarray(_rand_labels())
         assert fit_temperature(logits, labels) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestMetricsRegistry
+# ---------------------------------------------------------------------------
+
+class TestMetricsRegistry:
+
+    def test_registered_names(self):
+        assert set(list_metrics()) == {
+            'CROSS_ENTROPY', 'ACCURACY', 'BINARY_ACCURACY', 'MAE_CLASS',
+        }
+
+    def test_get_returns_callable_metric(self):
+        logits = _rand_logits()
+        labels = _rand_labels()
+        for name in ('cross_entropy', 'accuracy', 'binary_accuracy', 'mae_class'):
+            fn = get_metric(name)
+            assert callable(fn)
+            out = fn(logits, labels)
+            assert out.shape == () and bool(jnp.isfinite(out))
+
+    def test_get_is_case_insensitive(self):
+        assert get_metric('Cross_Entropy') is cross_entropy
+
+    def test_binary_accuracy_threshold_forwarded(self):
+        logits = _rand_logits()
+        labels = _rand_labels()
+        fn = get_metric('binary_accuracy', threshold=3)
+        assert float(fn(logits, labels)) == pytest.approx(
+            float(binary_accuracy(logits, labels, threshold=3))
+        )
+
+    def test_unknown_metric_raises(self):
+        with pytest.raises(ValueError):
+            get_metric('not_a_metric')

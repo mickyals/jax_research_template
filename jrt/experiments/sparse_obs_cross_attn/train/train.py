@@ -445,7 +445,21 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     metrics_fns = build_metrics_fns(
         loss        = trainer_cfg.get('loss', target_spec.loss),
         loss_kwargs = loss_kwargs,
+        metrics     = trainer_cfg.get('metrics'),
     )
+
+    # Fail fast if early stopping watches a metric that isn't being reported
+    # (only 'loss' is guaranteed; everything else must be listed in
+    # trainer.metrics). The patience metric is logged as '<split>/<name>'.
+    patience_metric = trainer_cfg.get('patience_metric', 'val/loss')
+    pm_name = patience_metric.split('/')[-1]
+    if pm_name not in metrics_fns:
+        raise ValueError(
+            f"trainer.patience_metric={patience_metric!r} watches '{pm_name}', "
+            f"which is not a reported metric. Add it to trainer.metrics "
+            f"(have: {sorted(metrics_fns)}) or set patience_metric to val/loss."
+        )
+
     trainer     = Trainer(model, metrics_fns, trainer_cfg)
 
     # Log full config so every run is reproducible from its artifact

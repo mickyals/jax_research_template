@@ -1,15 +1,15 @@
 """
 Tests for experiments/sparse_obs_cross_attn/train/metrics.py.
 
-Generic metric implementations (cross_entropy, accuracy, binary_accuracy,
-mae_class, quadratic_weighted_kappa, expected_calibration_error) are tested
-in tests/training/test_metrics.py. This file covers only the experiment's
-build_metrics_fns wiring.
+Generic metric implementations + the METRICS registry are tested in
+tests/training/test_metrics.py. This file covers only the experiment's
+build_metrics_fns wiring (r14: only 'loss' hardcoded, rest registry-selected).
 
 Coverage
 --------
-TestBuildMetricsFns   expected keys; first key is loss; default loss matches
-                      cross_entropy; focal+class-weighted selectable; unknown loss
+TestBuildMetricsFns   default keys (loss + binary_accuracy + mae_class); loss is
+                      first key; explicit metric selection (incl. cross_entropy);
+                      focal+class-weighted loss selectable; unknown loss/metric
                       raises; all callable; all produce finite scalars
 """
 
@@ -17,10 +17,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
+from experiments.sparse_obs_cross_attn.train.metrics import (
+    build_metrics_fns, DEFAULT_METRICS,
+)
 
 B     = 8
-N_CLS = 11
+N_CLS = 9
 
 
 def _rand_logits(seed: int = 0) -> jnp.ndarray:
@@ -39,19 +41,26 @@ def _rand_labels(seed: int = 0) -> jnp.ndarray:
 
 class TestBuildMetricsFns:
 
-    def test_expected_keys(self):
+    def test_default_keys(self):
+        # Only 'loss' is hardcoded; the default reported set is
+        # binary_accuracy + mae_class (top-1 accuracy demoted).
         fns = build_metrics_fns()
-        assert set(fns.keys()) == {
-            'loss', 'cross_entropy', 'accuracy', 'binary_accuracy', 'mae_class'
-        }
+        assert set(fns.keys()) == {'loss', 'binary_accuracy', 'mae_class'}
+        assert DEFAULT_METRICS == ('binary_accuracy', 'mae_class')
 
     def test_first_key_is_loss(self):
         assert list(build_metrics_fns().keys())[0] == 'loss'
 
-    def test_default_loss_matches_cross_entropy(self):
+    def test_explicit_metric_selection(self):
+        fns = build_metrics_fns(metrics=['cross_entropy', 'accuracy'])
+        assert set(fns.keys()) == {'loss', 'cross_entropy', 'accuracy'}
+
+    def test_cross_entropy_selectable_matches_loss(self):
+        # With the default loss (cross_entropy) and cross_entropy listed, the
+        # 'loss' and 'cross_entropy' entries agree numerically.
         logits = _rand_logits()
         labels = _rand_labels()
-        fns = build_metrics_fns()
+        fns = build_metrics_fns(metrics=['cross_entropy'])
         assert float(fns['loss'](logits, labels)) == pytest.approx(
             float(fns['cross_entropy'](logits, labels)), rel=1e-5
         )
@@ -62,6 +71,7 @@ class TestBuildMetricsFns:
         fns = build_metrics_fns(
             loss='cross_entropy',
             loss_kwargs={'focal_gamma': 2.0, 'class_weights': [1.0] * N_CLS},
+            metrics=['cross_entropy'],
         )
         out = fns['loss'](logits, labels)
         assert out.shape == ()
@@ -73,6 +83,10 @@ class TestBuildMetricsFns:
         with pytest.raises(ValueError):
             build_metrics_fns(loss='not_a_real_loss')
 
+    def test_unknown_metric_raises(self):
+        with pytest.raises(ValueError):
+            build_metrics_fns(metrics=['not_a_real_metric'])
+
     def test_all_values_are_callable(self):
         for fn in build_metrics_fns().values():
             assert callable(fn)
@@ -80,7 +94,9 @@ class TestBuildMetricsFns:
     def test_all_produce_finite_scalars(self):
         logits = _rand_logits()
         labels = _rand_labels()
-        for name, fn in build_metrics_fns().items():
+        fns = build_metrics_fns(
+            metrics=['cross_entropy', 'accuracy', 'binary_accuracy', 'mae_class'])
+        for name, fn in fns.items():
             out = fn(logits, labels)
             assert out.shape == (), f"{name} is not scalar"
             assert bool(jnp.isfinite(out)), f"{name} is not finite"

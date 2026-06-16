@@ -371,7 +371,7 @@ def evaluate(
     n_classes   = target_spec.n_classes
     config['model']['n_classes'] = n_classes
     model       = TCClassifier(**config['model'])
-    metrics_fns = build_metrics_fns()
+    metrics_fns = build_metrics_fns(metrics=config['trainer'].get('metrics'))
     trainer     = Trainer(model, metrics_fns, config['trainer'])
 
     loader = dm.test_loader() if split == 'test' else dm.val_loader()

@@ -44,6 +44,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax.losses as _optax
 
+from utils.registry import Registry
+
 
 # ---------------------------------------------------------------------------
 # Individual metric functions
@@ -132,6 +134,51 @@ def mae_class(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
     return jnp.mean(
         jnp.abs(preds.astype(jnp.float32) - labels.astype(jnp.float32))
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-batch metric registry
+# ---------------------------------------------------------------------------
+# Maps a name to a *factory* returning a (logits, labels) -> scalar callable,
+# matching the shared Registry contract (as used by losses/optimizers). The
+# experiment's build_metrics_fns selects which of these to report from the
+# trainer.metrics config list; only the training 'loss' itself is hardcoded.
+# The full-set metrics below (QWK/ECE/MCE) are NOT registered here — they are
+# computed over accumulated predictions in evaluation callbacks, not per batch.
+
+METRICS = Registry("metric")
+
+
+@METRICS.register("cross_entropy", description="Mean softmax cross-entropy (unweighted comparability anchor)")
+def _cross_entropy_metric():
+    return cross_entropy
+
+
+@METRICS.register("accuracy", description="Top-1 accuracy over all classes")
+def _accuracy_metric():
+    return accuracy
+
+
+@METRICS.register("binary_accuracy", description="Thresholded detection accuracy (class < thr vs >= thr)")
+def _binary_accuracy_metric(threshold: int = 1):
+    if threshold == 1:
+        return binary_accuracy
+    return lambda logits, labels: binary_accuracy(logits, labels, threshold)
+
+
+@METRICS.register("mae_class", description="Mean absolute class-index error (ordinal distance)")
+def _mae_class_metric():
+    return mae_class
+
+
+def get_metric(name: str, **kwargs):
+    """Return a configured per-batch metric callable from the METRICS registry."""
+    return METRICS.get(name, **kwargs)
+
+
+def list_metrics() -> list[str]:
+    """Sorted names of the registered per-batch metrics."""
+    return METRICS.names()
 
 
 # ---------------------------------------------------------------------------

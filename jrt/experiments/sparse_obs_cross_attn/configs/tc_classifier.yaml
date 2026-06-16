@@ -218,13 +218,21 @@ trainer:
   #   focal_gamma:   focal modulation (Lin et al. 2017), down-weights easy samples
   #   class_weights: length-9 per-class weights for imbalance (inverse-freq /
   #                  effective-number / median-freq) — index 0 = background
-  # Setting both gives the class-balanced focal loss. 'cross_entropy' is always
-  # reported separately (val/cross_entropy) so runs stay comparable.
+  # Setting both gives the class-balanced focal loss.
   loss:                 cross_entropy
   loss_kwargs:          {}
     # focal_gamma:      2.0
     # emd_lambda:       0.1          # squared-EMD regulariser; emd_omega/emd_mu tune it
     # class_weights:    [1.0, ...]   # explicit 9 values; else use data.class_weight_scheme
+
+  # --- Reported metrics ---
+  # Only the training 'loss' is hardcoded; every reported metric is selected by
+  # name from the METRICS registry (training/metrics.py): cross_entropy /
+  # accuracy / binary_accuracy / mae_class. cross_entropy is the unweighted
+  # comparability anchor (and the patience metric below) — keep it listed.
+  # Plain top-1 accuracy is demoted (misleading under class imbalance); add it
+  # here only if you want it reported. Full-set QWK/ECE are logged separately.
+  metrics:              [cross_entropy, binary_accuracy, mae_class]
 
   # --- Early stopping ---
   patience:             15            # epochs without improvement before halting
