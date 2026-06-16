@@ -63,7 +63,7 @@ class TestRegistry:
         assert expected == set(pools.keys())
 
     def test_get_pooling_unknown_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             get_pooling("NONEXISTENT")
 
     def test_get_pooling_unknown_kwargs_warns(self):
@@ -71,7 +71,7 @@ class TestRegistry:
             get_pooling("MEAN", bogus=99)
 
     def test_register_duplicate_raises(self):
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(ValueError, match="already registered"):
             @register_pooling("MEAN", description="duplicate")
             class Duplicate:
                 def __call__(self, x, axis=1):

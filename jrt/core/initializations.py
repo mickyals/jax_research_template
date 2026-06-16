@@ -7,142 +7,22 @@ import jax.numpy as jnp
 import flax.linen as nn
 from flax.linen import initializers as flax_init
 
-INITIALIZERS: dict[str, dict] = {}
+from utils.registry import Registry
+
+
+INITIALIZERS = Registry("Initializer")
+register_initializer = INITIALIZERS.register
+get_initializer = INITIALIZERS.get
+
+
+def list_initializers() -> dict[str, str]:
+    """Sorted ``{name: description}`` of all registered entries (r16)."""
+    return dict(sorted(INITIALIZERS.describe().items()))
 
 
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
-
-def register_initializer(name: str, description: str = ""):
-    """Register an initializer by name.
-
-    Parameters
-    ----------
-    name : str
-        Name used for lookup. Stored uppercase.
-    description : str, optional
-        Short description shown in ``list_initializers()``.
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If an initializer with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_initializer("MY_INIT", description="Custom initializer")
-    ... class MyInit:
-    ...     def __call__(self, key, shape, dtype):
-    ...         return jax.random.normal(key, shape, dtype)
-    """
-    name_upper = name.upper()
-
-    def decorator(cls):
-        if name_upper in INITIALIZERS:
-            raise ValueError(
-                f"Initializer with name '{name_upper}' already exists."
-            )
-        INITIALIZERS[name_upper] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-
-def get_initializer(name: str, **kwargs):
-    """Retrieve and instantiate a registered initializer by name.
-
-    Inspects the constructor signature and emits a UserWarning for any
-    kwargs not accepted by the initializer class. Unknown kwargs are
-    dropped rather than forwarded to prevent a TypeError at instantiation.
-
-    The returned object is callable with signature
-    ``(key: jax.Array, shape: tuple, dtype) -> jax.Array`` and can be
-    passed directly to ``nn.Dense`` as ``kernel_init`` or ``bias_init``.
-
-    Parameters
-    ----------
-    name : str
-        Name of the registered initializer (case-insensitive).
-    **kwargs
-        Arguments forwarded to the initializer constructor.
-
-    Returns
-    -------
-    callable
-        An instantiated initializer with signature
-        ``(key, shape, dtype) -> jax.Array``.
-
-    Raises
-    ------
-    ValueError
-        If no initializer with the given name exists.
-
-    Example
-    -------
-    >>> init = get_initializer("SIREN", fan_in=256, is_first=False, omega=30.)
-    >>> layer = nn.Dense(256, kernel_init=init)
-
-    >>> init = get_initializer("XAVIER_UNIFORM", gain=0.5)
-    >>> layer = nn.Dense(256, kernel_init=init)
-    """
-    name = name.upper()
-    if name not in INITIALIZERS:
-        available = ", ".join(sorted(INITIALIZERS.keys()))
-        raise ValueError(
-            f"Initializer '{name}' does not exist. Available: {available}"
-        )
-
-    cls = INITIALIZERS[name]["cls"]
-
-    if kwargs:
-        try:
-            sig = inspect.signature(cls.__init__)
-            valid = {
-                k for k, p in sig.parameters.items()
-                if k != "self"
-                and p.kind not in (
-                    inspect.Parameter.VAR_POSITIONAL,
-                    inspect.Parameter.VAR_KEYWORD,
-                )
-            }
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_initializer('{name}'): unknown kwargs {unknown} "
-                    f"will be ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except (ValueError, TypeError):
-            pass
-
-    return cls(**kwargs)
-
-
-def list_initializers() -> dict[str, str]:
-    """Return a sorted dictionary of all registered initializer names and descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_initializers()
-    {'FINER': 'FINER-specific initialization', 'SIREN': '...', ...}
-    """
-    return {
-        name: info["description"]
-        for name, info in sorted(INITIALIZERS.items())
-    }
-
 
 # ---------------------------------------------------------------------------
 # SIREN initializers

@@ -90,7 +90,7 @@ class TestRegistry:
         assert embed is not None
 
     def test_duplicate_registration_raises(self):
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(ValueError, match="already registered"):
             @register_embedding("GAUSSIAN_POSITIONAL")
             class _Dup:
                 pass
@@ -105,7 +105,7 @@ class TestRegistry:
         assert jnp.allclose(e1.apply(v1, x_2d), e2.apply(v2, x_2d))
 
     def test_unknown_name_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             get_embedding("NONEXISTENT_XYZ_123")
 
     def test_error_message_lists_available(self):

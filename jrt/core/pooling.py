@@ -7,129 +7,22 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
-POOLING: dict[str, dict] = {}
+from utils.registry import Registry
+
+
+POOLING = Registry("Pooling")
+register_pooling = POOLING.register
+get_pooling = POOLING.get
+
+
+def list_pooling() -> dict[str, str]:
+    """Sorted ``{name: description}`` of all registered entries (r16)."""
+    return dict(sorted(POOLING.describe().items()))
 
 
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
-
-def register_pooling(name: str, description: str = ""):
-    """Register a pooling operation by name.
-
-    Parameters
-    ----------
-    name : str
-        Name used for lookup. Stored uppercase.
-    description : str, optional
-        Short description shown in ``list_pooling()``.
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If a pooling operation with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_pooling("MY_POOL", description="Custom pooling")
-    ... class MyPool:
-    ...     def __call__(self, x: jax.Array, axis) -> jax.Array:
-    ...         return x.mean(axis=axis)
-    """
-    name_upper = name.upper()
-
-    def decorator(cls):
-        if name_upper in POOLING:
-            raise ValueError(f"Pooling with name '{name_upper}' already exists.")
-        POOLING[name_upper] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-
-def get_pooling(name: str, **kwargs):
-    """Retrieve and instantiate a registered pooling operation by name.
-
-    Inspects the constructor signature and emits a UserWarning for any
-    kwargs not accepted by the pooling class. Unknown kwargs are dropped.
-
-    Parameters
-    ----------
-    name : str
-        Name of the registered pooling operation (case-insensitive).
-    **kwargs
-        Arguments forwarded to the pooling constructor.
-
-    Returns
-    -------
-    callable
-        An instantiated pooling operation.
-
-    Raises
-    ------
-    ValueError
-        If no pooling operation with the given name exists.
-
-    Example
-    -------
-    >>> pool = get_pooling("MEAN")
-    >>> pool = get_pooling("MAX")
-    >>> pool = get_pooling("SPATIAL_MAX", kernel_size=(2, 2), strides=(2, 2))
-    """
-    name = name.upper()
-    if name not in POOLING:
-        available = ", ".join(sorted(POOLING.keys()))
-        raise ValueError(
-            f"Pooling '{name}' does not exist. Available: {available}"
-        )
-
-    cls = POOLING[name]["cls"]
-
-    if kwargs:
-        try:
-            sig = inspect.signature(cls.__init__)
-            valid = {
-                k for k, p in sig.parameters.items()
-                if k != "self"
-                and p.kind not in (
-                    inspect.Parameter.VAR_POSITIONAL,
-                    inspect.Parameter.VAR_KEYWORD,
-                )
-            }
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_pooling('{name}'): unknown kwargs {unknown} "
-                    f"will be ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except (ValueError, TypeError):
-            pass
-
-    return cls(**kwargs)
-
-
-def list_pooling() -> dict[str, str]:
-    """Return a sorted dictionary of all registered pooling names and descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_pooling()
-    {'MAX': 'Max pooling over axis', 'MEAN': 'Mean pooling over axis', ...}
-    """
-    return {name: info["description"] for name, info in sorted(POOLING.items())}
-
 
 # ---------------------------------------------------------------------------
 # Global reductions

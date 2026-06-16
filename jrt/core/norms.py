@@ -1,125 +1,23 @@
-import warnings
-#from typing import Optional
-
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
-NORMS: dict[str, dict] = {}
+from utils.registry import Registry
 
-
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-def register_norm(name: str, description: str = ""):
-    """Register a normalisation module by name.
-
-    Parameters
-    ----------
-    name : str
-        Name used for lookup. Stored uppercase.
-    description : str, optional
-        Short description shown in ``list_norms()``.
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If a norm with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_norm("MY_NORM", description="Custom norm")
-    ... class MyNorm(nn.Module):
-    ...     def __call__(self, x: jax.Array, train: bool = True) -> jax.Array:
-    ...         return x
-    """
-    name_upper = name.upper()
-
-    def decorator(cls):
-        if name_upper in NORMS:
-            raise ValueError(f"Norm with name '{name_upper}' already exists.")
-        NORMS[name_upper] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-
-def get_norm(name: str, **kwargs):
-    """Retrieve and instantiate a registered normalisation module by name.
-
-    Uses ``__dataclass_fields__`` for reliable kwarg inspection since
-    Flax modules are dataclasses.
-
-    Parameters
-    ----------
-    name : str
-        Name of the registered norm (case-insensitive).
-    **kwargs
-        Arguments forwarded to the norm constructor. Unknown kwargs
-        trigger a UserWarning and are dropped.
-
-    Returns
-    -------
-    nn.Module
-        An instantiated Flax Linen normalisation module.
-
-    Raises
-    ------
-    ValueError
-        If no norm with the given name exists.
-
-    Example
-    -------
-    >>> norm = get_norm("BATCH_NORM")
-    >>> norm = get_norm("GROUP_NORM", num_groups=8)
-    >>> norm = get_norm("LAYER_NORM", use_bias=False)
-    """
-    name = name.upper()
-    if name not in NORMS:
-        available = ", ".join(sorted(NORMS.keys()))
-        raise ValueError(
-            f"Norm '{name}' does not exist. Available: {available}"
-        )
-
-    cls = NORMS[name]["cls"]
-
-    if kwargs:
-        try:
-            valid = set(cls.__dataclass_fields__.keys())
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_norm('{name}'): unknown kwargs {unknown} "
-                    f"will be ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except AttributeError:
-            pass
-
-    return cls(**kwargs)
+# Normalisation-module registry on the shared utils.registry.Registry (r16).
+# The module-level register_norm / get_norm / list_norms names are kept as thin
+# aliases so existing call sites (core.__init__, nets.conv, tests) are
+# unchanged. Registry.get filters kwargs via inspect.signature, which for a
+# Flax nn.Module (a dataclass) resolves to its fields — verified equivalent to
+# the old __dataclass_fields__ check.
+NORMS = Registry("Norm")
+register_norm = NORMS.register
+get_norm      = NORMS.get
 
 
 def list_norms() -> dict[str, str]:
-    """Return a sorted dictionary of all registered norm names and descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_norms()
-    {'BATCH_NORM': 'Batch normalisation', 'GROUP_NORM': 'Group normalisation', ...}
-    """
-    return {name: info["description"] for name, info in sorted(NORMS.items())}
+    """Sorted ``{name: description}`` of all registered norms."""
+    return dict(sorted(NORMS.describe().items()))
 
 
 # ---------------------------------------------------------------------------

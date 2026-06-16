@@ -15,115 +15,17 @@ from core import get_initializer
 # Registry
 # ---------------------------------------------------------------------------
 
-NETS: dict[str, dict] = {}
+from utils.registry import Registry
 
 
-def register_mlp(name: str, description: str = ""):
-    """Register an MLP net class by name.
-
-    Parameters
-    ----------
-    name : str
-        Name used for lookup. Stored uppercase.
-    description : str, optional
-        Short description shown in ``list_mlps()``.
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If a net with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_mlp("MY_NET", description="Custom net")
-    ... class MyNet(_BaseMLP):
-    ...     pass
-    """
-    name_upper = name.upper()
-
-    def decorator(cls):
-        if name_upper in NETS:
-            raise ValueError(f"Net with name '{name_upper}' already exists.")
-        NETS[name_upper] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-
-def get_mlp(name: str, **kwargs):
-    """Retrieve and instantiate a registered net by name.
-
-    Uses ``__dataclass_fields__`` for reliable kwarg inspection since
-    Flax modules are dataclasses.
-
-    Parameters
-    ----------
-    name : str
-        Name of the registered net (case-insensitive).
-    **kwargs
-        Arguments forwarded to the net constructor. Unknown kwargs
-        trigger a UserWarning and are dropped.
-
-    Returns
-    -------
-    nn.Module
-        An instantiated Flax Linen net module.
-
-    Raises
-    ------
-    ValueError
-        If no net with the given name exists.
-
-    Example
-    -------
-    >>> net = get_mlp("SIREN", out_features=2, hidden_features=64, n_layers=3)
-    >>> variables = net.init(jax.random.PRNGKey(0), jnp.ones((8, 2)))
-    """
-    import warnings
-
-    name = name.upper()
-    if name not in NETS:
-        available = ", ".join(sorted(NETS.keys()))
-        raise ValueError(f"Net '{name}' does not exist. Available: {available}")
-
-    cls = NETS[name]["cls"]
-
-    if kwargs:
-        try:
-            valid = set(cls.__dataclass_fields__.keys())
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_mlp('{name}'): unknown kwargs {unknown} will be "
-                    f"ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except AttributeError:
-            pass
-
-    return cls(**kwargs)
+NETS = Registry("Net")
+register_mlp = NETS.register
+get_mlp = NETS.get
 
 
 def list_mlps() -> dict[str, str]:
-    """Return a sorted dictionary of all registered net names and descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_mlps()
-    {'FINER': 'FINER adaptive frequency SIREN', 'MLP': 'General MLP', ...}
-    """
-    return {name: info["description"] for name, info in sorted(NETS.items())}
+    """Sorted ``{name: description}`` of all registered entries (r16)."""
+    return dict(sorted(NETS.describe().items()))
 
 
 # ---------------------------------------------------------------------------

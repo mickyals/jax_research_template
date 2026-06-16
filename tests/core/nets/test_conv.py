@@ -949,7 +949,7 @@ class TestRegistry:
         assert out.shape == (BATCH, CLASSES)
 
     def test_get_conv_net_unknown_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             get_conv_net("NONEXISTENT")
 
     def test_get_conv_net_unknown_kwargs_warns(self):
@@ -959,7 +959,7 @@ class TestRegistry:
                          bogus_param=99)
 
     def test_register_duplicate_raises(self):
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(ValueError, match="already registered"):
             @register_conv_net("RESNET", description="duplicate")
             class Duplicate(nn.Module):
                 pass

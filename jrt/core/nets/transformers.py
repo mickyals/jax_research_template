@@ -46,108 +46,17 @@ from core import get_activation, get_initializer
 # Registry
 # ---------------------------------------------------------------------------
 
-TRANSFORMER_NETS: dict[str, dict] = {}
+from utils.registry import Registry
 
 
-def register_transformer(name: str, description: str = ""):
-    """Register a transformer net class by name.
-
-    Parameters
-    ----------
-    name : str
-        Name used for lookup. Stored uppercase.
-    description : str, optional
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If a net with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_transformer("MY_NET", description="Custom transformer")
-    ... class MyNet(nn.Module):
-    ...     pass
-    """
-    name_upper = name.upper()
-
-    def decorator(cls):
-        if name_upper in TRANSFORMER_NETS:
-            raise ValueError(
-                f"Transformer net '{name_upper}' already exists."
-            )
-        TRANSFORMER_NETS[name_upper] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-
-def get_transformer(name: str, **kwargs):
-    """Retrieve and instantiate a registered transformer net by name.
-
-    Parameters
-    ----------
-    name : str
-        Case-insensitive.
-    **kwargs
-        Forwarded to constructor. Unknown kwargs trigger UserWarning and
-        are dropped.
-
-    Returns
-    -------
-    nn.Module
-
-    Raises
-    ------
-    ValueError
-        If no net with the given name exists.
-
-    Example
-    -------
-    >>> net = get_transformer("VIT", patch_size=16, embed_dim=768,
-    ...                       num_heads=12, num_layers=12, mlp_ratio=4)
-    """
-    name = name.upper()
-    if name not in TRANSFORMER_NETS:
-        available = ", ".join(sorted(TRANSFORMER_NETS.keys()))
-        raise ValueError(
-            f"Transformer net '{name}' does not exist. Available: {available}"
-        )
-    cls = TRANSFORMER_NETS[name]["cls"]
-    if kwargs:
-        try:
-            valid = set(cls.__dataclass_fields__.keys())
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_transformer('{name}'): unknown kwargs {unknown} "
-                    f"will be ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except AttributeError:
-            pass
-    return cls(**kwargs)
+TRANSFORMER_NETS = Registry("Transformer net")
+register_transformer = TRANSFORMER_NETS.register
+get_transformer = TRANSFORMER_NETS.get
 
 
 def list_transformers() -> dict[str, str]:
-    """Return sorted dict of registered transformer net names and descriptions.
-
-    Example
-    -------
-    >>> list_transformers()
-    {'MAE_DECODER': '...', 'SWIN_ENCODER': '...', 'VIT': '...', ...}
-    """
-    return {
-        name: info["description"]
-        for name, info in sorted(TRANSFORMER_NETS.items())
-    }
+    """Sorted ``{name: description}`` of all registered entries (r16)."""
+    return dict(sorted(TRANSFORMER_NETS.describe().items()))
 
 
 # ---------------------------------------------------------------------------

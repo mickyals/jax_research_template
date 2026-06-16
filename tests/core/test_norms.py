@@ -75,7 +75,7 @@ class TestRegistry:
         assert expected == set(norms.keys())
 
     def test_get_norm_unknown_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             get_norm("NONEXISTENT")
 
     def test_get_norm_unknown_kwargs_warns(self):
@@ -83,7 +83,7 @@ class TestRegistry:
             get_norm("LAYER_NORM", nonexistent_param=99)
 
     def test_register_duplicate_raises(self):
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(ValueError, match="already registered"):
             @register_norm("LAYER_NORM", description="duplicate")
             class Duplicate(nn.Module):
                 def __call__(self, x, train=True):

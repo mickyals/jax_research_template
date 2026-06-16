@@ -1171,14 +1171,14 @@ class TestMlpActivationInitializer:
         check_finite(out)
 
     def test_transformer_block_invalid_activation_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             x     = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
             block = TransformerBlock(embed_dim=EMBED, num_heads=NUM_HEADS,
                                      mlp_activation='nonexistent_act')
             block.init(KEY, x, train=False)
 
     def test_transformer_block_invalid_initializer_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             x     = jax.random.normal(KEY, (BATCH, SEQ, EMBED))
             block = TransformerBlock(embed_dim=EMBED, num_heads=NUM_HEADS,
                                      mlp_initializer='nonexistent_init')
@@ -1327,7 +1327,7 @@ class TestRegistry:
         assert expected == set(nets.keys())
 
     def test_get_transformer_unknown_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             get_transformer("NONEXISTENT")
 
     def test_get_transformer_unknown_kwargs_warns(self):
@@ -1338,7 +1338,7 @@ class TestRegistry:
 
     def test_register_duplicate_raises(self):
         import flax.linen as nn
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(ValueError, match="already registered"):
             @register_transformer("VIT", description="duplicate")
             class Duplicate(nn.Module):
                 pass

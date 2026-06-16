@@ -60,7 +60,7 @@ class TestRegistry:
         assert callable(init)
 
     def test_duplicate_registration_raises(self):
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(ValueError, match="already registered"):
             @register_initializer("SIREN")
             class _Dup:
                 pass
@@ -73,7 +73,7 @@ class TestRegistry:
         assert jnp.allclose(w1, w2)
 
     def test_unknown_name_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             get_initializer("NONEXISTENT_XYZ")
 
     def test_error_lists_available(self):

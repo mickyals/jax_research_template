@@ -16,114 +16,17 @@ from core import get_norm
 # Registry
 # ---------------------------------------------------------------------------
 
-CONV_NETS: dict[str, dict] = {}
+from utils.registry import Registry
 
 
-def register_conv_net(name: str, description: str = ""):
-    """Register a conv net class by name.
-
-    Parameters
-    ----------
-    name : str
-        Name used for lookup. Stored uppercase.
-    description : str, optional
-        Short description shown in ``list_conv_nets()``.
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If a conv net with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_conv_net("MY_NET", description="Custom conv net")
-    ... class MyNet(nn.Module):
-    ...     pass
-    """
-    name_upper = name.upper()
-
-    def decorator(cls):
-        if name_upper in CONV_NETS:
-            raise ValueError(f"Conv net with name '{name_upper}' already exists.")
-        CONV_NETS[name_upper] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-
-def get_conv_net(name: str, **kwargs):
-    """Retrieve and instantiate a registered conv net by name.
-
-    Uses ``__dataclass_fields__`` for reliable kwarg inspection since
-    Flax modules are dataclasses.
-
-    Parameters
-    ----------
-    name : str
-        Name of the registered conv net (case-insensitive).
-    **kwargs
-        Arguments forwarded to the net constructor. Unknown kwargs
-        trigger a UserWarning and are dropped.
-
-    Returns
-    -------
-    nn.Module
-        An instantiated Flax Linen conv net module.
-
-    Raises
-    ------
-    ValueError
-        If no conv net with the given name exists.
-
-    Example
-    -------
-    >>> net = get_conv_net("RESNET", c_hidden=(32, 64, 128), num_blocks=(2, 2, 2))
-    >>> variables = net.init(jax.random.PRNGKey(0), jnp.ones((2, 32, 32, 3)),
-    ...                      train=True)
-    """
-    name = name.upper()
-    if name not in CONV_NETS:
-        available = ", ".join(sorted(CONV_NETS.keys()))
-        raise ValueError(f"Conv net '{name}' does not exist. Available: {available}")
-
-    cls = CONV_NETS[name]["cls"]
-
-    if kwargs:
-        try:
-            valid = set(cls.__dataclass_fields__.keys())
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_conv_net('{name}'): unknown kwargs {unknown} will be "
-                    f"ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except AttributeError:
-            pass
-
-    return cls(**kwargs)
+CONV_NETS = Registry("Conv net")
+register_conv_net = CONV_NETS.register
+get_conv_net = CONV_NETS.get
 
 
 def list_conv_nets() -> dict[str, str]:
-    """Return a sorted dictionary of all registered conv net names and descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_conv_nets()
-    {'CONV_ENCODER': '...', 'DENSENET': '...', 'RESNET': '...', ...}
-    """
-    return {name: info["description"] for name, info in sorted(CONV_NETS.items())}
+    """Sorted ``{name: description}`` of all registered entries (r16)."""
+    return dict(sorted(CONV_NETS.describe().items()))
 
 
 # ---------------------------------------------------------------------------

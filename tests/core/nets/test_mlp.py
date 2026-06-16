@@ -730,7 +730,7 @@ class TestRegistry:
         assert out.shape == (BATCH, OUT_DIM)
 
     def test_get_mlp_unknown_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             get_mlp("NONEXISTENT", out_features=2, hidden_features=32, n_layers=2)
 
     def test_get_mlp_unknown_kwargs_warns(self):

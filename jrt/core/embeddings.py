@@ -8,144 +8,22 @@ import flax.linen as nn
 
 from utils.jax_core.helpers import create_rng
 
-EMBEDDINGS: dict[str, dict] = {}
+from utils.registry import Registry
+
+
+EMBEDDINGS = Registry("Embedding")
+register_embedding = EMBEDDINGS.register
+get_embedding = EMBEDDINGS.get
+
+
+def list_embeddings() -> dict[str, str]:
+    """Sorted ``{name: description}`` of all registered entries (r16)."""
+    return dict(sorted(EMBEDDINGS.describe().items()))
 
 
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
-
-def register_embedding(name: str, description: str = ""):
-    """Register an embedding module by name.
-
-    Parameters
-    ----------
-    name : str
-        Name used for lookup. Stored uppercase.
-    description : str, optional
-        Short description shown in ``list_embeddings()``.
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If an embedding with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_embedding("MY_EMBED", description="Custom embedding")
-    ... class MyEmbedding(nn.Module):
-    ...     @nn.compact
-    ...     def __call__(self, x: jax.Array) -> jax.Array:
-    ...         return x
-    """
-    name_upper = name.upper()
-
-    def decorator(cls):
-        if name_upper in EMBEDDINGS:
-            raise ValueError(
-                f"Embedding with name '{name_upper}' already exists."
-            )
-        EMBEDDINGS[name_upper] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-
-def get_embedding(name: str, **kwargs):
-    """Retrieve and instantiate a registered embedding by name.
-
-    Inspects the constructor signature and emits a UserWarning for any
-    kwargs not accepted by the embedding class. Unknown kwargs are dropped
-    rather than forwarded to prevent a TypeError at instantiation.
-
-    In Flax Linen, instantiating a module does not run any computation --
-    call ``module.init(key, *inputs)`` to initialize parameters and
-    ``module.apply(variables, *inputs)`` to run a forward pass.
-
-    Parameters
-    ----------
-    name : str
-        Name of the registered embedding (case-insensitive).
-    **kwargs
-        Arguments forwarded to the embedding constructor (hyperparameters
-        only). Unknown kwargs trigger a UserWarning and are dropped.
-
-    Returns
-    -------
-    nn.Module
-        An instantiated Flax Linen embedding module.
-
-    Raises
-    ------
-    ValueError
-        If no embedding with the given name exists.
-
-    Example
-    -------
-    >>> embed = get_embedding("GAUSSIAN_POSITIONAL",
-    ...                        input_dim=2, mapping_dim=64, scale=10.0)
-    >>> variables = embed.init(jax.random.PRNGKey(0), jnp.ones((8, 2)))
-    >>> out = embed.apply(variables, jnp.ones((8, 2)))
-    >>> out.shape
-    (8, 64)
-    """
-    name = name.upper()
-    if name not in EMBEDDINGS:
-        available = ", ".join(sorted(EMBEDDINGS.keys()))
-        raise ValueError(
-            f"Embedding '{name}' does not exist. Available: {available}"
-        )
-
-    cls = EMBEDDINGS[name]["cls"]
-
-    if kwargs:
-        try:
-            sig = inspect.signature(cls.__init__)
-            valid = {
-                k for k, p in sig.parameters.items()
-                if k != "self"
-                and p.kind not in (
-                    inspect.Parameter.VAR_POSITIONAL,
-                    inspect.Parameter.VAR_KEYWORD,
-                )
-            }
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_embedding('{name}'): unknown kwargs {unknown} "
-                    f"will be ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except (ValueError, TypeError):
-            pass
-
-    return cls(**kwargs)
-
-
-def list_embeddings() -> dict[str, str]:
-    """Return a sorted dictionary of all registered embedding names and descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_embeddings()
-    {'DFS': 'Double Fourier Sphere embedding', ...}
-    """
-    return {
-        name: info["description"]
-        for name, info in sorted(EMBEDDINGS.items())
-    }
-
 
 # ---------------------------------------------------------------------------
 # Shared beta schedule
