@@ -243,6 +243,9 @@ trainer:
   patience_metric:      val/cross_entropy
   patience_direction:   lower_is_better
 
+  # No per-trial diagnostics row during the HP search (keeps trials lean).
+  diagnostics:          false
+
   # --- Gradient clipping ---
   max_grad_norm:        1.0
 

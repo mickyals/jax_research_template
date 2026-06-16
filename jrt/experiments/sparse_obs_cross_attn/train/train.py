@@ -47,7 +47,13 @@ from training.metrics import (
     quadratic_weighted_kappa,
 )
 from training.trainer import Trainer, TrainState
-from utils.jax_core.diagnostics import model_tabulate
+from utils.jax_core.diagnostics import (
+    model_tabulate,
+    visualize_weight_distribution,
+    visualize_gradients,
+    visualize_activations,
+    plot_loss_landscape,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +302,49 @@ def _make_eval_plots_callback(
 
 
 # ---------------------------------------------------------------------------
+# Diagnostics row (weight / gradient / activation distributions + loss landscape)
+# ---------------------------------------------------------------------------
+
+def _log_diagnostics(
+    model:       TCClassifier,
+    params:      dict,
+    train_probe: dict,
+    val_probe:   dict,
+    logger,
+    step:        int,
+    loss_landscape_grid: int = 0,
+) -> None:
+    """Log the 'diagnostics/' figure row (weight/grad/activation, + optional
+    loss landscape) for one parameter snapshot.
+
+    Called twice from train(): once at init (step 0) for the start-of-training
+    reference, and once on the best params after fit() for the end-of-training
+    picture. Gradients use the TRAIN probe (training signal); activations use
+    the VAL probe at train=False. The loss landscape (grid_size² forward passes)
+    is rendered only when loss_landscape_grid > 0 — keep it for the end snapshot.
+    """
+    def _loss_fn(p):
+        logits = model.apply({'params': p}, train_probe['X'], train=False)
+        return cross_entropy(logits, train_probe['y'])
+
+    logger.log_figure(
+        'diagnostics/weight_dist',
+        visualize_weight_distribution(params), step=step)
+    logger.log_figure(
+        'diagnostics/gradients',
+        visualize_gradients(params, _loss_fn), step=step)
+    logger.log_figure(
+        'diagnostics/activations',
+        visualize_activations(model, {'params': params}, val_probe['X'], train=False),
+        step=step)
+    if loss_landscape_grid and loss_landscape_grid > 0:
+        logger.log_figure(
+            'diagnostics/loss_landscape',
+            plot_loss_landscape(params, _loss_fn, grid_size=loss_landscape_grid),
+            step=step)
+
+
+# ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
 
@@ -523,11 +572,23 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     )
     trainer.logger.log_figure('val/attn_mask', mask_fig, step=0)
 
-    if grad_hist_every > 0:
+    # Diagnostics row: weight/grad/activation distributions (and optionally a
+    # loss landscape). Logged at init (start-of-training reference) and again on
+    # the best params after fit(). Loss landscape is opt-in via its grid size.
+    diagnostics    = trainer_cfg.get('diagnostics', True)
+    ll_grid        = int(trainer_cfg.get('diagnostics_loss_landscape_grid', 0))
+
+    if grad_hist_every > 0 or diagnostics:
         # fit() re-creates the state with the same seed, so this initial
-        # state's gradients are the true step-0 snapshot.
+        # state is the true step-0 snapshot.
         init_state = trainer.init_state(train_probe_batch)
-        grad_flow_cb.log_now(init_state.params, step=0)
+        if grad_hist_every > 0:
+            grad_flow_cb.log_now(init_state.params, step=0)
+        if diagnostics:
+            # No loss landscape at init — it characterises the trained minimum.
+            _log_diagnostics(model, init_state.params, train_probe_batch,
+                             probe_batch, trainer.logger, step=0,
+                             loss_landscape_grid=0)
         del init_state
 
     # ------------------------------------------------------------------
@@ -539,6 +600,12 @@ def train(config_path: str | Path, resume: bool = False) -> None:
         epoch_callbacks = epoch_callbacks,
         step_callbacks  = step_callbacks,
     )
+
+    # End-of-training diagnostics on the best params (+ loss landscape).
+    if diagnostics:
+        _log_diagnostics(model, best_state.params, train_probe_batch,
+                         probe_batch, trainer.logger, step=int(best_state.step),
+                         loss_landscape_grid=ll_grid)
 
     # ------------------------------------------------------------------
     # Test

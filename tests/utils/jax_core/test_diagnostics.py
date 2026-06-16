@@ -248,36 +248,39 @@ class TestPlotSmoke:
         vis_act_fn(jax.nn.relu, ax, x)
         plt.close(fig)
 
-    @patch("matplotlib.pyplot.show")
-    def test_visualize_weight_distribution_runs(self, mock_show, model_and_params):
+    def test_visualize_weight_distribution_returns_figure(self, model_and_params):
         _, params = model_and_params
-        visualize_weight_distribution(params)
+        fig = visualize_weight_distribution(params)
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
 
-    @patch("matplotlib.pyplot.show")
-    def test_visualize_gradients_runs(self, mock_show, model_and_params, make_loss_fn):
+    def test_visualize_gradients_returns_figure(self, model_and_params, make_loss_fn):
         _, params = model_and_params
-        visualize_gradients(params, make_loss_fn)
+        fig = visualize_gradients(params, make_loss_fn)
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
 
-    @patch("matplotlib.pyplot.show")
-    def test_visualize_gradients_print_variance(self, mock_show, model_and_params,
+    def test_visualize_gradients_print_variance(self, model_and_params,
                                                  make_loss_fn, capsys):
         _, params = model_and_params
-        visualize_gradients(params, make_loss_fn, print_variance=True)
+        fig = visualize_gradients(params, make_loss_fn, print_variance=True)
         captured = capsys.readouterr()
         assert "Variance" in captured.out
+        plt.close(fig)
 
-    @patch("matplotlib.pyplot.show")
-    def test_visualize_activations_runs(self, mock_show, model_and_params, dummy_batch):
+    def test_visualize_activations_returns_figure(self, model_and_params, dummy_batch):
         model, params = model_and_params
-        visualize_activations(model, params, dummy_batch)
+        fig = visualize_activations(model, params, dummy_batch)
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
 
-    @patch("matplotlib.pyplot.show")
-    def test_visualize_activations_print_variance(self, mock_show, model_and_params,
+    def test_visualize_activations_print_variance(self, model_and_params,
                                                    dummy_batch, capsys):
         model, params = model_and_params
-        visualize_activations(model, params, dummy_batch, print_variance=True)
+        fig = visualize_activations(model, params, dummy_batch, print_variance=True)
         captured = capsys.readouterr()
         assert "Variance" in captured.out
+        plt.close(fig)
 
     @patch("matplotlib.pyplot.show")
     def test_plot_dists_runs(self, mock_show):
@@ -293,15 +296,17 @@ class TestPlotSmoke:
         assert fig is not None
         plt.close(fig)
 
-    @patch("matplotlib.pyplot.show")
-    def test_plot_loss_landscape_runs(self, mock_show, model_and_params, make_loss_fn):
+    def test_plot_loss_landscape_returns_figure(self, model_and_params, make_loss_fn):
         _, params = model_and_params
-        plot_loss_landscape(params, make_loss_fn, grid_size=5)
+        fig = plot_loss_landscape(params, make_loss_fn, grid_size=5)
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
 
-    @patch("matplotlib.pyplot.show")
-    def test_plot_loss_landscape_3d(self, mock_show, model_and_params, make_loss_fn):
+    def test_plot_loss_landscape_3d(self, model_and_params, make_loss_fn):
         _, params = model_and_params
-        plot_loss_landscape(params, make_loss_fn, grid_size=5, plot_3d=True)
+        fig = plot_loss_landscape(params, make_loss_fn, grid_size=5, plot_3d=True)
+        assert isinstance(fig, plt.Figure)
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------

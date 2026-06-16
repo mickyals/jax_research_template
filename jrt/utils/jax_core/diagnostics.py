@@ -172,7 +172,7 @@ def vis_act_fn(act_fn: Callable, ax: plt.Axes, x: jax.Array) -> None:
 # Weight, gradient, and activation distribution visualization
 # ---------------------------------------------------------------------------
 
-def visualize_weight_distribution(params: dict, color: str = "C0") -> None:
+def visualize_weight_distribution(params: dict, color: str = "C0") -> plt.Figure:
     """Plot histograms of weight values per layer.
 
     Parameters
@@ -181,6 +181,12 @@ def visualize_weight_distribution(params: dict, color: str = "C0") -> None:
         Model parameters (e.g. from ``model.init(...)``).
     color : str
         Histogram color.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The caller owns the figure (log it, save it, or ``plt.close`` it). In a
+        notebook the returned figure auto-displays.
 
     Example
     -------
@@ -193,12 +199,11 @@ def visualize_weight_distribution(params: dict, color: str = "C0") -> None:
     weight_dict = {f"Layer {i}": w for i, w in enumerate(weights)}
     fig = _plot_dists(weight_dict, color=color, xlabel="Weight vals")
     fig.suptitle("Weight distribution", fontsize=14, y=1.05)
-    plt.show()
-    plt.close()
+    return fig
 
 
 def visualize_gradients(params: dict, loss_fn: Callable[[dict], float],
-                        color: str = "C0", print_variance: bool = False) -> None:
+                        color: str = "C0", print_variance: bool = False) -> plt.Figure:
     """Plot histograms of per-layer gradient magnitudes.
 
     Parameters
@@ -212,6 +217,11 @@ def visualize_gradients(params: dict, loss_fn: Callable[[dict], float],
         Histogram color.
     print_variance : bool
         If True, print the variance of each layer's gradients.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The caller owns the figure (log it, save it, or ``plt.close`` it).
 
     Example
     -------
@@ -228,16 +238,17 @@ def visualize_gradients(params: dict, loss_fn: Callable[[dict], float],
 
     fig = _plot_dists(grad_dict, color=color, xlabel="Grad magnitude")
     fig.suptitle("Gradient distribution", fontsize=14, y=1.05)
-    plt.show()
-    plt.close()
 
     if print_variance:
         for key in sorted(grad_dict.keys()):
             print(f"{key} - Variance: {grad_dict[key].var():.6f}")
 
+    return fig
 
-def visualize_activations(net: "nn.Module", params: dict, batch: jax.Array,
-                          color: str = "C0", print_variance: bool = False) -> None:
+
+def visualize_activations(net: "nn.Module", params: dict, batch,
+                          color: str = "C0", print_variance: bool = False,
+                          **apply_kwargs) -> plt.Figure:
     """Plot histograms of per-layer activation distributions.
 
     Uses Flax's ``capture_intermediates`` to collect activations without
@@ -248,13 +259,21 @@ def visualize_activations(net: "nn.Module", params: dict, batch: jax.Array,
     net : flax.linen.Module
         Flax module.
     params : dict
-        Model parameters.
-    batch : jax.Array
-        Input batch to pass through the network.
+        Model variables, e.g. ``{'params': ...}``.
+    batch : jax.Array or dict
+        Input batch passed to ``net.apply`` (positionally).
     color : str
         Histogram color.
     print_variance : bool
         If True, print the variance of each layer's activations.
+    **apply_kwargs
+        Extra keyword arguments forwarded to ``net.apply`` (e.g.
+        ``train=False`` for a model with dropout).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The caller owns the figure (log it, save it, or ``plt.close`` it).
 
     Example
     -------
@@ -262,19 +281,19 @@ def visualize_activations(net: "nn.Module", params: dict, batch: jax.Array,
     Layer 0 - Variance: 0.0822
     Layer 1 - Variance: 0.0042
     """
-    activations = get_layer_activations(net, params, batch)
+    activations = get_layer_activations(net, params, batch, **apply_kwargs)
     leaves = jax.tree_util.tree_leaves(activations)
     act_arrays = [jax.device_get(a).reshape(-1) for a in leaves if a.ndim >= 2]
     act_dict = {f"Layer {i}": a for i, a in enumerate(act_arrays)}
 
     fig = _plot_dists(act_dict, color=color, stat="density", xlabel="Activation vals")
     fig.suptitle("Activation distribution", fontsize=14, y=1.05)
-    plt.show()
-    plt.close()
 
     if print_variance:
         for key in sorted(act_dict.keys()):
             print(f"{key} - Variance: {act_dict[key].var():.6f}")
+
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +329,8 @@ def get_layer_gradients(
         return [g.reshape(-1) for g in leaves if g.ndim > 1]
 
 
-def get_layer_activations(net: "nn.Module", params: dict, batch: jax.Array) -> dict:
+def get_layer_activations(net: "nn.Module", params: dict, batch,
+                          **apply_kwargs) -> dict:
     """Capture per-layer activations via Flax's capture_intermediates.
 
     Parameters
@@ -318,16 +338,19 @@ def get_layer_activations(net: "nn.Module", params: dict, batch: jax.Array) -> d
     net : flax.linen.Module
         Flax module.
     params : dict
-        Model parameters.
-    batch : jax.Array
-        Input batch.
+        Model variables, e.g. ``{'params': ...}``.
+    batch : jax.Array or dict
+        Input batch passed to ``net.apply`` (positionally).
+    **apply_kwargs
+        Extra keyword arguments forwarded to ``net.apply`` (e.g.
+        ``train=False`` for a model with dropout).
 
     Returns
     -------
     dict
         Intermediate activations keyed by layer path.
     """
-    _, state = net.apply(params, batch, capture_intermediates=True)
+    _, state = net.apply(params, batch, capture_intermediates=True, **apply_kwargs)
     return state["intermediates"]
 
 
@@ -448,7 +471,7 @@ def plot_loss_landscape(
     seed: int = 0,
     plot_3d: bool = False,
     cmap: str = "viridis",
-) -> None:
+) -> "plt.Figure":
     """Plot a 2D slice of the loss landscape around a set of parameters.
 
     Projects the high-dimensional loss surface onto two random directions
@@ -543,9 +566,8 @@ def plot_loss_landscape(
     ax.set_xlabel("Direction 1")
     ax.set_ylabel("Direction 2")
     ax.set_title(f"Loss Landscape (seed={seed}, range={range_scale})")
-    plt.tight_layout()
-    plt.show()
-    plt.close()
+    fig.tight_layout()
+    return fig
 
 
 

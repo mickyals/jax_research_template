@@ -236,6 +236,8 @@
         "attn_fig_every_n_epochs":  { "type": "integer", "minimum": 0, "description": "Epoch cadence for val/attn_map + val/attn_grid figures; 0 = disabled." },
         "eval_plots_every_n_epochs":{ "type": "integer", "minimum": 0, "description": "Epoch cadence for val confusion matrix / per-class F1; 0 = disabled." },
         "grad_hist_every_n_epochs": { "type": "integer", "minimum": 0, "description": "Epoch cadence for grad_flow/* histograms (TRAIN probe, also at init); 0 = disabled." },
+        "diagnostics":              { "type": "boolean", "description": "Log the diagnostics/* figure row (weight/gradient/activation distributions) at init and on the best params after training." },
+        "diagnostics_loss_landscape_grid": { "type": "integer", "minimum": 0, "description": "Grid size for the end-of-training loss-landscape figure (grid² forward passes). 0 = skip (the one expensive diagnostic)." },
         "profile":                  { "type": "boolean", "description": "Trace the first profile_steps training steps with the JAX profiler to <log_dir>/profile (view with TensorBoard's Profile plugin)." },
         "profile_steps":            { "type": "integer", "minimum": 1 }
       }

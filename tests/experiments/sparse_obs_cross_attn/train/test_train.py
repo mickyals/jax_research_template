@@ -392,6 +392,7 @@ from experiments.sparse_obs_cross_attn.train.train import (   # noqa: E402
     _make_attn_entropy_callback,
     _make_attn_figure_callback,
     _make_grad_flow_callback,
+    _log_diagnostics,
 )
 from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (   # noqa: E402
     CLASS_NAMES,
@@ -503,3 +504,25 @@ class TestObservabilityCallbacks:
         cb.log_now(state.params, step=0)
         assert len(logger.histograms) > 0
         assert all(s == 0 for _, _, s in logger.histograms)
+
+    def test_log_diagnostics_logs_distribution_figures(self):
+        # Exercises the real model through capture_intermediates (activations),
+        # jax.grad (gradients), and the weight histogram — no loss landscape.
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        _log_diagnostics(model, state.params, batch, batch, logger, step=0,
+                         loss_landscape_grid=0)
+        tags = [t for t, _ in logger.figures]
+        assert 'diagnostics/weight_dist' in tags
+        assert 'diagnostics/gradients'   in tags
+        assert 'diagnostics/activations' in tags
+        assert 'diagnostics/loss_landscape' not in tags   # grid=0 skips it
+        assert all(s == 0 for _, s in logger.figures)
+
+    def test_log_diagnostics_includes_loss_landscape_when_grid_set(self):
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        _log_diagnostics(model, state.params, batch, batch, logger, step=3,
+                         loss_landscape_grid=4)
+        tags = [t for t, _ in logger.figures]
+        assert 'diagnostics/loss_landscape' in tags

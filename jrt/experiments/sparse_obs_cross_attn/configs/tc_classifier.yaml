@@ -292,6 +292,15 @@ trainer:
   # 0 = disabled.  Appears in WandB under Media → Images.
   eval_plots_every_n_epochs: 1
 
+  # Diagnostics row (WandB Media → diagnostics/*): weight, gradient, and
+  # activation distribution figures, logged once at init (start reference) and
+  # once on the best params after training. Cheap (one probe batch each).
+  diagnostics:              true
+  # Loss-landscape figure (Li et al. 2018) at end of training — a grid_size²
+  # forward-pass sweep over two random param directions. 0 = skip (it is the
+  # one expensive diagnostic); 21 ≈ 441 forward passes on the train probe.
+  diagnostics_loss_landscape_grid: 21
+
   # WandB project / run metadata.
   log_kwargs:
     project:  sparse_obs_encoding
