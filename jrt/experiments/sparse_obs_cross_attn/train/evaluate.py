@@ -43,6 +43,7 @@ import matplotlib.pyplot as plt
 import yaml
 
 from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
+from experiments.sparse_obs_cross_attn.data.encoding import decode_domain
 from experiments.sparse_obs_cross_attn.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
 from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier
@@ -66,6 +67,24 @@ from training.trainer import Trainer
 
 # CLASS_NAMES / N_CLASSES are the canonical label space, imported from
 # data/sources/ibtracs.py (the experiment's single source of truth).
+
+
+def domain_latlon_for_sample(batch, sample_idx, fov_lat, fov_lon):
+    """Decode a domain sample's station/query coords to lat/lon for plotting.
+
+    Returns ``((station_lats, station_lons), (query_lat, query_lon))`` for the
+    REAL (masked) stations of ``batch`` sample ``sample_idx``. The attention
+    plotter takes these pre-decoded positions so the plotting layer stays free
+    of the experiment's coordinate encoding (decode_domain lives in
+    data/encoding.py) — see plot_attention_geographic (plan r9/r17).
+    """
+    X      = batch['X']
+    coords = np.asarray(X['station_coords'][sample_idx])   # (N, 2)
+    mask   = np.asarray(X['station_mask'][sample_idx])     # (N,) bool
+    qc     = np.asarray(X['query_coords'][sample_idx])     # (2,)
+    lats, lons   = decode_domain(coords[mask, 0], coords[mask, 1], fov_lat, fov_lon)
+    q_lat, q_lon = decode_domain(qc[0], qc[1], fov_lat, fov_lon)
+    return (lats, lons), (float(q_lat), float(q_lon))
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +495,12 @@ def evaluate(
                  float(batch_meta['query_lon'][i]))
                 if batch_meta is not None else None
             )
+            # Domain mode: decode coords→lat/lon here (the plotter no longer
+            # depends on data.encoding); unit_circle passes None (unused).
+            station_latlon, query_latlon = (
+                domain_latlon_for_sample(attn_batch, i, fov_lat, fov_lon)
+                if loc_enc == 'domain' else (None, None)
+            )
             fig_a   = plot_attention_geographic(
                 attn_weights[-1][:, :, 0, :], attn_batch,  # last layer, query row (CLS = token 0)
                 location_encoding=loc_enc,
@@ -485,6 +510,8 @@ def evaluate(
                 sample_idx=i,
                 geo=geo,
                 storm_latlon=storm_latlon,
+                station_latlon=station_latlon,
+                query_latlon=query_latlon,
             )
             # Keep the caption inside the figure (a y>1.0 suptitle is clipped
             # by wandb.Image / non-tight saves) with room above the axes title.

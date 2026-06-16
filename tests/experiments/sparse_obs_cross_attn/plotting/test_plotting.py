@@ -38,7 +38,11 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_confusion_matrix,
 )
 from experiments.sparse_obs_cross_attn.data.sources.ibtracs import CLASS_NAMES
+from experiments.sparse_obs_cross_attn.train.evaluate import domain_latlon_for_sample
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
+
+_FOV_LAT = (0.0, 30.0)
+_FOV_LON = (-100.0, -45.0)
 
 # ---------------------------------------------------------------------------
 # Shared constants and helpers
@@ -192,11 +196,16 @@ class TestPlotAttentionGeographic:
         model, variables = _init_model()
         batch   = _fake_batch(location_encoding='domain')
         weights = extract_attention_weights(model, variables, batch)[-1][:, :, 0, :]
+        # Caller decodes positions (plotting no longer imports data.encoding).
+        station_latlon, query_latlon = domain_latlon_for_sample(
+            batch, 0, _FOV_LAT, _FOV_LON)
         fig = plot_attention_geographic(
             weights, batch,
             location_encoding='domain',
-            fov_lat=(0.0, 30.0),
-            fov_lon=(-100.0, -45.0),
+            fov_lat=_FOV_LAT,
+            fov_lon=_FOV_LON,
+            station_latlon=station_latlon,
+            query_latlon=query_latlon,
         )
         assert isinstance(fig, plt.Figure)
         plt.close('all')
@@ -210,15 +219,31 @@ class TestPlotAttentionGeographic:
         model, variables = _init_model()
         batch   = _fake_batch(location_encoding='domain')
         weights = extract_attention_weights(model, variables, batch)[-1][:, :, 0, :]
+        station_latlon, query_latlon = domain_latlon_for_sample(
+            batch, 0, _FOV_LAT, _FOV_LON)
         fig = plot_attention_geographic(
             weights, batch,
             location_encoding='domain',
-            fov_lat=(0.0, 30.0),
-            fov_lon=(-100.0, -45.0),
+            fov_lat=_FOV_LAT,
+            fov_lon=_FOV_LON,
             geo=True,
+            station_latlon=station_latlon,
+            query_latlon=query_latlon,
         )
         assert isinstance(fig, plt.Figure)
         assert isinstance(fig.axes[0].projection, ccrs.PlateCarree)
+        plt.close('all')
+
+    def test_domain_requires_decoded_latlon(self):
+        # Domain mode with fov but without decoded positions must error clearly.
+        model, variables = _init_model()
+        batch   = _fake_batch(location_encoding='domain')
+        weights = extract_attention_weights(model, variables, batch)[-1][:, :, 0, :]
+        with pytest.raises(ValueError, match='station_latlon'):
+            plot_attention_geographic(
+                weights, batch, location_encoding='domain',
+                fov_lat=_FOV_LAT, fov_lon=_FOV_LON,
+            )
         plt.close('all')
 
     def test_unit_circle_geo_returns_azimuthal_map(self, weights_and_batch):

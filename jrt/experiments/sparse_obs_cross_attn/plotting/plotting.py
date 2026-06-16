@@ -13,7 +13,6 @@ import numpy as np
 import jax
 import matplotlib.pyplot as plt
 
-from experiments.sparse_obs_cross_attn.data.encoding import decode_domain
 from experiments.sparse_obs_cross_attn.train.model import TCClassifier
 from utils.plotting._style import _value_scatter
 from utils.plotting.curves import plot_grouped_bars
@@ -253,6 +252,8 @@ def plot_attention_geographic(
     head_agg:          str   = 'mean',
     geo:               bool | dict = False,
     storm_latlon:      Optional[tuple[float, float]] = None,
+    station_latlon:    Optional[tuple[np.ndarray, np.ndarray]] = None,
+    query_latlon:      Optional[tuple[float, float]] = None,
 ) -> plt.Figure:
     """Plot per-station attention weight for one sample.
 
@@ -262,9 +263,12 @@ def plot_attention_geographic(
     0.25/0.5/0.75/1.0 of radius_km. Bespoke to this plot, so it composes
     ``_value_scatter`` directly.
 
-    For ``domain`` encoding: Cartesian axes — decoded lat/lon from the
-    normalised coord representation.  Query position marked with a star.
-    Renders via ``utils.plotting.fields.plot_scatter_overlay``.
+    For ``domain`` encoding: lat/lon axes. The decoded positions are supplied
+    by the caller (``station_latlon`` / ``query_latlon``) rather than decoded
+    here — this module is a viz layer and does not depend on the experiment's
+    coordinate encoding; the attention callback decodes via
+    ``data.encoding.decode_domain`` and passes the result in. Query position
+    marked with a star. Renders via ``utils.plotting.fields.plot_scatter_overlay``.
 
     Parameters
     ----------
@@ -298,11 +302,17 @@ def plot_attention_geographic(
         for the unit_circle geo map (available as
         batch['meta']['query_lat']/['query_lon']). Ignored unless
         unit_circle mode with geo enabled.
+    station_latlon : (lats, lons), optional
+        DOMAIN mode only: decoded latitudes/longitudes of the REAL (masked)
+        stations, aligned with the masked attention weights — decoded by the
+        caller (data.encoding.decode_domain). Required for domain encoding.
+    query_latlon : (lat, lon), optional
+        DOMAIN mode only: decoded query/storm position in degrees. Required
+        for domain encoding.
     """
     X            = batch['X']
     coords       = np.asarray(X['station_coords'][sample_idx])   # (N, 2)
     mask         = np.asarray(X['station_mask'][sample_idx])     # (N,) bool
-    query_coords = np.asarray(X['query_coords'][sample_idx])     # (2,)
 
     # Aggregate attention over heads: (H, 1+N) → (1+N,) then drop query self-weight.
     # CLS-first: token 0 is the query's self-attention, tokens 1..N are stations.
@@ -368,6 +378,16 @@ def plot_attention_geographic(
             ax.set_aspect('equal')
             ax.set_xlabel('East offset (× radius)')
             ax.set_ylabel('North offset (× radius)')
+        else:
+            # Re-assert the radius-box extent AFTER plotting: scatter/rings
+            # autoscale the GeoAxes to the (clustered) data, which can shrink
+            # the view and clip the coastlines. Pinning it back guarantees the
+            # cfeatures within the radius box render. ax.projection is the
+            # azimuthal CRS whose native units are metres from the centre.
+            ax.set_extent(
+                [-1.08 * r_m, 1.08 * r_m, -1.08 * r_m, 1.08 * r_m],
+                crs=ax.projection,
+            )
         ax.set_title('Self-attention weights (query row)\n'
                      '(storm-centred local map, north up)',
                      pad=15, fontsize=10)
@@ -375,16 +395,19 @@ def plot_attention_geographic(
         fig.tight_layout()
         return fig
 
-    # domain
+    # domain — positions are decoded by the caller (this viz layer does not
+    # import the experiment's coordinate encoding).
     if fov_lat is None or fov_lon is None:
         raise ValueError("fov_lat and fov_lon required for domain encoding.")
+    if station_latlon is None or query_latlon is None:
+        raise ValueError(
+            "plot_attention_geographic: domain encoding requires station_latlon "
+            "and query_latlon, decoded by the caller "
+            "(data.encoding.decode_domain) — plotting does not decode coords."
+        )
 
-    lats, lons = decode_domain(
-        coords[mask, 0], coords[mask, 1], fov_lat, fov_lon,
-    )
-    q_lat, q_lon = decode_domain(
-        query_coords[0], query_coords[1], fov_lat, fov_lon,
-    )
+    lats, lons   = station_latlon          # decoded REAL (masked) stations
+    q_lat, q_lon = query_latlon
     lat_min, lat_max = fov_lat
     lon_min, lon_max = fov_lon
 

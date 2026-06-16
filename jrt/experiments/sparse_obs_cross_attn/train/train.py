@@ -29,6 +29,7 @@ from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
 from experiments.sparse_obs_cross_attn.train.evaluate import (
     collect_predictions,
     confusion_matrix,
+    domain_latlon_for_sample,
     per_class_metrics,
 )
 from experiments.sparse_obs_cross_attn.plotting.plotting import (
@@ -155,6 +156,12 @@ def _make_attn_figure_callback(
         pred_c  = class_names[int(np.asarray(logits)[0].argmax())]
         title   = f'true: {true_c}, pred: {pred_c}'
 
+        # Domain mode: decode coords→lat/lon here (the plotter no longer
+        # depends on data.encoding); unit_circle passes None (unused).
+        station_latlon, query_latlon = (
+            domain_latlon_for_sample(probe_batch, 0, fov_lat, fov_lon)
+            if loc_enc == 'domain' else (None, None)
+        )
         fig = plot_attention_geographic(
             weights[-1][:, :, 0, :], probe_batch,   # last layer, query row (CLS = token 0)
             location_encoding=loc_enc,
@@ -162,6 +169,8 @@ def _make_attn_figure_callback(
             fov_lon=fov_lon,
             radius_km=radius_km,
             sample_idx=0,
+            station_latlon=station_latlon,
+            query_latlon=query_latlon,
         )
         # Keep the caption inside the figure (wandb.Image renders at the
         # figure's own bounds, so a y>1.0 suptitle would be clipped) and

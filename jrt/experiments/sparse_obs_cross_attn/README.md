@@ -495,9 +495,13 @@ attn_batch   = next(iter(val_loader))
 attn_weights = extract_attention_weights(model, variables, attn_batch)
 print('weights:', attn_weights.shape)   # (num_layers, B, H, N+1, N+1)
 
-# Geographic map — query row of the last layer
+# Geographic map — query row of the last layer (CLS-first: query is token 0).
+# unit_circle needs nothing extra; domain mode requires the caller to decode
+# coords→lat/lon (the plotter doesn't import the coordinate encoding) — use
+# evaluate.domain_latlon_for_sample(attn_batch, 0, fov_lat, fov_lon) and pass
+# station_latlon=/query_latlon=.
 fig = plot_attention_geographic(
-    attn_weights[-1][:, :, -1, :], attn_batch,
+    attn_weights[-1][:, :, 0, :], attn_batch,
     location_encoding = config['data']['location_encoding'],
     fov_lat           = config['data'].get('fov_lat'),
     fov_lon           = config['data'].get('fov_lon'),
