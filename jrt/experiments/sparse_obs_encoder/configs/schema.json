@@ -22,58 +22,64 @@
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "strategy": { "type": "string", "enum": ["season", "sid"] }
+            "strategy": { "type": "string", "enum": ["year", "year_random"] }
           },
           "oneOf": [
             {
-              "description": "season strategy: disjoint explicit season lists per split",
+              "description": "year strategy: disjoint explicit calendar-year lists per split",
               "required": ["train", "val", "test"],
               "properties": {
-                "strategy": { "const": "season" },
+                "strategy": { "const": "year" },
                 "train": {
                   "type": "object",
-                  "required": ["seasons"],
+                  "required": ["years"],
                   "properties": {
-                    "seasons": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                    "years": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
                   }
                 },
                 "val": {
                   "type": "object",
-                  "required": ["seasons"],
+                  "required": ["years"],
                   "properties": {
-                    "seasons": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                    "years": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
                   }
                 },
                 "test": {
                   "type": "object",
-                  "required": ["seasons"],
+                  "required": ["years"],
                   "properties": {
-                    "seasons":   { "type": "array", "minItems": 1, "items": { "type": "integer" } },
+                    "years":     { "type": "array", "minItems": 1, "items": { "type": "integer" } },
                     "hard_test": { "type": "string", "enum": ["multi_storm"] }
                   }
                 }
               }
             },
             {
-              "description": "sid strategy: edge-year test (by track years) + seeded stratified SID train/val over the interior; train is the implicit remainder (no train block). Requires data.ibtracs_sid_meta_path.",
-              "required": ["strategy", "val", "test"],
+              "description": "year_random strategy: pooled train+val calendar years + a disjoint test year range; the pooled rows are split into train/val by a seeded fraction (row level). No train block — train is the random remainder.",
+              "required": ["strategy", "train_val", "val", "test"],
               "not": { "required": ["train"] },
               "properties": {
-                "strategy": { "const": "sid" },
+                "strategy": { "const": "year_random" },
+                "train_val": {
+                  "type": "object",
+                  "required": ["years"],
+                  "properties": {
+                    "years": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                  }
+                },
                 "val": {
                   "type": "object",
-                  "required": ["fraction", "seed", "stratify_by"],
+                  "required": ["fraction", "seed"],
                   "properties": {
-                    "fraction":    { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
-                    "seed":        { "type": "integer", "minimum": 0 },
-                    "stratify_by": { "type": "string" }
+                    "fraction": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+                    "seed":     { "type": "integer", "minimum": 0 }
                   }
                 },
                 "test": {
                   "type": "object",
-                  "required": ["seasons"],
+                  "required": ["years"],
                   "properties": {
-                    "seasons":   { "type": "array", "minItems": 1, "items": { "type": "integer" } },
+                    "years":     { "type": "array", "minItems": 1, "items": { "type": "integer" } },
                     "hard_test": { "type": "string", "enum": ["multi_storm"] }
                   }
                 }
@@ -115,15 +121,15 @@
           "enum": ["unit_circle", "domain"]
         },
 
+        "target": {
+          "type": "string",
+          "description": "Prediction target, resolved against data/targets.TARGET_SCHEMA. Drives label, head size, default loss, metrics, and class names. Currently only nominal targets are wired; 'organisation' is the default 9-class ordinal scale.",
+          "enum": ["organisation"]
+        },
+
         "obs_normalisation": {
           "type": "string",
           "enum": ["minmax_01", "minmax_11", "standardise"]
-        },
-
-        "station_selection": {
-          "type": "string",
-          "enum": ["random", "nearest"],
-          "description": "Train-loader station subsampling when candidates exceed max_stations. Val/test loaders always default to 'nearest' (deterministic)."
         },
 
         "obs_bounds": {
@@ -199,8 +205,9 @@
         "scheduler":            { "type": "string" },
         "scheduler_kwargs":     { "type": "object" },
         "loss_key":             { "type": "string", "description": "Which metric is the training loss / differentiated. Defaults to the first metric ('loss', resolved from trainer.loss)." },
-        "loss":                 { "type": "string", "description": "Name of a registered loss from training/losses.py LOSSES ('cross_entropy' default, 'coral'). 'cross_entropy' is always reported separately for cross-run comparability." },
+        "loss":                 { "type": "string", "description": "Name of a registered loss from training/losses.py LOSSES ('cross_entropy' default, 'coral'). Used as the training objective and the 'loss' metric." },
         "loss_kwargs":          { "type": "object", "description": "Forwarded to the loss factory. cross_entropy composes focal_gamma, class_weights, and emd_lambda/emd_omega/emd_mu (squared-EMD regulariser). coral takes n_classes + optional task_weights. An explicit class_weights here overrides data.class_weight_scheme." },
+        "metrics":              { "type": "array", "items": { "type": "string", "enum": ["cross_entropy", "accuracy", "binary_accuracy", "mae_class"] }, "description": "Per-batch metrics to report, selected by name from the METRICS registry (training/metrics.py). Only 'loss' is reported unconditionally; omit this key for the default [binary_accuracy, mae_class]. List 'cross_entropy' to keep the unweighted comparability anchor (and if patience_metric uses it)." },
         "num_epochs":           { "type": "integer", "minimum": 1 },
         "num_steps":            { "type": "number",  "minimum": 1 },
         "steps_per_epoch":      { "type": "integer", "minimum": 1, "description": "Random TC-sampling mode: gradient steps per epoch. Omit/null = sequential mode (one pass over TC data). Read by train.py/tune.py." },
@@ -229,6 +236,8 @@
         "attn_fig_every_n_epochs":  { "type": "integer", "minimum": 0, "description": "Epoch cadence for val/attn_map + val/attn_grid figures; 0 = disabled." },
         "eval_plots_every_n_epochs":{ "type": "integer", "minimum": 0, "description": "Epoch cadence for val confusion matrix / per-class F1; 0 = disabled." },
         "grad_hist_every_n_epochs": { "type": "integer", "minimum": 0, "description": "Epoch cadence for grad_flow/* histograms (TRAIN probe, also at init); 0 = disabled." },
+        "diagnostics":              { "type": "boolean", "description": "Log the diagnostics/* figure row (weight/gradient/activation distributions) at init and on the best params after training." },
+        "diagnostics_loss_landscape_grid": { "type": "integer", "minimum": 0, "description": "Grid size for the end-of-training loss-landscape figure (grid² forward passes). 0 = skip (the one expensive diagnostic)." },
         "profile":                  { "type": "boolean", "description": "Trace the first profile_steps training steps with the JAX profiler to <log_dir>/profile (view with TensorBoard's Profile plugin)." },
         "profile_steps":            { "type": "integer", "minimum": 1 }
       }

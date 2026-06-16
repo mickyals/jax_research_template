@@ -1,5 +1,5 @@
 """
-experiments/sparse_obs_cross_attn/data/dataset.py
+experiments/sparse_obs_encoder/data/dataset.py
 
 TCDataset: pairs IBTrACSDataset + InsituLandDataset into per-sample dicts.
 
@@ -50,13 +50,12 @@ from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
-    IBTrACSDataset, SSHS_TO_CLASS,
-)
-from experiments.sparse_obs_cross_attn.data.sources.insitu_land import (
+from experiments.sparse_obs_encoder.data.sources.ibtracs import IBTrACSDataset
+from experiments.sparse_obs_encoder.data.sources.insitu_land import (
     InsituLandDataset, DEFAULT_OBS_VARS,
 )
-from experiments.sparse_obs_cross_attn.data.encoding import (
+from experiments.sparse_obs_encoder.data.targets import TargetSpec, resolve_target
+from experiments.sparse_obs_encoder.data.encoding import (
     encode_domain, encode_unit_circle,
 )
 from utils.geoscience.geodesic import vincenty_np
@@ -92,8 +91,9 @@ class TCDataset:
         time. Each station contributes at most one report — the one
         nearest in time (see InsituLandDataset.get_obs_near).
     max_stations : int
-        Fixed sample size for batching — real stations are padded or subsampled
-        to exactly this count.
+        Cap on station tokens per sample (for batching). All stations within
+        radius are used; samples with fewer than this are zero-padded, and
+        samples with more are trimmed to the nearest max_stations by distance.
     min_stations : int
         Samples with fewer matching stations return None.
     obs_vars : list[str] or None
@@ -124,6 +124,11 @@ class TCDataset:
         'minmax_11'  : scale to [-1, 1] using (min, max) bounds.
         'standardise': z-score using (mean, std) bounds.
         Default 'minmax_01'.
+    target : str or TargetSpec or None
+        Prediction target. A name resolved against data/targets.TARGET_SCHEMA,
+        a TargetSpec directly, or None → the default ('organisation', the
+        9-class ordinal scale). The spec's labeller produces each TC sample's
+        label; the model/loss/metrics are selected from it upstream.
     """
 
     def __init__(
@@ -141,6 +146,7 @@ class TCDataset:
         fov_lon:               tuple[float, float] = (-100.0, -45.0),
         obs_bounds:            Optional[dict[str, tuple[float, float]]] = None,
         obs_normalisation:     str = 'minmax_01',
+        target:                Optional[str | TargetSpec] = None,
     ) -> None:
 
         if location_encoding not in ('unit_circle', 'domain'):
@@ -175,6 +181,9 @@ class TCDataset:
         self.fov_lon               = tuple(fov_lon)
         self.obs_bounds            = obs_bounds
         self.obs_normalisation     = obs_normalisation
+        self.target_spec           = (
+            target if isinstance(target, TargetSpec) else resolve_target(target)
+        )
 
         # Pre-compute per-variable normalisation arrays for fast reuse.
         # _obs_lo/_obs_hi store (min, max) for minmax modes and (mean, std)
@@ -188,11 +197,12 @@ class TCDataset:
             self._obs_lo = None
             self._obs_hi = None
 
-        # Cache frequently accessed arrays for fast sample assembly
+        # Cache frequently accessed arrays for fast sample assembly. The label
+        # columns are read by the target spec's labeller straight from
+        # `ibtracs`, so they are not cached here (target-agnostic).
         self._lat  = ibtracs['LAT'].astype(np.float32)
         self._lon  = ibtracs['LON'].astype(np.float32)
         self._time = ibtracs['ISO_TIME']                    # int64 Unix-ns
-        self._sshs = ibtracs['USA_SSHS'].astype(np.float32)
         self._sid  = ibtracs['SID']
 
     def __len__(self) -> int:
@@ -210,36 +220,31 @@ class TCDataset:
     # TC sample
     # ------------------------------------------------------------------
 
-    def get_tc_sample(
-        self,
-        idx: int,
-        rng: Optional[np.random.Generator] = None,
-    ) -> Optional[dict]:
+    def get_tc_sample(self, idx: int) -> Optional[dict]:
         """Assemble one TC sample from IBTrACS row idx.
+
+        All stations within radius_km are used; when more than max_stations
+        match, the nearest max_stations by distance are kept (the candidate
+        frame from get_obs_near is distance-sorted).
 
         Parameters
         ----------
         idx : int
             Row index into the IBTrACS split.
-        rng : np.random.Generator, optional
-            When more stations match than max_stations, used for random
-            subsampling (train augmentation). If None the closest stations
-            by distance are kept.
 
         Returns
         -------
-        dict | None  — None when matching stations < min_stations or SSHS
-        value is not in SSHS_TO_CLASS.
+        dict | None  — None when matching stations < min_stations or the target
+        spec's labeller drops the row (e.g. organisation excludes off-axis
+        statuses: extratropical, post-tropical, dissipating, etc.).
         """
-        lat      = float(self._lat[idx])
-        lon      = float(self._lon[idx])
-        ts       = int(self._time[idx])
-        sshs_raw = float(self._sshs[idx])
+        lat = float(self._lat[idx])
+        lon = float(self._lon[idx])
+        ts  = int(self._time[idx])
 
-        sshs = int(round(sshs_raw))
-        if sshs not in SSHS_TO_CLASS:
+        label = self.target_spec.labeller(self.ibtracs, idx)
+        if label is None:
             return None
-        label = SSHS_TO_CLASS[sshs]
 
         df = self.insitu.get_obs_near(
             query_lat=lat,
@@ -252,7 +257,7 @@ class TCDataset:
         if len(df) < self.min_stations:
             return None
 
-        return self._build_sample(df, lat, lon, label, rng,
+        return self._build_sample(df, lat, lon, label,
                                   sid=str(self._sid[idx]), iso_time=ts)
 
     # ------------------------------------------------------------------
@@ -264,13 +269,13 @@ class TCDataset:
         lat:          float,
         lon:          float,
         timestamp_ns: int,
-        rng:          Optional[np.random.Generator] = None,
     ) -> Optional[dict]:
         """Assemble one background (no-storm) sample at a given point/time.
 
         Pure assembly: the query position and timestamp are ARGUMENTS —
         sampling policy (uniform vs LHS positions, pool draws, frozen eval
-        sets) lives in the loader (TCLoader), not here.
+        sets) lives in the loader (TCLoader), not here. Stations are taken
+        nearest-first up to max_stations (same as get_tc_sample).
 
         Parameters
         ----------
@@ -279,9 +284,6 @@ class TCDataset:
         timestamp_ns : int
             Query timestamp, Unix-ns (typically drawn from the loader's
             background pool).
-        rng : np.random.Generator, optional
-            Station subsampling rng — same semantics as get_tc_sample
-            (None = deterministic nearest-N).
 
         Returns
         -------
@@ -302,7 +304,7 @@ class TCDataset:
         if len(df) < self.min_stations:
             return None
 
-        return self._build_sample(df, lat, lon, 0, rng, sid=None, iso_time=ts)
+        return self._build_sample(df, lat, lon, 0, sid=None, iso_time=ts)
 
     # ------------------------------------------------------------------
     # Shared sample builder
@@ -314,7 +316,6 @@ class TCDataset:
         query_lat: float,
         query_lon: float,
         label:     int,
-        rng:       Optional[np.random.Generator],
         sid:       Optional[str],
         iso_time:  int,
     ) -> dict:
@@ -330,13 +331,12 @@ class TCDataset:
         n_available = len(df)
         F = len(self.obs_vars)
 
-        # Subsample or trim to max_stations
+        # Use all stations within radius; when over max_stations keep the
+        # NEAREST (df from get_obs_near is sorted by distance). No random
+        # subsampling — the region is large and stations sparse, so the cap
+        # rarely binds and deterministic selection keeps eval reproducible.
         if n_available > self.max_stations:
-            if rng is not None:
-                chosen = rng.choice(n_available, self.max_stations, replace=False)
-                df = df.iloc[chosen]
-            else:
-                df = df.iloc[:self.max_stations]
+            df = df.iloc[:self.max_stations]
             n_real = self.max_stations
         else:
             n_real = n_available

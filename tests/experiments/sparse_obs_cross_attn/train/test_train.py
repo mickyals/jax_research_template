@@ -1,5 +1,5 @@
 """
-Integration tests: Trainer + TCClassifier end-to-end training.
+Integration tests: Trainer + TCEncoder end-to-end training.
 
 All tests use synthetic in-memory data — no disk access required.
 
@@ -30,8 +30,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
+from experiments.sparse_obs_encoder.train.model import TCEncoder, N_CLASSES
 from training.trainer import Trainer, TrainState
 
 
@@ -42,7 +42,12 @@ from training.trainer import Trainer, TrainState
 B     = 8    # batch size
 N     = 12   # stations per sample
 F     = 5    # obs features
-N_CLS = 11
+N_CLS = 9
+
+# Full per-batch metric set — these Trainer tests patience on val/cross_entropy
+# and assert the complete metric dict, so they request every metric explicitly
+# (build_metrics_fns now defaults to just binary_accuracy + mae_class).
+_ALL_METRICS = ['cross_entropy', 'accuracy', 'binary_accuracy', 'mae_class']
 
 
 # ---------------------------------------------------------------------------
@@ -156,13 +161,14 @@ class _FakeTCLoader:
 
 def _make_model(
     embed_dim:         int = 32,
-) -> TCClassifier:
-    return TCClassifier(
+) -> TCEncoder:
+    return TCEncoder(
         embed_dim         = embed_dim,
         num_heads         = 2,
         num_layers        = 2,
         fourier_dim       = 16,     # must be even
         n_obs_features    = F,
+        n_classes         = N_CLASSES,
     )
 
 
@@ -198,7 +204,7 @@ class TestOneForwardBackwardPass:
     @pytest.fixture
     def trainer_state(self, tmp_path):
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         batch   = _fake_batch()
         state   = trainer._init_state(batch)
         return trainer, state
@@ -250,7 +256,7 @@ class TestOneForwardBackwardPass:
     def test_domain_encoding_forward_and_backward(self, tmp_path):
         """domain coordinate convention (varied query_coords) trains without error."""
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         batch   = _fake_batch(location_encoding='domain')
         state   = trainer._init_state(batch)
         new_state, metrics = trainer._train_step(state, batch)
@@ -261,7 +267,7 @@ class TestOneForwardBackwardPass:
     def test_missing_obs_mask_is_handled(self, tmp_path):
         """~30% of observations missing (obs_mask False) — no NaN produced."""
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         rng     = np.random.default_rng(7)
         X       = _fake_X(rng=rng)
         X['obs_mask'] = jnp.array(rng.random((B, N, F)) > 0.3)
@@ -273,7 +279,7 @@ class TestOneForwardBackwardPass:
     def test_padded_station_mask_is_handled(self, tmp_path):
         """Only 5 of 12 stations are real; the rest are padding — no NaN."""
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         rng     = np.random.default_rng(9)
         X       = _fake_X(rng=rng)
         mask    = np.zeros((B, N), dtype=bool)
@@ -295,7 +301,7 @@ class TestLossVariation:
     def test_loss_changes_across_steps(self, tmp_path):
         """Loss at step 1 and step 10 are not identical."""
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         batch   = _fake_batch()
         state   = trainer._init_state(batch)
         _, m0   = trainer._train_step(state, batch)
@@ -306,7 +312,7 @@ class TestLossVariation:
 
     def test_train_epoch_returns_correct_key_and_finite_value(self, tmp_path):
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         loader  = _FakeTCLoader(n_batches=4)
         state   = trainer._init_state(next(iter(loader)))
         _, metrics = trainer._train_epoch(state, loader, epoch=0)
@@ -315,7 +321,7 @@ class TestLossVariation:
 
     def test_eval_model_returns_all_five_val_metrics(self, tmp_path):
         model   = _make_model()
-        trainer = Trainer(model, build_metrics_fns(), _trainer_config(tmp_path))
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), _trainer_config(tmp_path))
         loader  = _FakeTCLoader(n_batches=4)
         state   = trainer._init_state(next(iter(loader)))
         metrics = trainer._eval_model(state, loader, prefix='val')
@@ -329,7 +335,7 @@ class TestLossVariation:
     def test_fit_completes_and_returns_train_state(self, tmp_path):
         model   = _make_model()
         cfg     = _trainer_config(tmp_path, num_epochs=3, patience=10)
-        trainer = Trainer(model, build_metrics_fns(), cfg)
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), cfg)
         loader  = _FakeTCLoader(n_batches=4)
         result  = trainer.fit(loader, loader)
         assert isinstance(result, TrainState)
@@ -343,7 +349,7 @@ class TestLossVariation:
 
         model   = _make_model()
         cfg     = _trainer_config(tmp_path, num_epochs=4, patience=10)
-        trainer = Trainer(model, build_metrics_fns(), cfg)
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), cfg)
         loader  = _FakeTCLoader(n_batches=4)
         trainer.fit(loader, loader, epoch_callbacks=[cb])
         assert recorded == [0, 1, 2, 3]
@@ -358,7 +364,7 @@ class TestLossVariation:
             patience=25,
             scheduler_kwargs={"value": 1e-2},  # higher LR for faster convergence
         )
-        trainer = Trainer(model, build_metrics_fns(), cfg)
+        trainer = Trainer(model, build_metrics_fns(metrics=_ALL_METRICS), cfg)
 
         train_loader = _FakeTCLoader(n_batches=8, batch_size=16, learnable=True, seed=0)
         val_loader   = _FakeTCLoader(n_batches=4, batch_size=16, learnable=True, seed=1)
@@ -383,10 +389,14 @@ class TestLossVariation:
 import matplotlib
 matplotlib.use('Agg')   # headless — set before train.py pulls in pyplot
 
-from experiments.sparse_obs_cross_attn.train.train import (   # noqa: E402
+from experiments.sparse_obs_encoder.train.train import (   # noqa: E402
     _make_attn_entropy_callback,
     _make_attn_figure_callback,
     _make_grad_flow_callback,
+    _log_diagnostics,
+)
+from experiments.sparse_obs_encoder.data.sources.ibtracs import (   # noqa: E402
+    CLASS_NAMES,
 )
 
 
@@ -441,6 +451,7 @@ class TestObservabilityCallbacks:
             model, batch, logger,
             data_config={'location_encoding': 'unit_circle',
                          'radius_km': 500.0},
+            class_names=CLASS_NAMES,
             fig_every=2,
         )
         cb(state, epoch=2, global_step=10)
@@ -453,6 +464,7 @@ class TestObservabilityCallbacks:
         cb = _make_attn_figure_callback(
             model, batch, logger,
             data_config={'location_encoding': 'unit_circle'},
+            class_names=CLASS_NAMES,
             fig_every=5,
         )
         cb(state, epoch=3, global_step=10)   # off-cadence
@@ -469,7 +481,7 @@ class TestObservabilityCallbacks:
         tags = [t for t, _, _ in logger.histograms]
         # Named by tree path under the grad_flow/ prefix
         assert all(t.startswith('grad_flow/') for t in tags)
-        assert any('encoder' in t for t in tags)
+        assert any('transformer' in t for t in tags)  # encoder body submodule
         assert any(t.endswith('kernel') for t in tags)
         # One histogram per parameter leaf
         n_leaves = len(jax.tree_util.tree_leaves(state.params))
@@ -493,3 +505,25 @@ class TestObservabilityCallbacks:
         cb.log_now(state.params, step=0)
         assert len(logger.histograms) > 0
         assert all(s == 0 for _, _, s in logger.histograms)
+
+    def test_log_diagnostics_logs_distribution_figures(self):
+        # Exercises the real model through capture_intermediates (activations),
+        # jax.grad (gradients), and the weight histogram — no loss landscape.
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        _log_diagnostics(model, state.params, batch, batch, logger, step=0,
+                         loss_landscape_grid=0)
+        tags = [t for t, _ in logger.figures]
+        assert 'diagnostics/weight_dist' in tags
+        assert 'diagnostics/gradients'   in tags
+        assert 'diagnostics/activations' in tags
+        assert 'diagnostics/loss_landscape' not in tags   # grid=0 skips it
+        assert all(s == 0 for _, s in logger.figures)
+
+    def test_log_diagnostics_includes_loss_landscape_when_grid_set(self):
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        _log_diagnostics(model, state.params, batch, batch, logger, step=3,
+                         loss_landscape_grid=4)
+        tags = [t for t, _ in logger.figures]
+        assert 'diagnostics/loss_landscape' in tags

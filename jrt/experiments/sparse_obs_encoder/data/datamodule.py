@@ -1,8 +1,8 @@
 """
-experiments/sparse_obs_cross_attn/data/datamodule.py
+experiments/sparse_obs_encoder/data/datamodule.py
 
 TCDataModule: coordinates IBTrACSDataset and InsituLandDataset into
-Trainer-compatible loaders for the sparse_obs_cross_attn experiment.
+Trainer-compatible loaders for the sparse_obs_encoder experiment.
 
 As additional data sources are added (reanalysis, radar, satellite) they
 appear alongside ibtracs and insitu_land in setup(), each contributing
@@ -41,12 +41,13 @@ import numpy as np
 
 from datasets.datamodule import BaseDataModule
 from utils.jax_core.helpers import create_rng
-from utils.sampling.coordinate import _key_to_seed, lhs_sample_regional
+from utils.sampling.spatial import _key_to_seed, lhs_sample_regional
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDataset
-from experiments.sparse_obs_cross_attn.data.sources.insitu_land import InsituLandDataset
-from experiments.sparse_obs_cross_attn.data.dataset import TCDataset
-from experiments.sparse_obs_cross_attn.data.splits import resolve_splits
+from experiments.sparse_obs_encoder.data.sources.ibtracs import IBTrACSDataset
+from experiments.sparse_obs_encoder.data.sources.insitu_land import InsituLandDataset
+from experiments.sparse_obs_encoder.data.dataset import TCDataset
+from experiments.sparse_obs_encoder.data.splits import resolve_splits
+from experiments.sparse_obs_encoder.data.targets import resolve_target
 
 
 # ---------------------------------------------------------------------------
@@ -173,11 +174,13 @@ class TCLoader:
     **Random mode** (``steps_per_epoch=N`` — training)
         Draws TC samples uniformly at random *with replacement* for exactly
         ``steps_per_epoch`` gradient steps.  TC events are reused across
-        steps; each reuse receives a fresh background sample and (when
-        more stations are available than max_stations) a different random
-        station subset, providing implicit augmentation.  Background
+        steps; each reuse receives a fresh background sample.  Background
         samples are drawn fresh every step (uniform position + random
         pool timestamp), giving maximum diversity.
+
+    Stations are always taken nearest-first up to max_stations (the dataset
+    uses every station within radius and the region is sparse, so the cap
+    rarely binds) — no random station subsampling, so eval is reproducible.
 
     Parameters
     ----------
@@ -193,11 +196,6 @@ class TCLoader:
     steps_per_epoch : int or None
         If set, enables random mode and controls epoch length exactly.
         If None, sequential mode is used.
-    station_selection : {'random', 'nearest'}
-        How stations are chosen when a sample has more candidates than
-        max_stations. 'random' = epoch-varying random subset (train
-        augmentation); 'nearest' = deterministic nearest-N by distance
-        (deployment policy — eval default).
     freeze_backgrounds : bool
         If True (val/test), ONE background set is pre-drawn on first
         iteration — positions via Latin Hypercube, timestamps fixed-seed
@@ -220,16 +218,10 @@ class TCLoader:
         fov_lat:            tuple[float, float] = (0.0, 30.0),
         fov_lon:            tuple[float, float] = (-100.0, -45.0),
         steps_per_epoch:    Optional[int] = None,
-        station_selection:  str   = 'random',
         freeze_backgrounds: bool  = False,
     ) -> None:
         if not (0.0 < tc_fraction < 1.0):
             raise ValueError(f"tc_fraction must be in (0, 1), got {tc_fraction}")
-        if station_selection not in ('random', 'nearest'):
-            raise ValueError(
-                f"station_selection must be 'random' or 'nearest', "
-                f"got '{station_selection}'."
-            )
         self._dataset            = dataset
         self._batch_size         = batch_size
         self._tc_half            = max(1, round(batch_size * tc_fraction))
@@ -239,7 +231,6 @@ class TCLoader:
         self._fov_lat            = fov_lat
         self._fov_lon            = fov_lon
         self._steps_per_epoch    = steps_per_epoch
-        self._station_selection  = station_selection
         self._freeze_backgrounds = freeze_backgrounds
         self._frozen_bg: Optional[list[dict]] = None
         self._epoch              = 0
@@ -247,12 +238,6 @@ class TCLoader:
     # ------------------------------------------------------------------
     # Helpers shared by both modes
     # ------------------------------------------------------------------
-
-    def _station_rng(
-        self, rng: np.random.Generator
-    ) -> Optional[np.random.Generator]:
-        """Epoch rng for 'random' station selection, None for 'nearest'."""
-        return rng if self._station_selection == 'random' else None
 
     def _background_pool(self) -> np.ndarray:
         pool = self._dataset.background_timestamps
@@ -287,9 +272,7 @@ class TCLoader:
             lat = float(rng.uniform(self._fov_lat[0], self._fov_lat[1]))
             lon = float(rng.uniform(self._fov_lon[0], self._fov_lon[1]))
             ts  = int(rng.choice(pool))
-            bg  = self._dataset.get_background_sample(
-                lat, lon, ts, rng=self._station_rng(rng),
-            )
+            bg  = self._dataset.get_background_sample(lat, lon, ts)
             if bg is not None:
                 bg_buf.append(bg)
         return bg_buf, True
@@ -326,7 +309,7 @@ class TCLoader:
             if len(frozen) == n_needed:
                 break
             bg = self._dataset.get_background_sample(
-                float(lat), float(lon), int(ts), rng=None,
+                float(lat), float(lon), int(ts),
             )
             if bg is not None:
                 frozen.append(bg)
@@ -377,8 +360,7 @@ class TCLoader:
             tc_buf: list[dict] = []
             while len(tc_buf) < self._tc_half:
                 idx    = int(rng.integers(0, n_tc))
-                sample = self._dataset.get_tc_sample(
-                    idx, rng=self._station_rng(rng))
+                sample = self._dataset.get_tc_sample(idx)
                 if sample is not None:
                     tc_buf.append(sample)
 
@@ -420,8 +402,7 @@ class TCLoader:
             return buf[:n_bg]
 
         for idx in indices:
-            sample = self._dataset.get_tc_sample(
-                int(idx), rng=self._station_rng(rng))
+            sample = self._dataset.get_tc_sample(int(idx))
             if sample is None:
                 continue
             tc_buf.append(sample)
@@ -449,13 +430,13 @@ class TCLoader:
 # ---------------------------------------------------------------------------
 
 class TCDataModule(BaseDataModule):
-    """DataModule for the sparse_obs_cross_attn experiment.
+    """DataModule for the sparse_obs_encoder experiment.
 
     Subclasses BaseDataModule. Because samples are assembled on-the-fly from
-    two large datasets (74 M obs rows), this module overrides train_loader /
+    two large datasets (74 M obs rows), this module implements train_loader /
     val_loader / test_loader to return TCLoader instances rather than
-    ArrayLoaders. The in-memory array accessors (train_arrays etc.) are not
-    applicable and raise NotImplementedError.
+    ArrayLoaders. There are no in-memory array accessors — the base contract is
+    loaders only (r20), so nothing to stub out.
 
     Config keys (data: block in YAML)
     ----------------------------------
@@ -465,7 +446,7 @@ class TCDataModule(BaseDataModule):
         insitu_obs_path          str
         insitu_meta_path         str
         split                    dict  required — see
-                                        experiments.sparse_obs_cross_attn.data.splits
+                                        experiments.sparse_obs_encoder.data.splits
         reliability_levels       list  default [always_active, mostly_active]
         obs_vars                 list  default DEFAULT_OBS_VARS (from insitu_land)
         radius_km                float default 500.0
@@ -477,15 +458,14 @@ class TCDataModule(BaseDataModule):
         fov_lat                  list  default [0.0, 30.0]
         fov_lon                  list  default [-100.0, -45.0]
         background_buffer_hours  float default 6.0
-        station_selection        str   default 'random' ('random'|'nearest') —
-                                        TRAIN loader station subsampling;
-                                        val/test loaders are 'nearest' by
-                                        default regardless (decision 9)
         location_encoding        str   default 'unit_circle' ('unit_circle'|'domain')
         obs_normalisation        str   default 'minmax_01'
                                         ('minmax_01'|'minmax_11'|'standardise')
         obs_bounds               dict  optional — {var: [min, max]} for minmax_*,
                                         {var: [mean, std]} for standardise
+        target                   str   default 'organisation' — prediction
+                                        target, resolved against
+                                        data/targets.TARGET_SCHEMA
     """
 
     @classmethod
@@ -493,25 +473,6 @@ class TCDataModule(BaseDataModule):
         dm = cls()
         dm.setup(config)
         return dm
-
-    # ------------------------------------------------------------------
-    # BaseDataModule abstract methods — not applicable for on-the-fly sampling
-    # ------------------------------------------------------------------
-
-    def train_arrays(self) -> dict:
-        raise NotImplementedError(
-            "TCDataModule assembles samples on-the-fly. Use train_loader() instead."
-        )
-
-    def val_arrays(self) -> dict:
-        raise NotImplementedError(
-            "TCDataModule assembles samples on-the-fly. Use val_loader() instead."
-        )
-
-    def test_arrays(self) -> dict:
-        raise NotImplementedError(
-            "TCDataModule assembles samples on-the-fly. Use test_loader() instead."
-        )
 
     def setup(self, config: dict) -> None:
         ibtracs_path      = config['ibtracs_path']
@@ -528,9 +489,6 @@ class TCDataModule(BaseDataModule):
         buf_hours         = float(config.get('background_buffer_hours', 6.0))
         location_encoding = config.get('location_encoding', 'unit_circle')
         obs_normalisation = config.get('obs_normalisation', 'minmax_01')
-        # Train-loader station selection; eval loaders are always 'nearest'
-        # by default (deterministic deployment policy, decision 9).
-        self._station_selection = config.get('station_selection', 'random')
 
         # obs_bounds: dict[var, [min, max]] or dict[var, [mean, std]] for standardise
         obs_bounds_raw = config.get('obs_bounds', None)
@@ -546,6 +504,10 @@ class TCDataModule(BaseDataModule):
         self._min_stations       = min_stations
         self._location_encoding  = location_encoding
         self._obs_normalisation  = obs_normalisation
+        # Prediction target (data.target) — drives the label, head size, loss,
+        # metrics, and class names downstream (see data/targets.py). None →
+        # the default 'organisation' 9-class ordinal scale.
+        self._target_spec        = resolve_target(config.get('target'))
 
         ibtracs_full = IBTrACSDataset(ibtracs_path, multi_path, sid_meta_path)
         insitu_full  = InsituLandDataset(obs_path, meta_path)
@@ -583,6 +545,7 @@ class TCDataModule(BaseDataModule):
                 fov_lon=self._fov_lon,
                 obs_bounds=obs_bounds,
                 obs_normalisation=obs_normalisation,
+                target=self._target_spec,
             )
             setattr(self, f'_{split_name}_ds', ds)
 
@@ -606,20 +569,16 @@ class TCDataModule(BaseDataModule):
             fov_lat            = self._fov_lat,
             fov_lon            = self._fov_lon,
             steps_per_epoch    = steps_per_epoch,
-            station_selection  = self._station_selection,
             freeze_backgrounds = False,
         )
 
     def val_loader(
         self,
-        batch_size:        Optional[int] = None,
-        shuffle:           bool = False,
-        station_selection: str  = 'nearest',
+        batch_size: Optional[int] = None,
+        shuffle:    bool = False,
     ) -> TCLoader:
-        """Deterministic eval loader: nearest-N stations + frozen
-        backgrounds, so two iterations yield identical batches.
-        station_selection='random' override exists for the
-        nearest-vs-random comparison runs (decision 13)."""
+        """Deterministic eval loader: nearest-N stations + frozen backgrounds,
+        so two iterations yield identical batches."""
         return TCLoader(
             self._val_ds,
             batch_size or self._batch_size,
@@ -628,15 +587,13 @@ class TCDataModule(BaseDataModule):
             seed=0,
             fov_lat=self._fov_lat,
             fov_lon=self._fov_lon,
-            station_selection=station_selection,
             freeze_backgrounds=True,
         )
 
     def test_loader(
         self,
-        batch_size:        Optional[int] = None,
-        shuffle:           bool = False,
-        station_selection: str  = 'nearest',
+        batch_size: Optional[int] = None,
+        shuffle:    bool = False,
     ) -> TCLoader:
         """Deterministic eval loader — see val_loader."""
         return TCLoader(
@@ -647,7 +604,6 @@ class TCDataModule(BaseDataModule):
             seed=0,
             fov_lat=self._fov_lat,
             fov_lon=self._fov_lon,
-            station_selection=station_selection,
             freeze_backgrounds=True,
         )
 
@@ -656,8 +612,14 @@ class TCDataModule(BaseDataModule):
     # ------------------------------------------------------------------
 
     def manifest(self) -> dict:
-        """Resolved split seasons/SIDs/row counts — see resolve_splits."""
+        """Resolved split years/SIDs/row counts — see resolve_splits."""
         return self._manifest
+
+    @property
+    def target_spec(self):
+        """The resolved TargetSpec (data.target) — single source of truth for
+        n_classes, class_names, and the default loss downstream."""
+        return self._target_spec
 
     # ------------------------------------------------------------------
     # Station-count diagnostics
@@ -687,7 +649,7 @@ class TCDataModule(BaseDataModule):
         avail = []
         used  = []
         for i in idx:
-            s = ds.get_tc_sample(int(i), rng=None)
+            s = ds.get_tc_sample(int(i))
             if s is None:
                 continue
             avail.append(int(s['n_available']))
@@ -733,15 +695,15 @@ class TCDataModule(BaseDataModule):
         print()
         print("─" * 58)
         print(f"Data  ({self._location_encoding} · {self._obs_normalisation})")
-        print(f"  {'split':<6}  {'seasons':>16}  {'SIDs':>6}")
+        print(f"  {'split':<6}  {'years':>16}  {'SIDs':>6}")
         for name in ('train', 'val', 'test'):
             entry = self._manifest[name]
-            seasons = entry['seasons']
-            season_str = (
-                f"{seasons[0]}-{seasons[-1]}" if len(seasons) > 1
-                else str(seasons[0]) if seasons else "-"
+            years = entry['years']
+            year_str = (
+                f"{years[0]}-{years[-1]}" if len(years) > 1
+                else str(years[0]) if years else "-"
             )
-            print(f"  {name:<6}  {season_str:>16}  {entry['n_sids']:>6,}")
+            print(f"  {name:<6}  {year_str:>16}  {entry['n_sids']:>6,}")
         if 'hard_test' in self._manifest:
             ht = self._manifest['hard_test']
             print(f"  {'hard_test (multi-storm)':<24}  rows={ht['n_rows']:,}  SIDs={ht['n_sids']:,}")

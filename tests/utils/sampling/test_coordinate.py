@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from utils.sampling.coordinate import (
+from utils.sampling.spatial import (
     sample_regional,
     sample_regional_area_uniform,
     sample_sphere_uniform_area,

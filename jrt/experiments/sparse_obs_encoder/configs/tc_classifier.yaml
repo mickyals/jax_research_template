@@ -32,27 +32,38 @@ data:
   insitu_obs_path:        E:/sparse_obs/insitu-land/insitu_land_clean.npz
   insitu_meta_path:       E:/sparse_obs/insitu-land/insitu_land_station_meta.npz
 
+  # --- Prediction target ---
+  # Selects what the model predicts, resolved against data/targets.TARGET_SCHEMA.
+  # Drives the label, head size (n_classes), default loss, metrics, and class
+  # names — so switching targets is a config change, not a code change.
+  # 'organization' = the 9-class ordinal organization scale (default).
+  # Continuous (regression) targets are reserved, not yet wired.
+  target:                 organisation
+
   # --- Train/val/test split ---
-  # season strategy: disjoint sets of IBTrACS seasons per split. Multi-storm
-  # timesteps are excluded from train/val/test (when multi_storm_path is set)
-  # and test.hard_test selects them as a separate held-out evaluation set.
+  # Splits are by ISO_TIME calendar YEAR (not the IBTrACS SEASON column), so the
+  # TC and insitu/background streams stay year-aligned. Multi-storm timesteps are
+  # excluded from train/val/test (when multi_storm_path is set) and
+  # test.hard_test selects them as a separate held-out evaluation set.
   #
-  # Alternative 'sid' strategy (see data/splits.py): test = edge years by
-  # track-year membership; interior storms assigned train/val by SID,
-  # seeded + stratified; train is the implicit remainder (no train block):
+  # 'year'        — explicit disjoint year lists per split (below).
+  # 'year_random' — pooled train+val years + a disjoint test year range; the
+  #                 pooled rows are split into train/val by a seeded fraction
+  #                 (row level, mild train/val leakage; test stays clean):
   #   split:
-  #     strategy: sid
-  #     test: {seasons: [2005, 2025], hard_test: multi_storm}
-  #     val:  {fraction: 0.2, seed: 42, stratify_by: peak_sshs}
+  #     strategy: year_random
+  #     train_val: {years: [2005, ..., 2024]}
+  #     test:      {years: [2025], hard_test: multi_storm}
+  #     val:       {fraction: 0.2, seed: 42}
   split:
-    strategy: season
+    strategy: year
     train:
-      seasons: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014,
-                2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022]
+      years: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014,
+              2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022]
     val:
-      seasons: [2023, 2024]
+      years: [2023, 2024]
     test:
-      seasons: [2025]
+      years: [2025]
       hard_test: multi_storm
 
   # --- Station filtering ---
@@ -89,14 +100,11 @@ data:
     wind_north:                [-115.0,  115.0]         # m/s (max observed speed ~224 kt)
 
   # --- Token padding / truncation ---
-  max_stations:           10          # pad or truncate every sample to this many station tokens
+  # All stations within radius_km are used; samples with more than max_stations
+  # are trimmed to the NEAREST max_stations by distance (no random subsampling —
+  # the region is large and stations sparse, so the cap rarely binds).
+  max_stations:           10          # cap on station tokens; pad below, nearest-trim above
   min_stations:           1          # samples with fewer real stations are discarded
-
-  # How the TRAIN loader picks stations when more than max_stations match:
-  # random  = fresh random subset each epoch (subsampling augmentation)
-  # nearest = deterministic nearest-N by distance
-  # Val/test loaders always use 'nearest' (deterministic deployment policy).
-  station_selection:      nearest
 
   # --- Batch construction ---
   # batch_size is NOT set here — it flows down from trainer.batch_size automatically.
@@ -163,7 +171,9 @@ model:
 
   # --- Output ---
   n_obs_features:       5             # must equal len(data.obs_vars)
-  n_classes:            11            # 0 = no storm, 1–10 = SSHS −4 to +5
+  n_classes:            9             # ordinal organisation scale (ibtracs.CLASS_NAMES):
+                                      # 0 Background, 1 Disturbance, 2 Depression,
+                                      # 3 Storm, 4–8 Saffir-Simpson Category 1–5
 
 
 # -----------------------------------------------------------------------------
@@ -206,15 +216,23 @@ trainer:
   # Training objective, selected from training/losses.py LOSSES registry.
   # 'cross_entropy' is composable via loss_kwargs:
   #   focal_gamma:   focal modulation (Lin et al. 2017), down-weights easy samples
-  #   class_weights: length-11 per-class weights for imbalance (inverse-freq /
+  #   class_weights: length-9 per-class weights for imbalance (inverse-freq /
   #                  effective-number / median-freq) — index 0 = background
-  # Setting both gives the class-balanced focal loss. 'cross_entropy' is always
-  # reported separately (val/cross_entropy) so runs stay comparable.
+  # Setting both gives the class-balanced focal loss.
   loss:                 cross_entropy
   loss_kwargs:          {}
     # focal_gamma:      2.0
     # emd_lambda:       0.1          # squared-EMD regulariser; emd_omega/emd_mu tune it
-    # class_weights:    [1.0, ...]   # explicit 11 values; else use data.class_weight_scheme
+    # class_weights:    [1.0, ...]   # explicit 9 values; else use data.class_weight_scheme
+
+  # --- Reported metrics ---
+  # Only the training 'loss' is hardcoded; every reported metric is selected by
+  # name from the METRICS registry (training/metrics.py): cross_entropy /
+  # accuracy / binary_accuracy / mae_class. cross_entropy is the unweighted
+  # comparability anchor (and the patience metric below) — keep it listed.
+  # Plain top-1 accuracy is demoted (misleading under class imbalance); add it
+  # here only if you want it reported. Full-set QWK/ECE are logged separately.
+  metrics:              [cross_entropy, binary_accuracy, mae_class]
 
   # --- Early stopping ---
   patience:             15            # epochs without improvement before halting
@@ -237,9 +255,9 @@ trainer:
 
   # --- Run directory ---
   # Relative paths are resolved against the experiment directory
-  # (sparse_obs_cross_attn/, two levels above train/train.py), so
+  # (sparse_obs_encoder/, two levels above train/train.py), so
   # runs/tc_classifier/run_01 always expands to
-  #   jrt/experiments/sparse_obs_cross_attn/runs/tc_classifier/run_01
+  #   jrt/experiments/sparse_obs_encoder/runs/tc_classifier/run_01
   # regardless of where the CLI is invoked from.  Absolute paths are used as-is.
   run_dir:              runs/tc_classifier/run_05
 
@@ -273,6 +291,15 @@ trainer:
   # Set to 1 to log every epoch (good for short smoke-test runs).
   # 0 = disabled.  Appears in WandB under Media → Images.
   eval_plots_every_n_epochs: 1
+
+  # Diagnostics row (WandB Media → diagnostics/*): weight, gradient, and
+  # activation distribution figures, logged once at init (start reference) and
+  # once on the best params after training. Cheap (one probe batch each).
+  diagnostics:              true
+  # Loss-landscape figure (Li et al. 2018) at end of training — a grid_size²
+  # forward-pass sweep over two random param directions. 0 = skip (it is the
+  # one expensive diagnostic); 21 ≈ 441 forward passes on the train probe.
+  diagnostics_loss_landscape_grid: 21
 
   # WandB project / run metadata.
   log_kwargs:

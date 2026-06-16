@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/plotting/plotting.py.
+Tests for experiments/sparse_obs_encoder/plotting/plotting.py.
 
 All tests use synthetic in-memory data — no disk access required.
 
@@ -29,7 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.plotting.plotting import (
+from experiments.sparse_obs_encoder.plotting.plotting import (
     extract_attention_weights,
     plot_attention_geographic,
     plot_attention_mask,
@@ -37,8 +37,12 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
     plot_class_metrics,
     plot_confusion_matrix,
 )
-from experiments.sparse_obs_cross_attn.train.evaluate import CLASS_NAMES
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
+from experiments.sparse_obs_encoder.data.sources.ibtracs import CLASS_NAMES
+from experiments.sparse_obs_encoder.train.evaluate import domain_latlon_for_sample
+from experiments.sparse_obs_encoder.train.model import TCEncoder, N_CLASSES
+
+_FOV_LAT = (0.0, 30.0)
+_FOV_LON = (-100.0, -45.0)
 
 # ---------------------------------------------------------------------------
 # Shared constants and helpers
@@ -51,14 +55,15 @@ HEADS = 2
 EMBED = 32
 
 
-def _init_model() -> tuple[TCClassifier, dict]:
-    """Return a tiny TCClassifier and its initialized variables."""
-    model = TCClassifier(
+def _init_model() -> tuple[TCEncoder, dict]:
+    """Return a tiny TCEncoder and its initialized variables."""
+    model = TCEncoder(
         embed_dim       = EMBED,
         num_heads       = HEADS,
         num_layers      = 1,
         fourier_dim     = 16,
         n_obs_features  = F,
+        n_classes       = N_CLASSES,
     )
     rng  = np.random.default_rng(0)
     obs  = jnp.array(rng.standard_normal((B, N, F)).astype(np.float32))
@@ -173,7 +178,7 @@ class TestPlotAttentionGeographic:
         batch   = _fake_batch()
         all_w   = extract_attention_weights(model, variables, batch)
         # plot_attention_geographic takes the query row of one layer
-        weights = all_w[-1][:, :, -1, :]   # (B, H, N+1)
+        weights = all_w[-1][:, :, 0, :]   # (B, H, N+1)
         return weights, batch
 
     def test_unit_circle_returns_figure(self, weights_and_batch):
@@ -191,12 +196,17 @@ class TestPlotAttentionGeographic:
     def test_domain_encoding_returns_figure(self):
         model, variables = _init_model()
         batch   = _fake_batch(location_encoding='domain')
-        weights = extract_attention_weights(model, variables, batch)[-1][:, :, -1, :]
+        weights = extract_attention_weights(model, variables, batch)[-1][:, :, 0, :]
+        # Caller decodes positions (plotting no longer imports data.encoding).
+        station_latlon, query_latlon = domain_latlon_for_sample(
+            batch, 0, _FOV_LAT, _FOV_LON)
         fig = plot_attention_geographic(
             weights, batch,
             location_encoding='domain',
-            fov_lat=(0.0, 30.0),
-            fov_lon=(-100.0, -45.0),
+            fov_lat=_FOV_LAT,
+            fov_lon=_FOV_LON,
+            station_latlon=station_latlon,
+            query_latlon=query_latlon,
         )
         assert isinstance(fig, plt.Figure)
         plt.close('all')
@@ -209,16 +219,32 @@ class TestPlotAttentionGeographic:
 
         model, variables = _init_model()
         batch   = _fake_batch(location_encoding='domain')
-        weights = extract_attention_weights(model, variables, batch)[-1][:, :, -1, :]
+        weights = extract_attention_weights(model, variables, batch)[-1][:, :, 0, :]
+        station_latlon, query_latlon = domain_latlon_for_sample(
+            batch, 0, _FOV_LAT, _FOV_LON)
         fig = plot_attention_geographic(
             weights, batch,
             location_encoding='domain',
-            fov_lat=(0.0, 30.0),
-            fov_lon=(-100.0, -45.0),
+            fov_lat=_FOV_LAT,
+            fov_lon=_FOV_LON,
             geo=True,
+            station_latlon=station_latlon,
+            query_latlon=query_latlon,
         )
         assert isinstance(fig, plt.Figure)
         assert isinstance(fig.axes[0].projection, ccrs.PlateCarree)
+        plt.close('all')
+
+    def test_domain_requires_decoded_latlon(self):
+        # Domain mode with fov but without decoded positions must error clearly.
+        model, variables = _init_model()
+        batch   = _fake_batch(location_encoding='domain')
+        weights = extract_attention_weights(model, variables, batch)[-1][:, :, 0, :]
+        with pytest.raises(ValueError, match='station_latlon'):
+            plot_attention_geographic(
+                weights, batch, location_encoding='domain',
+                fov_lat=_FOV_LAT, fov_lon=_FOV_LON,
+            )
         plt.close('all')
 
     def test_unit_circle_geo_returns_azimuthal_map(self, weights_and_batch):
@@ -317,23 +343,23 @@ class TestPlotAttentionMask:
     def test_rendered_mask_matches_model_pattern(self):
         station_mask = np.array([True, True, False, True])
         fig = plot_attention_mask(station_mask)
-        img = fig.axes[0].images[0].get_array().data   # (N+1, N+1)
+        img = fig.axes[0].images[0].get_array().data   # (1+N, 1+N)
         N_t = 4
         assert img.shape == (N_t + 1, N_t + 1)
-        # stations → query column blocked; query self-attention allowed
-        assert not img[:N_t, N_t].any()
-        assert img[N_t, N_t] == 1.0
-        # padding column blocked for everyone
-        assert not img[:, 2].any()
+        # CLS-first: token 0 = query, tokens 1..4 = stations (token 3 = padding).
+        # stations → query column (col 0) blocked; query self-attention allowed
+        assert not img[1:, 0].any()
+        assert img[0, 0] == 1.0
+        # padding column (token 3) blocked for everyone
+        assert not img[:, 3].any()
         plt.close('all')
 
     def test_full_self_attention_opens_query_column(self):
         station_mask = np.array([True, True, False, True])
         fig = plot_attention_mask(station_mask, full_self_attention=True)
         img = fig.axes[0].images[0].get_array().data
-        N_t = 4
-        # real stations now attend to the query column
-        assert img[0, N_t] == 1.0 and img[1, N_t] == 1.0 and img[3, N_t] == 1.0
-        # padding column still blocked
-        assert not img[:, 2].any()
+        # CLS-first: real stations (tokens 1,2,4) now attend to the query col (0)
+        assert img[1, 0] == 1.0 and img[2, 0] == 1.0 and img[4, 0] == 1.0
+        # padding column (token 3) still blocked
+        assert not img[:, 3].any()
         plt.close('all')

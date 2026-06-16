@@ -19,13 +19,13 @@ Usage
 
     metrics_fns = {"mse": mse, "rmse": lambda p, t: mse(p, t) ** 0.5}
     trainer     = Trainer(model, metrics_fns, config["trainer"])
-    best_state  = trainer.fit(dm.train_arrays(), dm.val_arrays())
+    best_state  = trainer.fit(dm.train_loader(batch_size), dm.val_loader(batch_size))
 
     # Resume interrupted training
-    best_state = trainer.fit(dm.train_arrays(), dm.val_arrays(), resume=True)
+    best_state = trainer.fit(dm.train_loader(batch_size), dm.val_loader(batch_size), resume=True)
 
-    # Evaluate on test split using the saved the best checkpoint
-    test_metrics = trainer.test(dm.test_arrays())
+    # Evaluate on test split using the saved best checkpoint
+    test_metrics = trainer.test(dm.test_loader(batch_size))
 
 Config schema  (YAML  trainer:  block)
 --------------------------------------

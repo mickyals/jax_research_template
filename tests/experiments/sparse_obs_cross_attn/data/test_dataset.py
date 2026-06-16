@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/data/dataset.py.
+Tests for experiments/sparse_obs_encoder/data/dataset.py.
 
 Uses the same synthetic fixtures as test_ibtracs and test_insitu_land.
 No real data files required.
@@ -8,9 +8,9 @@ No real data files required.
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDataset, SSHS_TO_CLASS
-from experiments.sparse_obs_cross_attn.data.sources.insitu_land import InsituLandDataset
-from experiments.sparse_obs_cross_attn.data.dataset import TCDataset
+from experiments.sparse_obs_encoder.data.sources.ibtracs import IBTrACSDataset, status_sshs_to_class
+from experiments.sparse_obs_encoder.data.sources.insitu_land import InsituLandDataset
+from experiments.sparse_obs_encoder.data.dataset import TCDataset
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +158,9 @@ class TestTCSample:
     def test_tc_sample_label(self, tc_dataset):
         s = tc_dataset.get_tc_sample(0)
         assert s is not None
-        assert int(s['label']) == SSHS_TO_CLASS[2]   # SSHS=2 → class 7
+        # Fixture row: USA_STATUS='HU', USA_SSHS=2 → Category 2 = class 5
+        assert int(s['label']) == status_sshs_to_class('HU', 2)
+        assert int(s['label']) == 5
 
 
 # ---------------------------------------------------------------------------

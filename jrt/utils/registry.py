@@ -6,7 +6,7 @@ across jrt (losses, optimizers, schedulers, ...). Each registered entry is a
 **factory**: a function taking config kwargs and returning the actual object
 (a loss callable, an optax transform, a schedule, ...).
 
-Centralises the boilerplate that was previously copy-pasted per registry:
+Centralizes the boilerplate that was previously copy-pasted per registry:
 case-insensitive names, duplicate-registration guard, kwarg filtering with a
 warning for unknown keys, and listing.
 

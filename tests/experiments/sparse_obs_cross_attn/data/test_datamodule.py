@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/data/datamodule.py.
+Tests for experiments/sparse_obs_encoder/data/datamodule.py.
 
 Verifies background pool construction, collation, and loader batch shapes.
 No real data files required.
@@ -8,10 +8,10 @@ No real data files required.
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import IBTrACSDataset
-from experiments.sparse_obs_cross_attn.data.sources.insitu_land import InsituLandDataset
-from experiments.sparse_obs_cross_attn.data.dataset import TCDataset
-from experiments.sparse_obs_cross_attn.data.datamodule import (
+from experiments.sparse_obs_encoder.data.sources.ibtracs import IBTrACSDataset
+from experiments.sparse_obs_encoder.data.sources.insitu_land import InsituLandDataset
+from experiments.sparse_obs_encoder.data.dataset import TCDataset
+from experiments.sparse_obs_encoder.data.datamodule import (
     _build_background_pool,
     _collate,
     TCLoader,
@@ -150,7 +150,7 @@ class TestBackgroundPool:
     def test_pool_only_synoptic_hours(self, tmp_path):
         # Insitu fixture is hourly; only timestamps on the exact 3-hour
         # grid (00/03/.../21 UTC, zero minutes/seconds) may survive.
-        from experiments.sparse_obs_cross_attn.data.datamodule import (
+        from experiments.sparse_obs_encoder.data.datamodule import (
             SYNOPTIC_STEP_NS,
         )
         ib_p, ms_p, tc_times = _make_ibtracs(tmp_path, seasons=(2019,),
@@ -402,7 +402,7 @@ class _MockDS:
     def __len__(self) -> int:
         return self._n
 
-    def get_tc_sample(self, idx: int, rng=None):
+    def get_tc_sample(self, idx: int):
         # Deterministic fake counts for station_diagnostics: candidates
         # cycle 5..14, capped at 8 used stations.
         n_avail = 5 + (idx % 10)
@@ -414,7 +414,7 @@ class _MockDS:
 
 def _make_summary_dm():
     """Build a TCDataModule with injected stub datasets."""
-    from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
+    from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
     dm = TCDataModule()
     dm._location_encoding = 'unit_circle'
     dm._obs_normalisation = 'minmax_11'
@@ -426,10 +426,10 @@ def _make_summary_dm():
     dm._val_ds            = _MockDS(n_tc=20,  n_bg=100)
     dm._test_ds           = _MockDS(n_tc=10,  n_bg=50)
     dm._manifest = {
-        'strategy': 'season',
-        'train': {'seasons': [2019], 'sids': [], 'n_rows': 100, 'n_sids': 30, 'class_counts': {}},
-        'val':   {'seasons': [2021], 'sids': [], 'n_rows': 20,  'n_sids': 8,  'class_counts': {}},
-        'test':  {'seasons': [2023], 'sids': [], 'n_rows': 10,  'n_sids': 4,  'class_counts': {}},
+        'strategy': 'year',
+        'train': {'years': [2019], 'sids': [], 'n_rows': 100, 'n_sids': 30, 'class_counts': {}},
+        'val':   {'years': [2021], 'sids': [], 'n_rows': 20,  'n_sids': 8,  'class_counts': {}},
+        'test':  {'years': [2023], 'sids': [], 'n_rows': 10,  'n_sids': 4,  'class_counts': {}},
     }
     return dm
 
@@ -522,7 +522,7 @@ class TestTCDataModuleSummary:
 
     def test_stored_attributes_after_setup(self, tmp_path):
         """Attributes added to setup() are present on the datamodule."""
-        from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
+        from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
         # Use the synthetic builders to create real npz files
         ib_p, ms_p, tc_times = _make_ibtracs(tmp_path, seasons=(2019, 2021, 2023))
         obs_p, meta_p, _     = _make_insitu(tmp_path, tc_times[0], n_hours=60)
@@ -538,10 +538,10 @@ class TestTCDataModuleSummary:
             'batch_size':   4,
             'tc_fraction':  0.5,
             'split': {
-                'strategy': 'season',
-                'train': {'seasons': [2019]},
-                'val':   {'seasons': [2021]},
-                'test':  {'seasons': [2023], 'hard_test': 'multi_storm'},
+                'strategy': 'year',
+                'train': {'years': [2019]},
+                'val':   {'years': [2021]},
+                'test':  {'years': [2023], 'hard_test': 'multi_storm'},
             },
         }
         dm = TCDataModule.from_config(cfg)
@@ -585,7 +585,7 @@ class TestEvalDeterminism:
         return TCLoader(
             ds, batch_size=4, tc_fraction=0.5, shuffle=False, seed=0,
             fov_lat=self._FOV_LAT, fov_lon=self._FOV_LON,
-            station_selection='nearest', freeze_backgrounds=True,
+            freeze_backgrounds=True,
         )
 
     @staticmethod
@@ -652,7 +652,7 @@ class TestEvalDeterminism:
             ds, batch_size=4, tc_fraction=0.5, seed=0,
             fov_lat=self._FOV_LAT, fov_lon=self._FOV_LON,
             steps_per_epoch=3,
-            station_selection='random', freeze_backgrounds=False,
+            freeze_backgrounds=False,
         )
         epoch1 = list(loader)
         epoch2 = list(loader)
@@ -660,11 +660,6 @@ class TestEvalDeterminism:
         lats1 = np.concatenate([b['meta']['query_lat'] for b in epoch1])
         lats2 = np.concatenate([b['meta']['query_lat'] for b in epoch2])
         assert not np.array_equal(lats1, lats2)
-
-    def test_invalid_station_selection_raises(self, tmp_path):
-        ds = self._make_dataset(tmp_path)
-        with pytest.raises(ValueError, match='station_selection'):
-            TCLoader(ds, batch_size=4, station_selection='closest')
 
     def test_len_includes_flush_batch(self, tmp_path):
         loader = self._make_eval_loader(tmp_path, n_per_season=5)

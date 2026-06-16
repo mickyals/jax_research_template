@@ -1,5 +1,5 @@
 """
-experiments/sparse_obs_cross_attn/data/encoding.py
+experiments/sparse_obs_encoder/data/encoding.py
 
 Coordinate encode/decode pairs — the experiment's model contract for how
 positions enter the network. Each encode has its exact inverse beside it so

@@ -8,7 +8,7 @@ the public API. Use the ``geo=`` argument on plotting functions
 cartopy is an optional dependency and is imported lazily inside this
 module only -- nothing else in ``utils.plotting`` may import it. If
 cartopy is missing, ``_import_cartopy`` raises a clear ImportError with
-the install command.
+the installation command.
 
 Projections: PlateCarree (default) and AzimuthalEquidistant
 (``projection='azimuthal'`` + ``center``). The azimuthal projection's

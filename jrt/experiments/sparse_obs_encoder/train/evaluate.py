@@ -1,32 +1,32 @@
 """
-experiments/sparse_obs_cross_attn/train/evaluate.py
+experiments/sparse_obs_encoder/train/evaluate.py
 
-Post-training evaluation for TCClassifier.
+Post-training evaluation for TCEncoder.
 
 Produces
 --------
 - Scalar metrics (loss, cross-entropy, accuracy, binary_accuracy, mae_class)
 - Quadratic-weighted kappa (ordinal agreement) and ECE (calibration gap),
   computed over the full accumulated split — see metrics.py
-- 11×11 confusion matrix — row-normalised (recall per class) + raw counts
+- 9×9 confusion matrix — row-normalised (recall per class) + raw counts
 - Per-class precision, recall, F1 bar chart
 - Binary detection summary (TC vs. no-storm)
 
 CLI
 ---
-    python -m experiments.sparse_obs_cross_attn.train.evaluate \\
-        jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+    python -m experiments.sparse_obs_encoder.train.evaluate \\
+        jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
 
     # Override checkpoint directory
-    python -m experiments.sparse_obs_cross_attn.train.evaluate \\
+    python -m experiments.sparse_obs_encoder.train.evaluate \\
         jrt/.../tc_classifier.yaml --checkpoint_dir runs/exp01/checkpoints
 
     # Save plots to disk instead of displaying
-    python -m experiments.sparse_obs_cross_attn.train.evaluate \\
+    python -m experiments.sparse_obs_encoder.train.evaluate \\
         jrt/.../tc_classifier.yaml --output_dir runs/exp01/eval --no_show
 
     # Evaluate on validation split instead of test
-    python -m experiments.sparse_obs_cross_attn.train.evaluate \\
+    python -m experiments.sparse_obs_encoder.train.evaluate \\
         jrt/.../tc_classifier.yaml --split val
 """
 
@@ -42,9 +42,11 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import yaml
 
-from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
+from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
+from experiments.sparse_obs_encoder.data.encoding import decode_domain
+from experiments.sparse_obs_encoder.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
+from experiments.sparse_obs_encoder.train.model import TCEncoder
 from training.metrics import (
     apply_temperature,
     expected_calibration_error,
@@ -52,7 +54,7 @@ from training.metrics import (
     maximum_calibration_error,
     quadratic_weighted_kappa,
 )
-from experiments.sparse_obs_cross_attn.plotting.plotting import (
+from experiments.sparse_obs_encoder.plotting.plotting import (
     plot_confusion_matrix,
     plot_class_metrics,
     extract_attention_weights,
@@ -63,24 +65,26 @@ from experiments.sparse_obs_cross_attn.plotting.plotting import (
 from training.trainer import Trainer
 
 
-# ---------------------------------------------------------------------------
-# Class label names  (label k → SSHS k-5)
-# ---------------------------------------------------------------------------
+# CLASS_NAMES / N_CLASSES are the canonical label space, imported from
+# data/sources/ibtracs.py (the experiment's single source of truth).
 
-CLASS_NAMES: list[str] = [
-    'Background',    # 0  — absence (no TC at query); NOT the bottom of the SSHS
-                     #      organisational scale, a categorically separate class
-    'SSHS -4',      # 1
-    'SSHS -3',      # 2
-    'SSHS -2',      # 3
-    'SSHS -1 (TD)', # 4  — tropical depression
-    'SSHS  0 (TS)', # 5  — tropical storm
-    'Cat 1',        # 6
-    'Cat 2',        # 7
-    'Cat 3',        # 8
-    'Cat 4',        # 9
-    'Cat 5',        # 10
-]
+
+def domain_latlon_for_sample(batch, sample_idx, fov_lat, fov_lon):
+    """Decode a domain sample's station/query coords to lat/lon for plotting.
+
+    Returns ``((station_lats, station_lons), (query_lat, query_lon))`` for the
+    REAL (masked) stations of ``batch`` sample ``sample_idx``. The attention
+    plotter takes these pre-decoded positions so the plotting layer stays free
+    of the experiment's coordinate encoding (decode_domain lives in
+    data/encoding.py) — see plot_attention_geographic (plan r9/r17).
+    """
+    X      = batch['X']
+    coords = np.asarray(X['station_coords'][sample_idx])   # (N, 2)
+    mask   = np.asarray(X['station_mask'][sample_idx])     # (N,) bool
+    qc     = np.asarray(X['query_coords'][sample_idx])     # (2,)
+    lats, lons   = decode_domain(coords[mask, 0], coords[mask, 1], fov_lat, fov_lon)
+    q_lat, q_lon = decode_domain(qc[0], qc[1], fov_lat, fov_lon)
+    return (lats, lons), (float(q_lat), float(q_lon))
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +92,7 @@ CLASS_NAMES: list[str] = [
 # ---------------------------------------------------------------------------
 
 def collect_predictions(
-    model:     TCClassifier,
+    model:     TCEncoder,
     variables: dict,
     loader:    Any,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Optional[dict]]:
@@ -96,7 +100,7 @@ def collect_predictions(
 
     Parameters
     ----------
-    model : TCClassifier
+    model : TCEncoder
     variables : dict
         Flax variables dict, e.g. ``{'params': state.params}``.
     loader : iterable
@@ -296,7 +300,7 @@ def print_report(
 
     w = 62
     print(f"\n{'='*w}")
-    print(f"  TCClassifier — {split.upper()} evaluation")
+    print(f"  TCEncoder — {split.upper()} evaluation")
     print(f"{'='*w}")
     print(f"  Samples : {len(preds)}")
 
@@ -373,9 +377,20 @@ def evaluate(
     if checkpoint_dir is not None:
         config['trainer']['checkpoint_dir'] = str(checkpoint_dir)
 
+    # Coordinate convention (top-level) drives the datamodule encoding and the
+    # CLS position handling — must match training for the checkpoint to load.
+    loc_enc = config.get('location_encoding',
+                         config['data'].get('location_encoding', 'unit_circle'))
+    config['data']['location_encoding'] = loc_enc
+    config['model']['learnable_query_pos'] = (loc_enc == 'unit_circle')
+
     dm          = TCDataModule.from_config(config['data'])
-    model       = TCClassifier(**config['model'])
-    metrics_fns = build_metrics_fns()
+    target_spec = dm.target_spec
+    class_names = target_spec.class_names
+    n_classes   = target_spec.n_classes
+    config['model']['n_classes'] = n_classes
+    model       = TCEncoder(**config['model'])
+    metrics_fns = build_metrics_fns(metrics=config['trainer'].get('metrics'))
     trainer     = Trainer(model, metrics_fns, config['trainer'])
 
     loader = dm.test_loader() if split == 'test' else dm.val_loader()
@@ -397,7 +412,7 @@ def evaluate(
     temperature = fit_temperature(val_logits, val_labels)
 
     print_report(preds, labels, logits, metrics_fns,
-                 split=split, class_names=CLASS_NAMES, n_classes=N_CLASSES,
+                 split=split, class_names=class_names, n_classes=n_classes,
                  temperature=temperature)
 
     if meta is not None:
@@ -410,18 +425,18 @@ def evaluate(
                   f"mae={m['mae_class']:.2f}")
         print()
 
-    cm  = confusion_matrix(preds, labels)
+    cm  = confusion_matrix(preds, labels, n_classes)
     pcm = per_class_metrics(cm)
 
     fig_norm = plot_confusion_matrix(
-        cm, CLASS_NAMES, normalize=True,
+        cm, class_names, normalize=True,
         title=f'Confusion Matrix — {split} (row-normalised)',
     )
     fig_raw = plot_confusion_matrix(
-        cm, CLASS_NAMES, normalize=False,
+        cm, class_names, normalize=False,
         title=f'Confusion Matrix — {split} (counts)',
     )
-    fig_cls = plot_class_metrics(pcm, CLASS_NAMES)
+    fig_cls = plot_class_metrics(pcm, class_names)
 
     if output_dir is not None:
         out = Path(output_dir)
@@ -458,8 +473,8 @@ def evaluate(
         ))
 
         def _sample_title(i: int) -> str:
-            true_c = CLASS_NAMES[int(attn_batch['y'][i])]
-            pred_c = CLASS_NAMES[int(batch_preds[i])]
+            true_c = class_names[int(attn_batch['y'][i])]
+            pred_c = class_names[int(batch_preds[i])]
             sid    = batch_meta['sid'][i] if batch_meta is not None else None
             who    = (f"{sid} {sid_to_name.get(sid, '')}".strip()
                       if sid is not None else 'background')
@@ -480,8 +495,14 @@ def evaluate(
                  float(batch_meta['query_lon'][i]))
                 if batch_meta is not None else None
             )
+            # Domain mode: decode coords→lat/lon here (the plotter no longer
+            # depends on data.encoding); unit_circle passes None (unused).
+            station_latlon, query_latlon = (
+                domain_latlon_for_sample(attn_batch, i, fov_lat, fov_lon)
+                if loc_enc == 'domain' else (None, None)
+            )
             fig_a   = plot_attention_geographic(
-                attn_weights[-1][:, :, -1, :], attn_batch,  # last layer, query row
+                attn_weights[-1][:, :, 0, :], attn_batch,  # last layer, query row (CLS = token 0)
                 location_encoding=loc_enc,
                 fov_lat=fov_lat,
                 fov_lon=fov_lon,
@@ -489,6 +510,8 @@ def evaluate(
                 sample_idx=i,
                 geo=geo,
                 storm_latlon=storm_latlon,
+                station_latlon=station_latlon,
+                query_latlon=query_latlon,
             )
             # Keep the caption inside the figure (a y>1.0 suptitle is clipped
             # by wandb.Image / non-tight saves) with room above the axes title.
@@ -519,7 +542,7 @@ def evaluate(
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Evaluate a trained TCClassifier from its best checkpoint."
+        description="Evaluate a trained TCEncoder from its best checkpoint."
     )
     parser.add_argument(
         'config', type=str,

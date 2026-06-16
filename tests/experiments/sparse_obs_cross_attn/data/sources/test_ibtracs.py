@@ -1,5 +1,5 @@
 """
-Tests for experiments/sparse_obs_cross_attn/data/sources/ibtracs.py.
+Tests for experiments/sparse_obs_encoder/data/sources/ibtracs.py.
 
 All fixtures are built in memory — no real data files required.
 """
@@ -7,7 +7,7 @@ All fixtures are built in memory — no real data files required.
 import numpy as np
 import pytest
 
-from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
+from experiments.sparse_obs_encoder.data.sources.ibtracs import (
     IBTrACSDataset,
     IBTRACS_PRIMARY_TARGET_COLS,
     IBTRACS_SECONDARY_TARGET_COLS,
@@ -15,7 +15,8 @@ from experiments.sparse_obs_cross_attn.data.sources.ibtracs import (
     IBTRACS_TRAIN_SEASONS,
     IBTRACS_VAL_SEASONS,
     IBTRACS_TEST_SEASONS,
-    SSHS_TO_CLASS,
+    status_sshs_to_class,
+    CLASS_NAMES,
     N_CLASSES,
 )
 
@@ -39,7 +40,7 @@ def _make_ibtracs_npz(tmp_path, n_per_season=8):
         for i in range(n_per_season):
             sids.append(f"{s}A" if i < n_per_season // 2 else f"{s}B")
 
-    # ISO_TIME year aligned with SEASON (filter_seasons now filters on the
+    # ISO_TIME year aligned with SEASON (filter_years filters on the
     # observation year, not the SEASON column).
     iso_times = np.array([
         np.datetime64(f"{s}-09-01", "ns").astype(np.int64)
@@ -185,12 +186,50 @@ class TestColumnConstants:
     def test_no_duplicates(self):
         assert len(IBTRACS_ALL_TARGET_COLS) == len(set(IBTRACS_ALL_TARGET_COLS))
 
-    def test_sshs_to_class_range(self):
-        assert set(SSHS_TO_CLASS.keys()) == {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
-        assert set(SSHS_TO_CLASS.values()) == set(range(1, 11))
-
     def test_n_classes(self):
-        assert N_CLASSES == 11
+        assert N_CLASSES == 9
+        assert len(CLASS_NAMES) == N_CLASSES
+
+
+# ---------------------------------------------------------------------------
+# Ordinal organisation label mapping (status_sshs_to_class)
+# ---------------------------------------------------------------------------
+
+class TestLabelMapping:
+
+    def test_disturbance_statuses(self):
+        for st in ('DB', 'LO', 'WV', 'MD'):
+            assert status_sshs_to_class(st, -3) == 1   # Disturbance
+
+    def test_depression_statuses(self):
+        assert status_sshs_to_class('TD', -1) == 2     # tropical depression
+        assert status_sshs_to_class('SD', -2) == 2     # subtropical depression
+
+    def test_storm_statuses(self):
+        assert status_sshs_to_class('TS', 0) == 3      # tropical storm
+        assert status_sshs_to_class('SS', -2) == 3     # subtropical storm
+
+    def test_hurricane_category_from_sshs(self):
+        # Hurricane status: category number comes from USA_SSHS (1..5 → 4..8).
+        for cat in range(1, 6):
+            assert status_sshs_to_class('HU', cat) == 3 + cat
+
+    def test_status_drives_over_sshs(self):
+        # Agency status wins on disagreement: STATUS=TS but SSHS=1 → Storm,
+        # not Category 1 (decision r2 — STATUS-driven).
+        assert status_sshs_to_class('TS', 1) == 3
+
+    def test_hurricane_status_below_cat1_falls_back_to_storm(self):
+        assert status_sshs_to_class('HU', 0) == 3
+
+    def test_offaxis_statuses_excluded(self):
+        # Extratropical / post-tropical / dissipating / unknown → None.
+        for st in ('EX', 'ET', 'PT', 'DS', 'IN', 'XX'):
+            assert status_sshs_to_class(st, 0) is None
+
+    def test_case_insensitive(self):
+        assert status_sshs_to_class('td', -1) == 2
+        assert status_sshs_to_class(' Hu ', 3) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -267,8 +306,8 @@ class TestIBTrACSInit:
 
 class TestFiltering:
 
-    def test_filter_seasons_count(self, ds):
-        sub = ds.filter_seasons([2019])
+    def test_filter_years_count(self, ds):
+        sub = ds.filter_years([2019])
         assert len(sub) == 8
 
     def test_filter_single_storm(self, ds):
@@ -282,11 +321,11 @@ class TestFiltering:
         assert len(sub) == 3
 
     def test_filter_preserves_multi_times(self, ds):
-        sub = ds.filter_seasons([2019])
+        sub = ds.filter_years([2019])
         assert sub._multi_times is not None
 
     def test_filter_returns_ibtracs_type(self, ds):
-        assert type(ds.filter_seasons([2019])) is IBTrACSDataset
+        assert type(ds.filter_years([2019])) is IBTrACSDataset
 
     def test_filter_sids(self, ds):
         sub = ds.filter_sids(['2019A'])
@@ -327,7 +366,7 @@ class TestSidMeta:
     def test_filter_preserves_sid_meta(self, ibtracs_paths, sid_meta_path):
         npz, ms, *_ = ibtracs_paths
         ds = IBTrACSDataset(npz, ms, sid_meta_path)
-        sub = ds.filter_seasons([2019])
+        sub = ds.filter_years([2019])
         assert sub._sid_meta is not None
 
     def test_no_validation_without_sid_meta_path(self, ds):

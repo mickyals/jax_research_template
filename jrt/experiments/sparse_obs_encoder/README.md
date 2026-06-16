@@ -1,22 +1,22 @@
 # Experiment: sparse_obs_cross_attn — TC Intensity Classifier
 
-**Goal:** Given sparse in-situ land surface observations within a fixed radius of a query position at time *t*, predict the Saffir-Simpson Hurricane Wind Scale (SSHS) intensity class of any tropical cyclone present, or classify the sample as background (no storm).
+**Goal:** Given sparse in-situ land surface observations within a fixed radius of a query position at time *t*, predict the degree of tropical-cyclone organisation of any system present, or classify the sample as background (no storm).
 
-This is a binary + ordinal classification problem over 11 classes:
+This is a binary + ordinal classification problem over **9 classes**, ordered by degree of organisation. The class is STATUS-driven (the agency `USA_STATUS` code sets it); `USA_SSHS` supplies only the hurricane category number. Off-axis systems (extratropical, post-tropical, dissipating, etc.) are excluded from training. The canonical label space lives in `data/sources/ibtracs.py` (`CLASS_NAMES`, `status_sshs_to_class`).
 
-| Class | Meaning | SSHS |
-|------:|---------|------|
-| 0 | No storm (background) | — |
-| 1–3 | Sub-tropical / pre-tropical disturbances | −4 to −2 |
-| 4 | Tropical Depression | −1 |
-| 5 | Tropical Storm | 0 |
-| 6–10 | Category 1–5 Hurricane | +1 to +5 |
+| Class | Name | USA_STATUS | Wind |
+|------:|------|------------|------|
+| 0 | Background | — | no coherent system |
+| 1 | Disturbance | DB / LO / WV / MD | — |
+| 2 | Depression | TD / SD | < 35 kt |
+| 3 | Storm | TS / SS | 35–64 kt |
+| 4–8 | Category 1–5 | HU / TY / ST / … | Saffir-Simpson (from SSHS) |
 
 ---
 
 ## Data sources
 
-**IBTrACS** (`ibtracs_full.npz`) — storm centre position, timestamp, and SSHS class for every 6-hourly TC observation in the training domain. 10,191 rows across all cyclone types.
+**IBTrACS** (`ibtracs_full.npz`) — storm centre position, timestamp, `USA_STATUS`, and `USA_SSHS` for every 6-hourly TC observation in the training domain. 10,191 rows across all cyclone types.
 
 **InsituLand** (`insitu_land_clean.npz` + `insitu_land_station_meta.npz`) — land surface hourly observations from Copernicus C3S for 552 stations in the Caribbean / Gulf domain (LAT 0–30°N, LON 100–45°W). 74.7M observation rows.
 
@@ -33,19 +33,19 @@ This is a binary + ordinal classification problem over 11 classes:
   stays missing. `obs_bounds` for the components are signed symmetric
   (±115 m/s) so 0 m/s normalises to exactly 0 under `minmax_11`.
 
-**Splits:**
-- Train: IBTrACS seasons 2005–2020
-- Val: 2021–2022
-- Test: 2023–2025
+**Splits** (by ISO_TIME calendar year; default `year` strategy):
+- Train: years 2005–2022
+- Val: 2023–2024
+- Test: 2025
 - Hard test: multi-storm timestamps (870 times when ≥2 storms were active simultaneously) — held out entirely
 
-**Batching:** each batch is 1:1 balanced — half TC samples (storm centre as query), half background samples (domain point during non-TC periods). Train backgrounds are fresh uniform draws each step; val/test loaders use ONE frozen background set (Latin-Hypercube positions + fixed-seed synoptic timestamps) reused every epoch, plus deterministic nearest-N station selection, so eval differences are purely model change. Sequential (eval) epochs yield every valid TC sample — the final partial batch is flushed with proportionally fewer backgrounds.
+**Batching:** each batch is 1:1 balanced — half TC samples (storm centre as query), half background samples (domain point during non-TC periods). All stations within `radius_km` are used; when a sample has more than `max_stations`, the nearest `max_stations` by distance are kept (no random subsampling — the region is large and stations sparse, so the cap rarely binds, and deterministic selection keeps eval reproducible). Train backgrounds are fresh uniform draws each step; val/test loaders use ONE frozen background set (Latin-Hypercube positions + fixed-seed synoptic timestamps) reused every epoch, so eval differences are purely model change. Sequential (eval) epochs yield every valid TC sample — the final partial batch is flushed with proportionally fewer backgrounds.
 
 ---
 
 ## Architecture
 
-`TCClassifier` is a single `TransformerEncoder` over N+1 tokens: N station tokens followed by one query/CLS token. An asymmetric attention mask separates the two roles — stations contextualise each other without seeing the query; the query then reads the fully-contextualised station network and drives the classification head.
+`TCEncoder` is a single `TransformerEncoder` over 1+N tokens, **CLS-first** (ViT-style): one query/CLS token at position 0 followed by N station tokens. An asymmetric attention mask separates the two roles — stations contextualise each other without seeing the query; the query then reads the fully-contextualised station network (read off token 0). The normalised CLS embedding `z` is the encoder output; an **optional** head (sized by the TargetSpec) maps it to logits — set `n_classes` for a head, leave it `None` for a headless encoder that returns `z` directly.
 
 ### Token construction
 
@@ -58,30 +58,35 @@ station_tokens = token_proj(station_input)                                 # (B,
 
 Missing observations are filled with 0; the concatenated mask channel — not the fill value — disambiguates "observed 0" from "absent" (the mask's projection weights carry the distinction). No learned or constant sentinel is needed.
 
-**Query token** — the *same* `token_proj`, applied to a learned stand-in `query_obs_slots` (ξ) occupying the obs/mask slots, with `Fourier(query_coords)` supplying the position slots:
+**Query/CLS token** — the *same* `token_proj`, applied to a learned stand-in `query_obs_slots` (ξ) occupying the obs/mask slots. The **position slots** depend on `learnable_query_pos` (derived from the encoding):
 
 ```
+# unit_circle (learnable_query_pos=True): the whole CLS input is learnable
+query_input = concat([query_obs_slots, query_pos_slots])                    # (B, 2F+K)
+# domain (learnable_query_pos=False): position from the query's coords
 query_input = concat([query_obs_slots, Fourier(query_coords)])             # (B, 2F+K)
 query_token = token_proj(query_input)                                      # (B, 1, D)
 ```
 
-There is no separate query projection. For `unit_circle` the query sits at `(0,0)`, so its position features are constant and the learned ξ carries the query identity. The model is **coordinate-agnostic** — it projects whatever `station_coords`/`query_coords` the datamodule supplies, so the location-encoding choice lives only in the data config.
+There is no separate query projection. For `unit_circle` the query sits at `(0,0)`, so `Fourier((0,0))` is a constant — a fully learnable position slot (`query_pos_slots`) subsumes it and is strictly more expressive. For `domain` the CLS uses `Fourier(query_coords)` so it carries the absolute query location. The station tokens are coordinate-agnostic regardless; only the CLS construction differs by encoding.
 
 ### Asymmetric attention mask
 
+CLS-first (token 0 = query, tokens 1..N = stations):
+
 ```
                   attend to →
-              station_0 … station_N-1   query
+              query   station_1 … station_N
               ─────────────────────────────────
-station_0  │      ✓              ✓        ✗
-    ⋮      │      ✓              ✓        ✗    ← stations can't see query
-station_N-1│      ✓              ✓        ✗
-query      │      ✓              ✓        ✓    ← query reads everything
+query      │    ✓         ✓            ✓     ← query reads everything
+station_1  │    ✗         ✓            ✓
+    ⋮      │    ✗         ✓            ✓     ← stations can't see query
+station_N  │    ✗         ✓            ✓
 ```
 
 Padding stations (where `station_mask = False`) have their entire column blocked — no token can attend to a padding position.
 
-Set `model.full_self_attention: true` to open the `stations → query` block (the `✗` column above), giving complete self-attention over all N+1 tokens — the standard unrestricted Transformer pattern. Default `false` keeps the asymmetric mask. Both paths go through `build_attention_mask` (the single source of truth, also used by `plot_attention_mask`).
+Set `model.full_self_attention: true` to open the `stations → query` block (the `✗` column above), giving complete self-attention over all 1+N tokens — the standard unrestricted Transformer pattern. Default `false` keeps the asymmetric mask. Both paths go through `build_attention_mask` (the single source of truth, also used by `plot_attention_mask`).
 
 ### Location encoding modes
 
@@ -89,8 +94,8 @@ Set in `data.location_encoding` only — the model is coordinate-agnostic and pr
 
 | Mode | `station_coords` | `query_coords` |
 |------|-----------------|----------------|
-| `unit_circle` | `[x, y]` storm-centred local map (`norm_dist·sin(bearing), norm_dist·cos(bearing)`), each in [-1, 1] | `[0, 0]` = storm position; Fourier features constant, so ξ carries query identity |
-| `domain` | `[norm_lat_rad, norm_lon_rad]` absolute | same encoding; `Fourier(query_coords)` varies and feeds the shared `token_proj` |
+| `unit_circle` | `[x, y]` storm-centred local map (`norm_dist·sin(bearing), norm_dist·cos(bearing)`), each in [-1, 1] | `[0, 0]` = storm position; CLS position slot is fully learnable (`learnable_query_pos=True`), so the constant `Fourier((0,0))` is subsumed |
+| `domain` | `[norm_lat_rad, norm_lon_rad]` absolute | same encoding; CLS uses `Fourier(query_coords)` (`learnable_query_pos=False`) so it carries the absolute query location |
 
 `unit_circle` is rotation-equivariant (the storm is always "at the origin"). `domain` retains absolute geographic position.
 
@@ -106,12 +111,30 @@ Stations within the radius may have missing values for some variables. Missing e
 1.  obs_zeroed = where(obs_mask, station_obs, 0)                            (B, N, F)
 2.  station_input  = concat([obs_zeroed, obs_mask, Fourier(station_coords)])  (B, N, 2F+K)
     station_tokens = token_proj(station_input)                             (B, N, D)
-3.  query_input = concat([query_obs_slots, Fourier(query_coords)])         (B, 2F+K)
+3.  query_input = concat([query_obs_slots, query_pos_slots | Fourier(query_coords)])  (B, 2F+K)
     query_token = token_proj(query_input)                                  (B, 1, D)
-4.  tokens  = concat([station_tokens, query_token], axis=1)                 (B, N+1, D)
-5.  encoded = TransformerEncoder(tokens, mask=asymmetric_mask)              (B, N+1, D)
-6.  logits  = head(LayerNorm(encoded[:, N, :]))                             (B, 11)
+4.  tokens  = concat([query_token, station_tokens], axis=1)                 (B, 1+N, D)   CLS-first
+5.  encoded = TransformerEncoder(tokens, mask=asymmetric_mask)              (B, 1+N, D)
+6.  z       = LayerNorm(encoded[:, 0, :])                                   (B, D)        encoder output (headless → returned here)
+7.  logits  = head(z)                                                       (B, C)        optional head (n_classes set); else step 6 is the output
 ```
+
+### Encoder / head split (frozen-encoder probing)
+
+`TCEncoder` is **one module**: steps 1–6 (token construction, Transformer, final LayerNorm → the normalised CLS embedding `z`) are the transferable asset, and the head (step 7) is an **optional, separable param leaf**. `n_classes=int` builds a pure-linear `nn.Dense` head (the target-specific probe); `n_classes=None` is **headless** — `__call__` returns `z` directly. The param tree is flat and the head is a single leaf:
+
+| Param leaves | Role |
+|--------------|------|
+| `token_proj`, `query_obs_slots`, `[query_pos_slots]`, `transformer`, `norm` | the trained, transferable encoder asset (every non-`head` leaf) |
+| `head` (`kernel`, `bias`) | target-specific linear probe (swappable; omitted when headless) |
+
+There is **no nested `'encoder'` subtree** — the seam is the **`head` key**. A headless `TCEncoder`'s param tree is exactly the set of encoder leaves, so split params run directly on one. This is the seam for the research question — *does a frozen encoder + a fresh head transfer to another target column?* Three helpers in `model.py` make it a few operations:
+
+- `split_encoder_head(params)` → `(encoder_params, head_params)` — slices on the `head` key (`encoder_params` = every other leaf)
+- `attach_encoder(fresh_params, encoder_params)` → load a trained encoder into a freshly-initialised model that carries a new head
+- `encoder_freeze_labels(params)` → an optax `multi_transform` label tree (`'frozen'` for every encoder leaf / `'trainable'` for `head`) to freeze the encoder during probe training
+
+The head is a *pure* `Dense` over the normalised CLS embedding (the final norm lives in the encoder), so a probe measures linear separability of the frozen representation. *(The train-time wiring to load an encoder checkpoint and freeze it is added alongside the first probe run — it needs a trained encoder to exist first.)*
 
 ---
 
@@ -129,18 +152,18 @@ sparse_obs_cross_attn/
 │   ├── dataset.py       TCDataset — joins IBTrACS + InsituLand per sample,
 │   │                       coordinate encoding, obs normalisation
 │   ├── datamodule.py    TCDataModule + TCLoader — balanced TC/background
-│   │                       batches, station_selection (nearest/random),
+│   │                       batches, nearest-N station cap,
 │   │                       frozen LHS eval backgrounds, partial-batch flush
 │   ├── encoding.py      encode/decode pairs (unit_circle local x-y,
 │   │                       domain FOV-normalised) — exact inverses shared
 │   │                       by dataset + plotting
 │   ├── splits.py        resolve_splits — data.split config → per-split
-│   │                       datasets + run manifest ('season' and 'sid'
+│   │                       datasets + run manifest ('year' and 'year_random'
 │   │                       strategies)
 │   └── sources/
-│       ├── ibtracs.py       IBTrACSDataset — filter primitives (seasons,
-│       │                       SIDs, single/multi-storm), sid-meta
-│       │                       validation, SSHS label mapping
+│       ├── ibtracs.py       IBTrACSDataset — filter primitives (years,
+│       │                       SIDs, single/multi-storm), sid-meta validation,
+│       │                       ordinal organisation labels (status_sshs_to_class)
 │       └── insitu_land.py   InsituLandDataset — haversine spatial filter,
 │                                reliability/year filtering, binary-search time queries
 ├── plotting/
@@ -154,7 +177,7 @@ sparse_obs_cross_attn/
 │                           attention-matrix grid, and the static
 │                           asymmetric-mask figure
 └── train/
-    ├── model.py         TCClassifier — unified Transformer encoder
+    ├── model.py         TCEncoder — unified Transformer encoder
     ├── metrics.py       build_metrics_fns glue (metrics live in
     │                       jrt/training/metrics.py)
     ├── train.py         CLI entry point + observability callbacks
@@ -212,7 +235,7 @@ jrt/experiments/sparse_obs_cross_attn/configs/*_local.yaml
 
 The only required edits before a first run are the five `data:` paths. Key flags to understand:
 
-- `data.split` is required — resolved by `data/splits.py` into filtered datasets plus a run manifest written next to the checkpoints. Two strategies: `season` (per-split IBTrACS season lists, disjoint, validated — the default config reproduces the original hardcoded split: train 2005–2020, val 2021–2022, test 2023–2025, `hard_test: multi_storm`) and `sid` (hybrid: `test.seasons` lists edge years, with membership decided by track calendar years from the sid-meta table; remaining interior storms are assigned train/val by SID at `val.fraction`, seeded, stratified by `val.stratify_by`, train being the implicit remainder; train and val deliberately share the interior-year insitu stream — only test is time-separated)
+- `data.split` is required — resolved by `data/splits.py` into filtered datasets plus a run manifest written next to the checkpoints. Splits are by **ISO_TIME calendar year** (not the IBTrACS SEASON column), so the TC and insitu/background streams stay year-aligned. Two strategies: `year` (explicit disjoint year lists per split, validated — e.g. train 2005–2022, val 2023–2024, test 2025, `hard_test: multi_storm`) and `year_random` (`train_val.years` pooled + a disjoint `test.years`; the pooled rows are split into train/val by `val.fraction`/`val.seed` at the **row/timestep** level — adjacent points of one storm may fall in both train and val, a mild deliberate train↔val leakage; test stays the clean held-out years, and train/val share the train+val-year insitu stream; no `train` block — train is the random remainder)
 - `data.location_encoding` — `unit_circle` (default) or `domain`; the model is coordinate-agnostic so this lives in the data block only
 - `model.missingness_indicator: true` (default) — concatenate the obs mask as its own channel (missing obs filled with 0); `false` drops it (ablation only)
 - `trainer.run_dir` — change per run to avoid overwriting checkpoints
@@ -240,21 +263,21 @@ $env:PYTHONPATH = "jrt"
 `CFG` below is the config path (positional argument for every entry point):
 
 ```bash
-CFG=jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+CFG=jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
 
 # Train                                  # Resume from latest checkpoint
-python -m experiments.sparse_obs_cross_attn.train.train $CFG
-python -m experiments.sparse_obs_cross_attn.train.train $CFG --resume
+python -m experiments.sparse_obs_encoder.train.train $CFG
+python -m experiments.sparse_obs_encoder.train.train $CFG --resume
 
 # Evaluate (best checkpoint)
-python -m experiments.sparse_obs_cross_attn.train.evaluate $CFG \
+python -m experiments.sparse_obs_encoder.train.evaluate $CFG \
     --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
     --output_dir    runs/tc_classifier/run_01/eval \
     --split test --n_attn_samples 4 --geo --no_show
 
 # Hyperparameter search
-python -m experiments.sparse_obs_cross_attn.train.tune \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+python -m experiments.sparse_obs_encoder.train.tune \
+    jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
     --n_trials 50 \
     --storage sqlite:///runs/tc_classifier/hp_search/study.db \
     --study_name tc_classifier_v1
@@ -290,12 +313,12 @@ reference above):
 
 ```bash
 # First run
-python -m experiments.sparse_obs_cross_attn.train.train \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+python -m experiments.sparse_obs_encoder.train.train \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
 
 # Resume an interrupted run
-python -m experiments.sparse_obs_cross_attn.train.train \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_encoder.train.train \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
     --resume
 ```
 
@@ -317,19 +340,19 @@ The config path is a **positional** argument:
 
 ```bash
 # Evaluate on test split (default)
-python -m experiments.sparse_obs_cross_attn.train.evaluate \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_encoder.train.evaluate \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
     --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
     --output_dir runs/tc_classifier/run_01/eval
 
 # Validation split
-python -m experiments.sparse_obs_cross_attn.train.evaluate \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_encoder.train.evaluate \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
     --split val
 
 # Save plots to disk without displaying
-python -m experiments.sparse_obs_cross_attn.train.evaluate \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+python -m experiments.sparse_obs_encoder.train.evaluate \
+    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
     --output_dir runs/tc_classifier/run_01/eval \
     --no_show
 ```
@@ -345,13 +368,13 @@ Outputs:
 
 ```bash
 # In-memory search (quick experiments, results lost on exit)
-python -m experiments.sparse_obs_cross_attn.train.tune \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+python -m experiments.sparse_obs_encoder.train.tune \
+    jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
     --n_trials 25
 
 # Persistent search — resume by running the same command again
-python -m experiments.sparse_obs_cross_attn.train.tune \
-    jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+python -m experiments.sparse_obs_encoder.train.tune \
+    jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
     --n_trials 50 \
     --storage sqlite:///runs/tc_classifier/hp_search/study.db \
     --study_name tc_classifier_v1
@@ -374,7 +397,7 @@ os.environ['JAX_LOG_COMPILES'] = '0'
 # Cell 2 — load config, override paths for this machine
 import yaml
 
-with open('jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml') as f:
+with open('jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml') as f:
     config = yaml.safe_load(f)
 
 DATA_ROOT = '/data/sparse_obs'   # ← set to your data location
@@ -393,21 +416,21 @@ config['trainer'].setdefault('seed', seed)
 
 ```python
 # Cell 3 — build components
-from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
+from experiments.sparse_obs_encoder.train.model import TCEncoder
 from training.trainer import Trainer
 
-dm           = TCDataModule.from_config(config['data'])
-model        = TCClassifier(**config['model'])
-metrics_fns  = build_metrics_fns()
-trainer      = Trainer(model, metrics_fns, config['trainer'])
+dm = TCDataModule.from_config(config['data'])
+model = TCEncoder(**config['model'])
+metrics_fns = build_metrics_fns()
+trainer = Trainer(model, metrics_fns, config['trainer'])
 train_loader = dm.train_loader(seed=seed, shuffle=True)
-val_loader   = dm.val_loader()
+val_loader = dm.val_loader()
 
 # Sanity-check one batch
 batch = next(iter(train_loader))
-print('station_obs: ', batch['X']['station_obs'].shape)   # (B, N, F)
+print('station_obs: ', batch['X']['station_obs'].shape)  # (B, N, F)
 print('station_mask:', batch['X']['station_mask'].shape)  # (B, N)
 print('y classes:   ', set(batch['y'].tolist()))
 ```
@@ -429,7 +452,7 @@ import numpy as np
 def attn_callback(state, epoch, global_step):
     _, w = model.apply({'params': state.params}, batch['X'],
                        train=False, return_weights=True)
-    w       = np.asarray(w)[-1][:, :, -1, :]   # last layer, query row → (B, H, N+1)
+    w       = np.asarray(w)[-1][:, :, 0, :]   # last layer, query row (CLS=token 0) → (B, H, 1+N)
     entropy = float(-np.sum(w * np.log(w + 1e-12), axis=-1).mean())
     print(f'  epoch {epoch:3d}  val/attn_entropy = {entropy:.4f}')
 
@@ -439,12 +462,12 @@ best_state = trainer.fit(train_loader, val_loader,
 
 ```python
 # Cell 6 — evaluate on test split
-from experiments.sparse_obs_cross_attn.train.evaluate import (
-    collect_predictions, confusion_matrix, per_class_metrics,
-    per_storm_metrics, CLASS_NAMES,
+from experiments.sparse_obs_encoder.train.evaluate import (
+  collect_predictions, confusion_matrix, per_class_metrics,
+  per_storm_metrics, CLASS_NAMES,
 )
-from experiments.sparse_obs_cross_attn.plotting.plotting import (
-    plot_confusion_matrix, plot_class_metrics,
+from experiments.sparse_obs_encoder.plotting.plotting import (
+  plot_confusion_matrix, plot_class_metrics,
 )
 import matplotlib.pyplot as plt
 
@@ -454,7 +477,7 @@ preds, labels, logits, meta = collect_predictions(model, variables, dm.test_load
 # Every prediction is attributable to a named storm (background → sid None)
 storm_metrics = per_storm_metrics(preds, labels, meta['sid'])
 
-cm  = confusion_matrix(preds, labels)
+cm = confusion_matrix(preds, labels)
 pcm = per_class_metrics(cm)
 plot_confusion_matrix(cm, CLASS_NAMES, normalize=True, title='Test — row-normalised')
 plot_class_metrics(pcm, CLASS_NAMES)
@@ -463,23 +486,27 @@ plt.show()
 
 ```python
 # Cell 7 — attention figures
-from experiments.sparse_obs_cross_attn.plotting.plotting import (
-    extract_attention_weights, plot_attention_geographic,
-    plot_attention_matrix_grid, plot_attention_mask,
+from experiments.sparse_obs_encoder.plotting.plotting import (
+  extract_attention_weights, plot_attention_geographic,
+  plot_attention_matrix_grid, plot_attention_mask,
 )
 
-attn_batch   = next(iter(val_loader))
+attn_batch = next(iter(val_loader))
 attn_weights = extract_attention_weights(model, variables, attn_batch)
-print('weights:', attn_weights.shape)   # (num_layers, B, H, N+1, N+1)
+print('weights:', attn_weights.shape)  # (num_layers, B, H, N+1, N+1)
 
-# Geographic map — query row of the last layer
+# Geographic map — query row of the last layer (CLS-first: query is token 0).
+# unit_circle needs nothing extra; domain mode requires the caller to decode
+# coords→lat/lon (the plotter doesn't import the coordinate encoding) — use
+# evaluate.domain_latlon_for_sample(attn_batch, 0, fov_lat, fov_lon) and pass
+# station_latlon=/query_latlon=.
 fig = plot_attention_geographic(
-    attn_weights[-1][:, :, -1, :], attn_batch,
-    location_encoding = config['data']['location_encoding'],
-    fov_lat           = config['data'].get('fov_lat'),
-    fov_lon           = config['data'].get('fov_lon'),
-    radius_km         = config['data'].get('radius_km', 500.0),
-    sample_idx        = 0,
+  attn_weights[-1][:, :, 0, :], attn_batch,
+  location_encoding=config['data']['location_encoding'],
+  fov_lat=config['data'].get('fov_lat'),
+  fov_lon=config['data'].get('fov_lon'),
+  radius_km=config['data'].get('radius_km', 500.0),
+  sample_idx=0,
 )
 
 # Layers × heads grid of full (N+1)×(N+1) matrices
@@ -499,7 +526,7 @@ plt.show()
 | `train/loss` | Training objective from `trainer.loss` (e.g. `cross_entropy`, optionally focal / class-weighted) |
 | `val/loss` | Same objective evaluated on val |
 | `val/cross_entropy` | Validation CE — always reported for cross-run comparability; patience metric for early stopping |
-| `val/accuracy` | Top-1 accuracy over all 11 classes |
+| `val/accuracy` | Top-1 accuracy over all 9 classes |
 | `val/binary_accuracy` | TC vs no-TC (class 0 vs class > 0); random chance = 0.5 |
 | `val/mae_class` | Mean \|predicted class − true class\| in class units |
 | `val/qwk` | Quadratic-weighted kappa (full val set, every `eval_plots_every_n_epochs`) — ordinal agreement; 1 = perfect, 0 = chance, negative = worse than chance |
@@ -510,7 +537,7 @@ plt.show()
 - A model that always predicts class 0 achieves `binary_accuracy = 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
 - `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tracks ordinal agreement (rewards near misses over far misses) independent of the training loss; `val/ece` (mean) and the test report's `mce` (worst-bin) are the calibration measurements.
 - **Temperature scaling** (Guo et al. 2017): `evaluate.py` fits a single temperature `T` on the **val** split (`fit_temperature`, an exact ternary search since NLL is convex in `1/T`) and `print_report` prints both `<split>/ece` and `<split>/ece_tempscaled` with the fitted `T`. `T` divides the logits, so it recalibrates confidence without changing the argmax — accuracy, QWK and the per-class table are identical. For `--split test` this is the proper val→test transfer; for `--split val` it is an in-sample check.
-- `val/attn_entropy` includes the query's self-attention weight (the last of N+1 positions). A high self-attention weight early in training is expected — the model is relying on its learned query prior (`query_obs_slots`). Expect it to decrease as the model learns to trust station data.
+- `val/attn_entropy` includes the query's self-attention weight (the first of 1+N positions, CLS-first). A high self-attention weight early in training is expected — the model is relying on its learned query prior (`query_obs_slots`). Expect it to decrease as the model learns to trust station data.
 
 ---
 
@@ -523,9 +550,8 @@ Key fields in `tc_classifier.yaml`:
 | `seed` | 3678 | Single seed for model init, dropout, and data shuffle |
 | `data.radius_km` | 500 | Stations outside this radius are excluded |
 | `data.time_window_hours` | 0.1 | Temporal tolerance (±) for matching obs to the query time; each station contributes only its report nearest in time |
-| `data.max_stations` | 64 | Padding / truncation limit |
+| `data.max_stations` | 64 | Cap on station tokens; all within radius are used, more are nearest-trimmed, fewer are zero-padded |
 | `data.min_stations` | 1 | Samples with fewer stations are dropped |
-| `data.station_selection` | `random` | TRAIN-loader station subsampling above `max_stations`: `random` (epoch-varying augmentation) or `nearest`. Val/test loaders always default to `nearest` (deterministic) |
 | `data.location_encoding` | `unit_circle` | `unit_circle` or `domain`; model is coordinate-agnostic, so this lives in the data block only |
 | `data.obs_normalisation` | `minmax_11` | `minmax_01` / `minmax_11` / `standardise` |
 | `data.class_weight_scheme` | `none` | `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` / `median_freq` — computes `class_weights` at setup from train-split counts (stored in manifest); overridden by an explicit `trainer.loss_kwargs.class_weights` |

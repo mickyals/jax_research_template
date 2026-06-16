@@ -1,18 +1,18 @@
 """
-experiments/sparse_obs_cross_attn/train/tune.py
+experiments/sparse_obs_encoder/train/tune.py
 
-Hyperparameter search for TCClassifier via Optuna.
+Hyperparameter search for TCEncoder via Optuna.
 
 Usage
 -----
     # Fresh search — results lost on exit (quick experiments)
-    python -m experiments.sparse_obs_cross_attn.train.tune \
-        jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+    python -m experiments.sparse_obs_encoder.train.tune \
+        jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
         --n_trials 25
 
     # Persistent search — resume by running the same command again
-    python -m experiments.sparse_obs_cross_attn.train.tune \
-        jrt/experiments/sparse_obs_cross_attn/configs/tc_tune.yaml \
+    python -m experiments.sparse_obs_encoder.train.tune \
+        jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
         --n_trials 50 \
         --storage sqlite:///runs/tc_classifier/hp_search/study.db \
         --study_name tc_classifier_v1
@@ -39,11 +39,10 @@ from pathlib import Path
 
 import yaml
 
-from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import N_CLASSES
+from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
 from datasets.class_weights import class_weights_from_counts
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_encoder.train.model import TCEncoder
 from training.tuner import Tuner, apply_search_space
 
 
@@ -78,8 +77,8 @@ def suggest_fn(trial, base_config: dict) -> dict:
     return cfg
 
 
-def model_fn(config: dict) -> TCClassifier:
-    return TCClassifier(**config["model"])
+def model_fn(config: dict) -> TCEncoder:
+    return TCEncoder(**config["model"])
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +111,8 @@ def tune(
     # datamodule's coordinate convention.
     loc_enc = base_config.get("location_encoding", "unit_circle")
     base_config["data"]["location_encoding"]  = loc_enc
+    # CLS position handling derived from the encoding (see learnable_query_pos).
+    base_config["model"]["learnable_query_pos"] = (loc_enc == "unit_circle")
 
     # Resolve run_dir relative to the experiment root (two levels up from
     # this script, which lives in train/), NOT the config file directory
@@ -127,6 +128,10 @@ def tune(
     # TCLoader is re-iterable so calling train_loader_fn() per trial is cheap.
     dm = TCDataModule.from_config(base_config["data"])
 
+    # TargetSpec (data.target) drives the head size — sync n_classes so every
+    # trial's model matches the chosen target (suggest_fn deepcopies this).
+    base_config["model"]["n_classes"] = dm.target_spec.n_classes
+
     _steps_per_epoch = trainer_cfg.get("steps_per_epoch")
 
     def train_loader_fn():
@@ -141,7 +146,7 @@ def tune(
     loss_kwargs = dict(trainer_cfg.get("loss_kwargs") or {})
     cw_scheme   = base_config["data"].get("class_weight_scheme", "none")
     if "class_weights" not in loss_kwargs and cw_scheme != "none":
-        n_classes = base_config["model"].get("n_classes", N_CLASSES)
+        n_classes = dm.target_spec.n_classes
         counts = [int(dm.manifest()["train"]["class_counts"].get(str(c), 0))
                   for c in range(n_classes)]
         loss_kwargs["class_weights"] = class_weights_from_counts(
@@ -150,8 +155,9 @@ def tune(
         ).tolist()
 
     metrics_fns = build_metrics_fns(
-        loss        = trainer_cfg.get("loss", "cross_entropy"),
+        loss        = trainer_cfg.get("loss", dm.target_spec.loss),
         loss_kwargs = loss_kwargs,
+        metrics     = trainer_cfg.get("metrics"),
     )
 
     tuner = Tuner(
@@ -190,7 +196,7 @@ def tune(
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Hyperparameter search for TCClassifier."
+        description="Hyperparameter search for TCEncoder."
     )
     p.add_argument("config",             type=str,
                    help="Path to tc_tune.yaml")

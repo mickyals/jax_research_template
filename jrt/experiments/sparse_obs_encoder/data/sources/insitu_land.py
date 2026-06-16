@@ -1,5 +1,5 @@
 """
-experiments/sparse_obs_cross_attn/data/sources/insitu_land.py
+experiments/sparse_obs_encoder/data/sources/insitu_land.py
 
 InsituLandDataset: efficient spatial + temporal query over land-surface
 station observations.

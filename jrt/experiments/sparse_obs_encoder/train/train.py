@@ -1,16 +1,16 @@
 """
-experiments/sparse_obs_cross_attn/train/train.py
+experiments/sparse_obs_encoder/train/train.py
 
-Entry point for the sparse_obs_cross_attn experiment.
+Entry point for the sparse_obs_encoder experiment.
 
 Usage
 -----
-    python -m experiments.sparse_obs_cross_attn.train.train \
-        jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml
+    python -m experiments.sparse_obs_encoder.train.train \
+        jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
 
     # Resume an interrupted run
-    python -m experiments.sparse_obs_cross_attn.train.train \
-        jrt/experiments/sparse_obs_cross_attn/configs/tc_classifier.yaml \
+    python -m experiments.sparse_obs_encoder.train.train \
+        jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
         --resume
 """
 
@@ -25,22 +25,22 @@ import jax
 import jax.numpy as jnp
 import yaml
 
-from experiments.sparse_obs_cross_attn.data.datamodule import TCDataModule
-from experiments.sparse_obs_cross_attn.train.evaluate import (
-    CLASS_NAMES,
+from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
+from experiments.sparse_obs_encoder.train.evaluate import (
     collect_predictions,
     confusion_matrix,
+    domain_latlon_for_sample,
     per_class_metrics,
 )
-from experiments.sparse_obs_cross_attn.plotting.plotting import (
+from experiments.sparse_obs_encoder.plotting.plotting import (
     plot_attention_geographic,
     plot_attention_mask,
     plot_attention_matrix_grid,
     plot_class_metrics,
     plot_confusion_matrix,
 )
-from experiments.sparse_obs_cross_attn.train.metrics import build_metrics_fns
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier, N_CLASSES
+from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
+from experiments.sparse_obs_encoder.train.model import TCEncoder
 from datasets.class_weights import class_weights_from_counts
 from training.metrics import (
     cross_entropy,
@@ -48,7 +48,13 @@ from training.metrics import (
     quadratic_weighted_kappa,
 )
 from training.trainer import Trainer, TrainState
-from utils.jax_core.diagnostics import model_tabulate
+from utils.jax_core.diagnostics import (
+    model_tabulate,
+    visualize_weight_distribution,
+    visualize_gradients,
+    visualize_activations,
+    plot_loss_landscape,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +62,7 @@ from utils.jax_core.diagnostics import model_tabulate
 # ---------------------------------------------------------------------------
 
 def _make_attn_entropy_callback(
-    model:       TCClassifier,
+    model:       TCEncoder,
     probe_batch: dict,
     logger,
 ) -> Callable[[TrainState, int, int], None]:
@@ -71,7 +77,7 @@ def _make_attn_entropy_callback(
 
     Parameters
     ----------
-    model : TCClassifier
+    model : TCEncoder
     probe_batch : dict
         A fixed validation batch held in memory for the run duration.
     logger : experiment logger
@@ -83,9 +89,9 @@ def _make_attn_entropy_callback(
     def _attn(params):
         _, weights = model.apply({'params': params}, probe_X,
                                  train=False, return_weights=True)
-        # Query row of the LAST layer — preserves the metric's original
-        # definition now that weights cover all layers.
-        return weights[-1][:, :, -1, :]  # (B, H, N+1)
+        # Query row of the LAST layer (CLS-first: query is token 0) — preserves
+        # the metric's original definition now that weights cover all layers.
+        return weights[-1][:, :, 0, :]  # (B, H, 1+N)
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
         weights = np.asarray(_attn(state.params))          # (B, H, N+1)
@@ -101,10 +107,11 @@ def _make_attn_entropy_callback(
 
 
 def _make_attn_figure_callback(
-    model:       TCClassifier,
+    model:       TCEncoder,
     probe_batch: dict,
     logger,
     data_config: dict,
+    class_names: list[str],
     fig_every:   int = 5,
 ) -> Callable[[TrainState, int, int], None]:
     """Return an **epoch-level** callback that logs attention figures.
@@ -117,7 +124,7 @@ def _make_attn_figure_callback(
 
     Parameters
     ----------
-    model : TCClassifier
+    model : TCEncoder
     probe_batch : dict
         A fixed validation batch held in memory for the run duration.
     logger : experiment logger
@@ -145,17 +152,25 @@ def _make_attn_figure_callback(
             return
         logits, weights = _attn(state.params)
         weights = np.asarray(weights)               # (L, B, H, N+1, N+1)
-        true_c  = CLASS_NAMES[int(probe_batch['y'][0])]
-        pred_c  = CLASS_NAMES[int(np.asarray(logits)[0].argmax())]
+        true_c  = class_names[int(probe_batch['y'][0])]
+        pred_c  = class_names[int(np.asarray(logits)[0].argmax())]
         title   = f'true: {true_c}, pred: {pred_c}'
 
+        # Domain mode: decode coords→lat/lon here (the plotter no longer
+        # depends on data.encoding); unit_circle passes None (unused).
+        station_latlon, query_latlon = (
+            domain_latlon_for_sample(probe_batch, 0, fov_lat, fov_lon)
+            if loc_enc == 'domain' else (None, None)
+        )
         fig = plot_attention_geographic(
-            weights[-1][:, :, -1, :], probe_batch,   # last layer, query row
+            weights[-1][:, :, 0, :], probe_batch,   # last layer, query row (CLS = token 0)
             location_encoding=loc_enc,
             fov_lat=fov_lat,
             fov_lon=fov_lon,
             radius_km=radius_km,
             sample_idx=0,
+            station_latlon=station_latlon,
+            query_latlon=query_latlon,
         )
         # Keep the caption inside the figure (wandb.Image renders at the
         # figure's own bounds, so a y>1.0 suptitle would be clipped) and
@@ -179,7 +194,7 @@ def _make_attn_figure_callback(
 # ---------------------------------------------------------------------------
 
 def _make_grad_flow_callback(
-    model:       TCClassifier,
+    model:       TCEncoder,
     probe_batch: dict,
     logger,
     every_n_epochs: int = 5,
@@ -188,7 +203,7 @@ def _make_grad_flow_callback(
 
     Computes jax.grad of the cross-entropy loss on a fixed TRAIN probe
     batch and pushes one histogram per parameter leaf, named by its tree
-    path (e.g. ``grad_flow/encoder/blocks_0/attn/query/kernel``), via
+    path (e.g. ``grad_flow/transformer/blocks_0/attn/query/kernel``), via
     ``logger.log_histogram``. Vanishing/exploding layers show up as
     histograms collapsing to 0 or blowing up across depth.
 
@@ -197,7 +212,7 @@ def _make_grad_flow_callback(
 
     Parameters
     ----------
-    model : TCClassifier
+    model : TCEncoder
     probe_batch : dict
         A fixed TRAINING batch held in memory for the run duration
         (gradient flow is a training diagnostic — never wired to val/test).
@@ -237,9 +252,10 @@ def _make_grad_flow_callback(
 
 
 def _make_eval_plots_callback(
-    model:       TCClassifier,
+    model:       TCEncoder,
     val_loader,
     logger,
+    class_names: list[str],
     every_n_epochs: int = 1,
 ) -> Callable[[TrainState, int, int], None]:
     """Return an epoch-level callback that logs confusion matrix and per-class F1.
@@ -252,7 +268,7 @@ def _make_eval_plots_callback(
 
     Parameters
     ----------
-    model : TCClassifier
+    model : TCEncoder
     val_loader : TCLoader
         Re-iterable val loader — iterated fresh on each callback invocation.
     logger : experiment logger
@@ -276,15 +292,15 @@ def _make_eval_plots_callback(
         logger.log_metrics({'val/qwk': qwk, 'val/ece': ece}, step=global_step)
 
         fig_norm = plot_confusion_matrix(
-            cm, CLASS_NAMES, normalize=True,
+            cm, class_names, normalize=True,
             title=f'Val confusion matrix — epoch {epoch} (recall per class)',
         )
         fig_raw = plot_confusion_matrix(
-            cm, CLASS_NAMES, normalize=False,
+            cm, class_names, normalize=False,
             title=f'Val confusion matrix — epoch {epoch} (counts)',
         )
         fig_cls = plot_class_metrics(
-            pcm, CLASS_NAMES,
+            pcm, class_names,
         )
 
         logger.log_figure('val/confusion_norm',    fig_norm, step=global_step)
@@ -292,6 +308,49 @@ def _make_eval_plots_callback(
         logger.log_figure('val/per_class_metrics', fig_cls,  step=global_step)
 
     return callback
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics row (weight / gradient / activation distributions + loss landscape)
+# ---------------------------------------------------------------------------
+
+def _log_diagnostics(
+    model:       TCEncoder,
+    params:      dict,
+    train_probe: dict,
+    val_probe:   dict,
+    logger,
+    step:        int,
+    loss_landscape_grid: int = 0,
+) -> None:
+    """Log the 'diagnostics/' figure row (weight/grad/activation, + optional
+    loss landscape) for one parameter snapshot.
+
+    Called twice from train(): once at init (step 0) for the start-of-training
+    reference, and once on the best params after fit() for the end-of-training
+    picture. Gradients use the TRAIN probe (training signal); activations use
+    the VAL probe at train=False. The loss landscape (grid_size² forward passes)
+    is rendered only when loss_landscape_grid > 0 — keep it for the end snapshot.
+    """
+    def _loss_fn(p):
+        logits = model.apply({'params': p}, train_probe['X'], train=False)
+        return cross_entropy(logits, train_probe['y'])
+
+    logger.log_figure(
+        'diagnostics/weight_dist',
+        visualize_weight_distribution(params), step=step)
+    logger.log_figure(
+        'diagnostics/gradients',
+        visualize_gradients(params, _loss_fn), step=step)
+    logger.log_figure(
+        'diagnostics/activations',
+        visualize_activations(model, {'params': params}, val_probe['X'], train=False),
+        step=step)
+    if loss_landscape_grid and loss_landscape_grid > 0:
+        logger.log_figure(
+            'diagnostics/loss_landscape',
+            plot_loss_landscape(params, _loss_fn, grid_size=loss_landscape_grid),
+            step=step)
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +412,10 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # whatever coords it is handed), so it is injected into the data block only.
     loc_enc = config.get('location_encoding', 'unit_circle')
     config['data']['location_encoding']  = loc_enc
+    # CLS position handling is derived from the encoding: unit_circle puts the
+    # query at the origin → a fully learnable CLS position; domain feeds the
+    # query's encoded coords into the CLS. (See TCEncoder.learnable_query_pos.)
+    config['model']['learnable_query_pos'] = (loc_enc == 'unit_circle')
 
     # ------------------------------------------------------------------
     # Resolve run_dir relative to the experiment root (two levels up from
@@ -374,6 +437,13 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # ------------------------------------------------------------------
     dm = TCDataModule.from_config(config['data'])
 
+    # TargetSpec (data.target) is the single source of truth for the head size,
+    # class names, and default loss. Sync the model's n_classes to it so the
+    # head always matches the chosen target.
+    target_spec = dm.target_spec
+    class_names = target_spec.class_names
+    config['model']['n_classes'] = target_spec.n_classes
+
     steps_per_epoch = trainer_cfg.get('steps_per_epoch')
     dm.summary(steps_per_epoch=steps_per_epoch)
 
@@ -388,7 +458,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
-    model = TCClassifier(**config['model'])
+    model = TCEncoder(**config['model'])
 
     # Print a per-layer shape + parameter count table before training.
     # Peek a small batch (4 samples) so Flax can trace all tensor shapes.
@@ -398,7 +468,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     _exmp  = {k: v[:4] for k, v in train_probe_batch['X'].items()}
     print()
     print("─" * 58)
-    print("Model  (TCClassifier)")
+    print("Model  (TCEncoder)")
     model_tabulate(model, _exmp, False)   # args: X dict, train=False
     del _exmp
 
@@ -415,7 +485,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # Precedence: an explicit loss_kwargs.class_weights wins; otherwise a
     # data.class_weight_scheme is computed from the train split's class counts.
     if 'class_weights' not in loss_kwargs and cw_scheme != 'none':
-        n_classes = config['model'].get('n_classes', N_CLASSES)
+        n_classes = target_spec.n_classes
         counts = [int(manifest['train']['class_counts'].get(str(c), 0))
                   for c in range(n_classes)]
         cw = class_weights_from_counts(
@@ -431,9 +501,23 @@ def train(config_path: str | Path, resume: bool = False) -> None:
         print(f"  class weighting [{cw_scheme}]: {np.round(cw, 3).tolist()}")
 
     metrics_fns = build_metrics_fns(
-        loss        = trainer_cfg.get('loss', 'cross_entropy'),
+        loss        = trainer_cfg.get('loss', target_spec.loss),
         loss_kwargs = loss_kwargs,
+        metrics     = trainer_cfg.get('metrics'),
     )
+
+    # Fail fast if early stopping watches a metric that isn't being reported
+    # (only 'loss' is guaranteed; everything else must be listed in
+    # trainer.metrics). The patience metric is logged as '<split>/<name>'.
+    patience_metric = trainer_cfg.get('patience_metric', 'val/loss')
+    pm_name = patience_metric.split('/')[-1]
+    if pm_name not in metrics_fns:
+        raise ValueError(
+            f"trainer.patience_metric={patience_metric!r} watches '{pm_name}', "
+            f"which is not a reported metric. Add it to trainer.metrics "
+            f"(have: {sorted(metrics_fns)}) or set patience_metric to val/loss."
+        )
+
     trainer     = Trainer(model, metrics_fns, trainer_cfg)
 
     # Log full config so every run is reproducible from its artifact
@@ -480,8 +564,10 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     epoch_callbacks = [
         _make_attn_figure_callback(model, probe_batch, trainer.logger,
                                    data_config=config['data'],
+                                   class_names=class_names,
                                    fig_every=fig_every),
         _make_eval_plots_callback(model, val_loader, trainer.logger,
+                                  class_names=class_names,
                                   every_n_epochs=eval_plots_every),
         grad_flow_cb,
     ]
@@ -495,11 +581,23 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     )
     trainer.logger.log_figure('val/attn_mask', mask_fig, step=0)
 
-    if grad_hist_every > 0:
+    # Diagnostics row: weight/grad/activation distributions (and optionally a
+    # loss landscape). Logged at init (start-of-training reference) and again on
+    # the best params after fit(). Loss landscape is opt-in via its grid size.
+    diagnostics    = trainer_cfg.get('diagnostics', True)
+    ll_grid        = int(trainer_cfg.get('diagnostics_loss_landscape_grid', 0))
+
+    if grad_hist_every > 0 or diagnostics:
         # fit() re-creates the state with the same seed, so this initial
-        # state's gradients are the true step-0 snapshot.
+        # state is the true step-0 snapshot.
         init_state = trainer.init_state(train_probe_batch)
-        grad_flow_cb.log_now(init_state.params, step=0)
+        if grad_hist_every > 0:
+            grad_flow_cb.log_now(init_state.params, step=0)
+        if diagnostics:
+            # No loss landscape at init — it characterises the trained minimum.
+            _log_diagnostics(model, init_state.params, train_probe_batch,
+                             probe_batch, trainer.logger, step=0,
+                             loss_landscape_grid=0)
         del init_state
 
     # ------------------------------------------------------------------
@@ -511,6 +609,12 @@ def train(config_path: str | Path, resume: bool = False) -> None:
         epoch_callbacks = epoch_callbacks,
         step_callbacks  = step_callbacks,
     )
+
+    # End-of-training diagnostics on the best params (+ loss landscape).
+    if diagnostics:
+        _log_diagnostics(model, best_state.params, train_probe_batch,
+                         probe_batch, trainer.logger, step=int(best_state.step),
+                         loss_landscape_grid=ll_grid)
 
     # ------------------------------------------------------------------
     # Test
@@ -531,7 +635,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Train TCClassifier for sparse_obs_cross_attn experiment."
+        description="Train TCEncoder for sparse_obs_encoder experiment."
     )
     parser.add_argument(
         "config",

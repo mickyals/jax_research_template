@@ -32,36 +32,42 @@ Normalisation
 -------------
 Uses utils.jax_core.helpers.standardise and helpers.minmax_norm.
 
+This is a generic, domain-agnostic array DataModule (the template default for
+tabular / array experiments). On-the-fly sample-assembly experiments subclass
+BaseDataModule directly with their own setup/loaders (e.g.
+experiments.sparse_obs_encoder.data.datamodule.TCDataModule).
+
 Config schema  (YAML  data:  block)
 ------------------------------------
 Single dataset
     data:
-      dataset: ibtracs
-      npz_path: data/ibtracs_tc_clean.npz
-      multi_storm_path: data/ibtracs_multi_storm_times.npz  # optional
-      target_cols:   [USA_WIND, USA_PRES]
-      feature_cols:  [LAT, LON, STORM_SPEED, STORM_DIR]
-      feature_norm:  standard   # standard | minmax | none
+      dataset: mysource              # a name registered via @register_dataset
+      npz_path: data/mysource.npz    # forwarded to the dataset factory
+      target_cols:   [y0, y1]
+      feature_cols:  [x0, x1, x2]
+      feature_norm:  standard        # standard | minmax | minmax_01 | minmax_11 | none
       target_norm:   standard
-      train_shuffle: true       # optional; overrides train_loader default
-      val_shuffle:   false      # optional; overrides val_loader default
+      feature_norm_stats: {...}      # optional precomputed stats (skip fitting; see _apply_norm)
+      target_norm_stats:  {...}      # optional
+      train_shuffle: true            # optional; overrides train_loader default
+      val_shuffle:   false           # optional; overrides val_loader default
       split:
-        column: SEASON          # any column present in the dataset
-        train: {values: [2005, ..., 2020]}
-        val:   {values: [2021, 2022]}
-        test:  {values: [2023, 2024, 2025]}
+        column: group                # any column present in the dataset
+        train: {values: [...]}
+        val:   {values: [...]}
+        test:  {values: [...]}
 
 Multiple datasets
     data:
       datasets:
-        - {dataset: ibtracs, npz_path: ..., multi_storm_path: ...}
-        - {dataset: ibtracs, npz_path: ...}
-      target_cols:  [USA_WIND, USA_PRES]
-      feature_cols: [LAT, LON, STORM_SPEED, STORM_DIR]
+        - {dataset: mysource, npz_path: ...}
+        - {dataset: mysource, npz_path: ...}
+      target_cols:  [y0, y1]
+      feature_cols: [x0, x1, x2]
       feature_norm: standard
       target_norm:  standard
       split:
-        column: SEASON
+        column: group
         train: {values: [...]}
         val:   {values: [...]}
         test:  {values: [...]}
@@ -70,27 +76,9 @@ split is required and is shared across all sources — every source must
 have the named column. Splitting is a row filter (dataset.filter_column),
 so 'train'/'val'/'test' values must be disjoint (validated up front).
 
-Positional encoding  (optional; applied after to_Xy, before normalisation)
-    data:
-      ...
-      position_encoding_mode: unit_sphere   # storm_relative_polar | unit_sphere | domain_normalised
-      coord_cols: [LAT, LON]                # the two columns to encode (must be in feature_cols)
-
-      # storm_relative_polar only:
-      storm_coord_cols: [STORM_LAT, STORM_LON]  # storm centre columns; defaults to coord_cols
-      radius_km: 500.0
-
-      # domain_normalised only:
-      field_of_view:
-        lat_min:  0.0
-        lat_max: 30.0
-        lon_min: -100.0
-        lon_max:  -45.0
-
-    coord_cols are removed from X and replaced by the encoded output (3 columns
-    for storm_relative_polar / unit_sphere, 2 for domain_normalised).
-    storm_coord_cols (if different from coord_cols) are also removed from X.
-    All remaining feature_cols are preserved and concatenated after the encoding.
+Feature-engineering (e.g. encoding lat/lon columns) is the experiment's job, not
+this generic module's — see utils.geoscience.coordinates for reusable lat/lon
+encoders an experiment can apply to its feature matrix before normalisation.
 """
 
 from __future__ import annotations
@@ -290,51 +278,61 @@ def _split_dataset(dataset, split_config: dict, which: str):
 
 
 def _apply_norm(
-    tr: np.ndarray,
-    va: np.ndarray,
-    te: np.ndarray,
+    tr:     np.ndarray,
+    va:     np.ndarray,
+    te:     np.ndarray,
     method: str,
+    stats:  dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Fit normalisation on train, apply to all three splits.
+    """Fit normalization on train (or use precomputed stats), apply to all splits.
 
-    Uses utils.jax_core.helpers for the transform. Training statistics
-    are computed with np.nanmean / np.nanstd to tolerate NaN values in
-    sparse target columns.
+    Uses utils.jax_core.helpers for the transform. When ``stats`` is None the
+    statistics are fit on ``tr`` with np.nanmean / np.nanstd / np.nanmin /
+    np.nanmax (tolerating NaN in sparse columns); when ``stats`` is given they
+    are used verbatim (no fitting), so a config can supply known physical
+    bounds and val/test never leak into the fit.
 
     Parameters
     ----------
     tr, va, te : np.ndarray  shape (n_samples, n_cols)
-    method : str  'standard' | 'minmax' | 'none'
+    method : str
+        'standard' | 'minmax' (== 'minmax_01') | 'minmax_01' | 'minmax_11' | 'none'.
+    stats : dict, optional
+        Precomputed statistics. For 'standard': {'mean', 'std'}. For any
+        minmax variant: {'min', 'max'}. Each a length-n_cols array-like.
 
     Returns
     -------
     (tr_norm, va_norm, te_norm, stats_dict)
+        stats_dict records 'method' plus the fitted/used statistics, and is
+        what _invert_norm consumes.
     """
     if method == "standard":
-        mean = np.nanmean(tr, axis=0, keepdims=True)
-        std  = np.nanstd(tr,  axis=0, keepdims=True)
+        if stats is not None:
+            mean = np.asarray(stats["mean"], dtype=float)[None, :]
+            std  = np.asarray(stats["std"],  dtype=float)[None, :]
+        else:
+            mean = np.nanmean(tr, axis=0, keepdims=True)
+            std  = np.nanstd(tr,  axis=0, keepdims=True)
         return (
             np.array(standardise(tr, mean=mean, std=std)),
             np.array(standardise(va, mean=mean, std=std)),
             np.array(standardise(te, mean=mean, std=std)),
-            {
-                "method": "standard",
-                "mean": mean.squeeze(0),
-                "std":  std.squeeze(0),
-            },
+            {"method": "standard", "mean": mean.squeeze(0), "std": std.squeeze(0)},
         )
-    if method == "minmax":
-        lo = np.nanmin(tr, axis=0)
-        hi = np.nanmax(tr, axis=0)
+    if method in ("minmax", "minmax_01", "minmax_11"):
+        mode = "-11" if method == "minmax_11" else "01"
+        if stats is not None:
+            lo = np.asarray(stats["min"], dtype=float)
+            hi = np.asarray(stats["max"], dtype=float)
+        else:
+            lo = np.nanmin(tr, axis=0)
+            hi = np.nanmax(tr, axis=0)
         return (
-            np.array(minmax_norm(tr, lo, hi, mode="01")),
-            np.array(minmax_norm(va, lo, hi, mode="01")),
-            np.array(minmax_norm(te, lo, hi, mode="01")),
-            {
-                "method": "minmax",
-                "min": lo,
-                "max": hi,
-            },
+            np.array(minmax_norm(tr, lo, hi, mode=mode)),
+            np.array(minmax_norm(va, lo, hi, mode=mode)),
+            np.array(minmax_norm(te, lo, hi, mode=mode)),
+            {"method": method, "min": lo, "max": hi},
         )
     # 'none'
     return tr, va, te, {"method": "none"}
@@ -342,74 +340,14 @@ def _apply_norm(
 
 def _invert_norm(y: np.ndarray, stats: dict) -> np.ndarray:
     """Invert the normalisation applied by _apply_norm."""
-    if stats["method"] == "standard":
+    method = stats.get("method", "none")
+    if method == "standard":
         return y * stats["std"] + stats["mean"]
-    if stats["method"] == "minmax":
+    if method in ("minmax", "minmax_01"):
         return y * (stats["max"] - stats["min"]) + stats["min"]
+    if method == "minmax_11":
+        return (y + 1.0) / 2.0 * (stats["max"] - stats["min"]) + stats["min"]
     return y
-
-
-def _apply_position_encoding(
-    X:            np.ndarray,
-    feature_cols: list[str],
-    config:       dict,
-) -> np.ndarray:
-    """Replace coordinate columns in X with their positional encoding.
-
-    Supported modes: 'unit_sphere', 'domain_normalised'.
-    Coordinate columns are extracted by index in feature_cols, encoded,
-    and concatenated with the remaining columns.
-
-    Parameters
-    ----------
-    X : np.ndarray  shape (n, len(feature_cols))
-    feature_cols : list[str]
-    config : dict
-        Must contain 'position_encoding_mode' and 'coord_cols'.
-        domain_normalised also requires 'field_of_view' with lat/lon bounds.
-
-    Returns
-    -------
-    np.ndarray  shape (n, len(feature_cols) - n_dropped + enc_dim)
-    """
-    import numpy as _np
-
-    mode       = config["position_encoding_mode"]
-    coord_cols = config["coord_cols"]
-
-    try:
-        coord_idx = [feature_cols.index(c) for c in coord_cols]
-    except ValueError as exc:
-        raise KeyError(f"coord_cols column not found in feature_cols: {exc}") from exc
-
-    lat      = X[:, coord_idx[0]].astype(_np.float32)
-    lon      = X[:, coord_idx[1]].astype(_np.float32)
-    drop_idx = set(coord_idx)
-
-    if mode == "unit_sphere":
-        lat_r   = _np.radians(lat)
-        lon_r   = _np.radians(lon)
-        encoded = _np.stack([
-            _np.cos(lat_r) * _np.cos(lon_r),
-            _np.cos(lat_r) * _np.sin(lon_r),
-            _np.sin(lat_r),
-        ], axis=1)
-
-    elif mode == "domain_normalised":
-        fov      = config["field_of_view"]
-        lat_norm = 2.0 * (lat - fov["lat_min"]) / (fov["lat_max"] - fov["lat_min"]) - 1.0
-        lon_norm = 2.0 * (lon - fov["lon_min"]) / (fov["lon_max"] - fov["lon_min"]) - 1.0
-        encoded  = _np.stack([lat_norm, lon_norm], axis=1)
-
-    else:
-        raise ValueError(
-            f"Unknown position_encoding_mode '{mode}'. "
-            "Choose from: 'unit_sphere', 'domain_normalised'."
-        )
-
-    keep_idx = [i for i in range(X.shape[1]) if i not in drop_idx]
-    X_keep   = X[:, keep_idx] if keep_idx else _np.empty((X.shape[0], 0), dtype=X.dtype)
-    return _np.concatenate([X_keep, encoded], axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -417,91 +355,39 @@ def _apply_position_encoding(
 # ---------------------------------------------------------------------------
 
 class BaseDataModule(ABC):
-    """Protocol that every DataModule must satisfy.
+    """The contract every DataModule satisfies — exactly what the Trainer needs.
 
-    Primary interface for the Trainer:
+    The Trainer iterates LOADERS; it never touches in-memory arrays. So the
+    abstract surface is just:
         setup(config)
-        train_loader(batch_size, seed, shuffle) → ArrayLoader
-        val_loader(batch_size, shuffle)         → ArrayLoader
-        test_loader(batch_size, shuffle)        → ArrayLoader
+        train_loader(...) / val_loader(...) / test_loader(...)
+            → re-iterable objects yielding batch dicts
+    plus the optional conveniences ``manifest()`` and ``denormalise_targets()``
+    the Trainer calls for the run manifest and physical-unit recovery.
 
-    The array accessors (train_arrays / val_arrays / test_arrays) are kept
-    for inspection and testing but are not passed directly to the Trainer.
+    Array-backed datamodules (the generic tabular ``DataModule`` below) ALSO
+    expose ``train_arrays`` / ``val_arrays`` / ``test_arrays`` for inspection and
+    tests, but those belong to the array path — they are NOT part of this
+    contract. On-the-fly samplers (e.g.
+    experiments.sparse_obs_encoder.data.datamodule.TCDataModule) implement only
+    the loaders, with no arrays to stub out.
     """
 
     @abstractmethod
     def setup(self, config: dict) -> None:
-        """Load, split, and normalise. Called once before Trainer.fit()."""
+        """Load / prepare the splits. Called once before Trainer.fit()."""
 
     @abstractmethod
-    def train_arrays(self) -> dict[str, jnp.ndarray]:
-        """{'X': features, 'y': targets} for the training split (all rows)."""
+    def train_loader(self, batch_size: int, **kwargs):
+        """Re-iterable of training batches — the object Trainer.fit iterates."""
 
     @abstractmethod
-    def val_arrays(self) -> dict[str, jnp.ndarray]:
-        """{'X': features, 'y': targets} for the validation split (all rows)."""
+    def val_loader(self, batch_size: int, **kwargs):
+        """Re-iterable of validation batches."""
 
     @abstractmethod
-    def test_arrays(self) -> dict[str, jnp.ndarray]:
-        """{'X': features, 'y': targets} for the test split (all rows)."""
-
-    # ------------------------------------------------------------------
-    # Loader interface — default implementations wrap the array accessors.
-    # Subclasses may override to customise drop_last, seed, or to serve
-    # data from disk rather than from in-memory arrays.
-    # ------------------------------------------------------------------
-
-    def train_loader(
-        self,
-        batch_size: int,
-        seed:       int  = 0,
-        shuffle:    bool = True,
-    ) -> ArrayLoader:
-        """Return an ArrayLoader over the training split.
-
-        Parameters
-        ----------
-        batch_size : int
-        seed : int
-            Base RNG seed.  Each epoch gets a different shuffle via
-            fold_in so successive passes vary deterministically.
-        shuffle : bool
-            True (default) — reshuffle every epoch.
-            False          — fixed order (e.g. for curriculum learning or
-                             time-series data where order matters).
-        """
-        return ArrayLoader(
-            self.train_arrays(), batch_size,
-            shuffle=shuffle, seed=seed, drop_last=True,
-        )
-
-    def val_loader(
-        self,
-        batch_size: int,
-        shuffle:    bool = False,
-    ) -> ArrayLoader:
-        """Return an ArrayLoader over the validation split.
-
-        drop_last=False so every sample contributes to validation metrics.
-        """
-        return ArrayLoader(
-            self.val_arrays(), batch_size,
-            shuffle=shuffle, drop_last=False,
-        )
-
-    def test_loader(
-        self,
-        batch_size: int,
-        shuffle:    bool = False,
-    ) -> ArrayLoader:
-        """Return an ArrayLoader over the test split.
-
-        drop_last=False so every sample contributes to test metrics.
-        """
-        return ArrayLoader(
-            self.test_arrays(), batch_size,
-            shuffle=shuffle, drop_last=False,
-        )
+    def test_loader(self, batch_size: int, **kwargs):
+        """Re-iterable of test batches — the object Trainer.test iterates."""
 
     @property
     def norm_stats(self) -> dict:
@@ -568,11 +454,12 @@ class DataModule(BaseDataModule):
         multiple datasets (config has a 'datasets' list).  All sources must
         share the same feature_cols and target_cols.
         """
-        target_cols  = config["target_cols"]
-        feature_cols = config["feature_cols"]
-        feat_norm    = config.get("feature_norm", "standard")
-        tgt_norm     = config.get("target_norm",  "standard")
-        enc_mode     = config.get("position_encoding_mode")
+        target_cols   = config["target_cols"]
+        feature_cols  = config["feature_cols"]
+        feat_norm     = config.get("feature_norm", "standard")
+        tgt_norm      = config.get("target_norm",  "standard")
+        feat_stats_pre = config.get("feature_norm_stats")   # optional precomputed
+        tgt_stats_pre  = config.get("target_norm_stats")    # optional precomputed
 
         split_config = config["split"]
         validate_disjoint_groups({
@@ -602,11 +489,6 @@ class DataModule(BaseDataModule):
             X_va, y_va = val_ds.to_Xy(target_cols, feature_cols)
             X_te, y_te = test_ds.to_Xy(target_cols, feature_cols)
 
-            if enc_mode is not None:
-                X_tr = _apply_position_encoding(X_tr, feature_cols, config)
-                X_va = _apply_position_encoding(X_va, feature_cols, config)
-                X_te = _apply_position_encoding(X_te, feature_cols, config)
-
             tr_X_parts.append(X_tr);  tr_y_parts.append(y_tr)
             va_X_parts.append(X_va);  va_y_parts.append(y_va)
             te_X_parts.append(X_te);  te_y_parts.append(y_te)
@@ -618,8 +500,10 @@ class DataModule(BaseDataModule):
         X_te = np.concatenate(te_X_parts, axis=0)
         y_te = np.concatenate(te_y_parts, axis=0)
 
-        X_tr, X_va, X_te, feat_stats = _apply_norm(X_tr, X_va, X_te, feat_norm)
-        y_tr, y_va, y_te, tgt_stats  = _apply_norm(y_tr, y_va, y_te, tgt_norm)
+        X_tr, X_va, X_te, feat_stats = _apply_norm(
+            X_tr, X_va, X_te, feat_norm, stats=feat_stats_pre)
+        y_tr, y_va, y_te, tgt_stats  = _apply_norm(
+            y_tr, y_va, y_te, tgt_norm, stats=tgt_stats_pre)
 
         self._train      = {"X": jnp.array(X_tr), "y": jnp.array(y_tr)}
         self._val        = {"X": jnp.array(X_va), "y": jnp.array(y_va)}
@@ -721,7 +605,7 @@ class DataModule(BaseDataModule):
 # This module ships no built-in dataset factories — keeping it free of any
 # dependency on specific experiments. A dataset source registers itself with
 # @register_dataset("NAME") in its own module (e.g.
-# experiments/sparse_obs_cross_attn/data/sources/ibtracs.py registers
+# experiments/sparse_obs_encoder/data/sources/ibtracs.py registers
 # "IBTRACS"); importing that module before DataModule.from_config() makes the
 # name available.
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 """
-experiments/sparse_obs_cross_attn/plotting/plotting.py
+experiments/sparse_obs_encoder/plotting/plotting.py
 
-Plotting functions for the sparse_obs_cross_attn experiment: confusion
+Plotting functions for the sparse_obs_encoder experiment: confusion
 matrix / per-class metric charts, and geographic attention visualizations.
 """
 
@@ -13,8 +13,7 @@ import numpy as np
 import jax
 import matplotlib.pyplot as plt
 
-from experiments.sparse_obs_cross_attn.data.encoding import decode_domain
-from experiments.sparse_obs_cross_attn.train.model import TCClassifier
+from experiments.sparse_obs_encoder.train.model import TCEncoder
 from utils.plotting._style import _value_scatter
 from utils.plotting.curves import plot_grouped_bars
 from utils.plotting.fields import plot_heatmap, plot_scatter_overlay
@@ -95,7 +94,7 @@ def plot_class_metrics(
 # ---------------------------------------------------------------------------
 
 def extract_attention_weights(
-    model:     TCClassifier,
+    model:     TCEncoder,
     variables: dict,
     batch:     dict,
 ) -> np.ndarray:
@@ -103,11 +102,11 @@ def extract_attention_weights(
 
     Returns
     -------
-    np.ndarray float32 (num_layers, B, num_heads, N+1, N+1)
-        Full attention matrices from every encoder layer.
-        N = max_stations; token N (the last) is the query. The query row
-        of layer l is ``weights[l, :, :, -1, :]`` — its last element is
-        the query's self-attention weight; padding positions carry ≈ 0.
+    np.ndarray float32 (num_layers, B, num_heads, 1+N, 1+N)
+        Full attention matrices from every encoder layer. CLS-first:
+        token 0 is the query, tokens 1..N are stations (N = max_stations).
+        The query row of layer l is ``weights[l, :, :, 0, :]`` — its first
+        element is the query's self-attention weight; padding positions ≈ 0.
     """
     apply_fn = jax.jit(
         lambda X: model.apply(variables, X, train=False, return_weights=True)
@@ -125,10 +124,10 @@ def plot_attention_matrix_grid(
     """Layers × heads grid of full (N+1)×(N+1) attention matrices.
 
     One panel per (layer, head) for a single sample, plain ``imshow`` with
-    NO per-token tick labels (unreadable at N+1 = 65) and a shared colour
-    scale. The query row/column (last token) is marked with dashed lines —
-    the all-False stations→query column should read as an empty last
-    column, and padding stations as empty trailing rows/columns.
+    NO per-token tick labels (unreadable at 1+N = 65) and a shared colour
+    scale. CLS-first: the query row/column (first token, top-left) is marked
+    with dashed lines — the all-False stations→query column reads as an empty
+    first column, and padding stations as empty rows/columns.
 
     Parameters
     ----------
@@ -158,9 +157,9 @@ def plot_attention_matrix_grid(
             im = ax.imshow(w[l, h], cmap=cmap, vmin=0.0, vmax=vmax,
                            origin='upper', aspect='equal',
                            interpolation='nearest')
-            # Query token = last row/column
-            ax.axhline(T - 1.5, color='w', linewidth=0.6, linestyle='--')
-            ax.axvline(T - 1.5, color='w', linewidth=0.6, linestyle='--')
+            # Query/CLS token = first row/column (CLS-first, top-left)
+            ax.axhline(0.5, color='w', linewidth=0.6, linestyle='--')
+            ax.axvline(0.5, color='w', linewidth=0.6, linestyle='--')
             ax.set_xticks([])
             ax.set_yticks([])
             if l == 0:
@@ -187,11 +186,12 @@ def plot_attention_mask(
 
     Renders the exact boolean mask the model builds (single source of
     truth: model.build_attention_mask) for one sample's station_mask.
-    Default: stations are blocked from attending to the query (empty last
-    column except the query's own self-attention cell); with
-    ``full_self_attention=True`` that block opens (complete self-attention).
-    Padding-station columns are blocked for every token. Plain imshow, no
-    per-token tick labels; the query row/column is marked with dashed lines.
+    CLS-first: token 0 is the query. Default: stations are blocked from
+    attending to the query (empty first column except the query's own
+    self-attention cell); with ``full_self_attention=True`` that block opens
+    (complete self-attention). Padding-station columns are blocked for every
+    token. Plain imshow, no per-token tick labels; the query row/column
+    (top-left) is marked with dashed lines.
 
     Parameters
     ----------
@@ -205,7 +205,7 @@ def plot_attention_mask(
     -------
     plt.Figure
     """
-    from experiments.sparse_obs_cross_attn.train.model import (
+    from experiments.sparse_obs_encoder.train.model import (
         build_attention_mask,
     )
     import jax.numpy as jnp
@@ -224,12 +224,12 @@ def plot_attention_mask(
     fig, ax = plt.subplots(figsize=(6.5, 6))
     im = ax.imshow(mask.astype(float), cmap='Greys_r', vmin=0.0, vmax=1.0,
                    origin='upper', aspect='equal', interpolation='nearest')
-    ax.axhline(T - 1.5, color='red', linewidth=0.8, linestyle='--')
-    ax.axvline(T - 1.5, color='red', linewidth=0.8, linestyle='--')
+    ax.axhline(0.5, color='red', linewidth=0.8, linestyle='--')
+    ax.axvline(0.5, color='red', linewidth=0.8, linestyle='--')
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_xlabel('to token (last = query)')
-    ax.set_ylabel('from token (last = query)')
+    ax.set_xlabel('to token (first = query)')
+    ax.set_ylabel('from token (first = query)')
     ax.set_title(
         f'Attention mask — white = allowed, black = blocked\n'
         f'{_desc}; {T - 1 - n_real} padding columns blocked',
@@ -252,6 +252,8 @@ def plot_attention_geographic(
     head_agg:          str   = 'mean',
     geo:               bool | dict = False,
     storm_latlon:      Optional[tuple[float, float]] = None,
+    station_latlon:    Optional[tuple[np.ndarray, np.ndarray]] = None,
+    query_latlon:      Optional[tuple[float, float]] = None,
 ) -> plt.Figure:
     """Plot per-station attention weight for one sample.
 
@@ -261,16 +263,19 @@ def plot_attention_geographic(
     0.25/0.5/0.75/1.0 of radius_km. Bespoke to this plot, so it composes
     ``_value_scatter`` directly.
 
-    For ``domain`` encoding: Cartesian axes — decoded lat/lon from the
-    normalised coord representation.  Query position marked with a star.
-    Renders via ``utils.plotting.fields.plot_scatter_overlay``.
+    For ``domain`` encoding: lat/lon axes. The decoded positions are supplied
+    by the caller (``station_latlon`` / ``query_latlon``) rather than decoded
+    here — this module is a viz layer and does not depend on the experiment's
+    coordinate encoding; the attention callback decodes via
+    ``data.encoding.decode_domain`` and passes the result in. Query position
+    marked with a star. Renders via ``utils.plotting.fields.plot_scatter_overlay``.
 
     Parameters
     ----------
-    weights : np.ndarray (B, H, N+1)
+    weights : np.ndarray (B, H, 1+N)
         Query-row attention of ONE layer — slice the output of
-        extract_attention_weights(), e.g. ``all_w[-1][:, :, -1, :]`` for
-        the last layer's query row.
+        extract_attention_weights(), e.g. ``all_w[-1][:, :, 0, :]`` for
+        the last layer's query row (CLS-first: the query is token 0).
     batch : dict
         Raw batch dict (contains 'X' with station_coords, station_mask,
         query_coords).
@@ -297,17 +302,23 @@ def plot_attention_geographic(
         for the unit_circle geo map (available as
         batch['meta']['query_lat']/['query_lon']). Ignored unless
         unit_circle mode with geo enabled.
+    station_latlon : (lats, lons), optional
+        DOMAIN mode only: decoded latitudes/longitudes of the REAL (masked)
+        stations, aligned with the masked attention weights — decoded by the
+        caller (data.encoding.decode_domain). Required for domain encoding.
+    query_latlon : (lat, lon), optional
+        DOMAIN mode only: decoded query/storm position in degrees. Required
+        for domain encoding.
     """
     X            = batch['X']
     coords       = np.asarray(X['station_coords'][sample_idx])   # (N, 2)
     mask         = np.asarray(X['station_mask'][sample_idx])     # (N,) bool
-    query_coords = np.asarray(X['query_coords'][sample_idx])     # (2,)
 
-    # Aggregate attention over heads: (H, N+1) → (N+1,) then drop query self-weight
-    w = weights[sample_idx]                                       # (H, N+1)
+    # Aggregate attention over heads: (H, 1+N) → (1+N,) then drop query self-weight.
+    # CLS-first: token 0 is the query's self-attention, tokens 1..N are stations.
+    w = weights[sample_idx]                                       # (H, 1+N)
     w_station = w.mean(axis=0) if head_agg == 'mean' else w.max(axis=0)
-    N = mask.shape[0]
-    w_station = w_station[:N]                                     # (N,) drop query self-attn
+    w_station = w_station[1:]                                     # (N,) drop query self-attn
     w_real = w_station[mask]                                      # (n_real,)
 
     if location_encoding == 'unit_circle':
@@ -367,6 +378,16 @@ def plot_attention_geographic(
             ax.set_aspect('equal')
             ax.set_xlabel('East offset (× radius)')
             ax.set_ylabel('North offset (× radius)')
+        else:
+            # Re-assert the radius-box extent AFTER plotting: scatter/rings
+            # autoscale the GeoAxes to the (clustered) data, which can shrink
+            # the view and clip the coastlines. Pinning it back guarantees the
+            # cfeatures within the radius box render. ax.projection is the
+            # azimuthal CRS whose native units are metres from the centre.
+            ax.set_extent(
+                [-1.08 * r_m, 1.08 * r_m, -1.08 * r_m, 1.08 * r_m],
+                crs=ax.projection,
+            )
         ax.set_title('Self-attention weights (query row)\n'
                      '(storm-centred local map, north up)',
                      pad=15, fontsize=10)
@@ -374,16 +395,19 @@ def plot_attention_geographic(
         fig.tight_layout()
         return fig
 
-    # domain
+    # domain — positions are decoded by the caller (this viz layer does not
+    # import the experiment's coordinate encoding).
     if fov_lat is None or fov_lon is None:
         raise ValueError("fov_lat and fov_lon required for domain encoding.")
+    if station_latlon is None or query_latlon is None:
+        raise ValueError(
+            "plot_attention_geographic: domain encoding requires station_latlon "
+            "and query_latlon, decoded by the caller "
+            "(data.encoding.decode_domain) — plotting does not decode coords."
+        )
 
-    lats, lons = decode_domain(
-        coords[mask, 0], coords[mask, 1], fov_lat, fov_lon,
-    )
-    q_lat, q_lon = decode_domain(
-        query_coords[0], query_coords[1], fov_lat, fov_lon,
-    )
+    lats, lons   = station_latlon          # decoded REAL (masked) stations
+    q_lat, q_lon = query_latlon
     lat_min, lat_max = fov_lat
     lon_min, lon_max = fov_lon
 
