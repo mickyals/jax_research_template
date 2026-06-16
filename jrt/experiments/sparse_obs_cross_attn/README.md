@@ -115,8 +115,26 @@ Stations within the radius may have missing values for some variables. Missing e
     query_token = token_proj(query_input)                                  (B, 1, D)
 4.  tokens  = concat([query_token, station_tokens], axis=1)                 (B, 1+N, D)   CLS-first
 5.  encoded = TransformerEncoder(tokens, mask=asymmetric_mask)              (B, 1+N, D)
-6.  logits  = head(LayerNorm(encoded[:, 0, :]))                             (B, 9)
+6.  z       = LayerNorm(encoded[:, 0, :])                                   (B, D)        TCEncoder output
+7.  logits  = head(z)                                                       (B, 9)        linear probe
 ```
+
+### Encoder / head split (frozen-encoder probing)
+
+`TCClassifier` = **`TCEncoder`** (steps 1–6 above: token construction, Transformer, final LayerNorm) + a **pure-linear `nn.Dense` head** (step 7). The param tree therefore splits cleanly:
+
+| Subtree | Contents | Role |
+|---------|----------|------|
+| `params['encoder']` | `token_proj`, `query_obs_slots`, `[query_pos_slots]`, `transformer`, `norm` | the trained, transferable asset |
+| `params['head']` | `kernel`, `bias` | target-specific linear probe (swappable) |
+
+This is the seam for the research question — *does a frozen encoder + a fresh head transfer to another target column?* Three helpers in `model.py` make it a few operations:
+
+- `split_encoder_head(params)` → `(encoder_params, head_params)`
+- `attach_encoder(fresh_params, encoder_params)` → load a trained encoder into a freshly-initialised model that carries a new head
+- `encoder_freeze_labels(params)` → an optax `multi_transform` label tree (`'frozen'` encoder / `'trainable'` head) to freeze the encoder during probe training
+
+The head is a *pure* `Dense` over the normalised CLS embedding (the final norm lives in the encoder), so a probe measures linear separability of the frozen representation. *(The train-time wiring to load an encoder checkpoint and freeze it is added alongside the first probe run — it needs a trained encoder to exist first.)*
 
 ---
 

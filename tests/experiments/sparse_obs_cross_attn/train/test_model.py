@@ -369,7 +369,7 @@ def test_learnable_query_pos_ignores_query_coords():
     X2 = dict(X); X2['query_coords'] = X['query_coords'] + 1.0
     out1 = model.apply(vs, X2, train=False)
     assert jnp.allclose(out0, out1), "learnable CLS must ignore query_coords"
-    assert 'query_pos_slots' in vs['params']
+    assert 'query_pos_slots' in vs['params']['encoder']
 
 
 def test_query_pos_from_coords_uses_query_coords():
@@ -382,7 +382,66 @@ def test_query_pos_from_coords_uses_query_coords():
     X2 = dict(X); X2['query_coords'] = X['query_coords'] + 1.0
     out1 = model.apply(vs, X2, train=False)
     assert not jnp.allclose(out0, out1), "CLS must use query_coords under domain"
-    assert 'query_pos_slots' not in vs['params']
+    assert 'query_pos_slots' not in vs['params']['encoder']
+
+
+# ---------------------------------------------------------------------------
+# Encoder / head split — frozen-encoder probing (r4/r5)
+# ---------------------------------------------------------------------------
+
+def test_param_tree_splits_encoder_and_head():
+    """TCClassifier params have exactly an 'encoder' subtree and a 'head'."""
+    model = _make_model()
+    X  = _fake_batch()
+    vs = model.init(KEY, X, train=False)
+    assert set(vs['params'].keys()) == {'encoder', 'head'}
+    # head is a pure linear Dense (kernel + bias), no LayerNorm in the head
+    assert set(vs['params']['head'].keys()) == {'kernel', 'bias'}
+    # the final norm lives inside the encoder asset
+    assert 'norm' in vs['params']['encoder']
+
+
+def test_split_and_attach_encoder_roundtrip():
+    """split_encoder_head + attach_encoder transplant the encoder into a fresh
+    model with a new head — the frozen-encoder transfer operation."""
+    from experiments.sparse_obs_cross_attn.train.model import (
+        split_encoder_head, attach_encoder, TCEncoder,
+    )
+    model = _make_model()
+    X  = _fake_batch()
+    vs = model.init(KEY, X, train=False)
+    enc_params, head_params = split_encoder_head(vs['params'])
+    assert 'head' in head_params and 'encoder' not in head_params
+
+    # The standalone encoder runs on the split params → (B, D) CLS embedding.
+    encoder = TCEncoder(embed_dim=EMBED, num_heads=HEADS, num_layers=LAYERS,
+                        fourier_dim=16, n_obs_features=F)
+    z = encoder.apply({'params': enc_params}, X, train=False)
+    assert z.shape == (B, EMBED) and jnp.all(jnp.isfinite(z))
+
+    # Attach the trained encoder into a freshly initialised model (new head).
+    fresh  = _make_model().init(jax.random.PRNGKey(7), X, train=False)['params']
+    merged = attach_encoder(fresh, enc_params)
+    assert merged['encoder'] is enc_params                       # encoder transplanted
+    # the head keeps its fresh init (differs from the original model's head)
+    assert not jnp.allclose(merged['head']['kernel'],
+                            vs['params']['head']['kernel'])
+    logits = model.apply({'params': merged}, X, train=False)
+    assert logits.shape == (B, N_CLASSES) and jnp.all(jnp.isfinite(logits))
+
+
+def test_encoder_freeze_labels_partition():
+    """encoder_freeze_labels marks every encoder leaf 'frozen' and the head
+    leaves 'trainable', matching the param structure."""
+    from experiments.sparse_obs_cross_attn.train.model import encoder_freeze_labels
+    model = _make_model()
+    X  = _fake_batch()
+    vs = model.init(KEY, X, train=False)
+    labels = encoder_freeze_labels(vs['params'])
+    enc_labels  = set(jax.tree_util.tree_leaves(labels['encoder']))
+    head_labels = set(jax.tree_util.tree_leaves(labels['head']))
+    assert enc_labels == {'frozen'}
+    assert head_labels == {'trainable'}
 
 
 # ---------------------------------------------------------------------------
