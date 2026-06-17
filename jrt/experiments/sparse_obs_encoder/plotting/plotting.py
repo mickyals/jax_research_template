@@ -267,7 +267,7 @@ def plot_attention_geographic(
     by the caller (``station_latlon`` / ``query_latlon``) rather than decoded
     here — this module is a viz layer and does not depend on the experiment's
     coordinate encoding; the attention callback decodes via
-    ``data.encoding.decode_domain`` and passes the result in. Query position
+    ``data.transforms.encoding.decode_domain`` and passes the result in. Query position
     marked with a star. Renders via ``utils.plotting.fields.plot_scatter_overlay``.
 
     Parameters
@@ -305,7 +305,7 @@ def plot_attention_geographic(
     station_latlon : (lats, lons), optional
         DOMAIN mode only: decoded latitudes/longitudes of the REAL (masked)
         stations, aligned with the masked attention weights — decoded by the
-        caller (data.encoding.decode_domain). Required for domain encoding.
+        caller (data.transforms.encoding.decode_domain). Required for domain encoding.
     query_latlon : (lat, lon), optional
         DOMAIN mode only: decoded query/storm position in degrees. Required
         for domain encoding.
@@ -403,7 +403,7 @@ def plot_attention_geographic(
         raise ValueError(
             "plot_attention_geographic: domain encoding requires station_latlon "
             "and query_latlon, decoded by the caller "
-            "(data.encoding.decode_domain) — plotting does not decode coords."
+            "(data.transforms.encoding.decode_domain) — plotting does not decode coords."
         )
 
     lats, lons   = station_latlon          # decoded REAL (masked) stations

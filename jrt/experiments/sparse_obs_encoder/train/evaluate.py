@@ -43,7 +43,7 @@ import matplotlib.pyplot as plt
 import yaml
 
 from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
-from experiments.sparse_obs_encoder.data.encoding import decode_domain
+from experiments.sparse_obs_encoder.data.transforms.encoding import decode_domain
 from experiments.sparse_obs_encoder.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
 from experiments.sparse_obs_encoder.train.metrics import build_metrics_fns
 from experiments.sparse_obs_encoder.train.model import TCEncoder
@@ -76,7 +76,7 @@ def domain_latlon_for_sample(batch, sample_idx, fov_lat, fov_lon):
     REAL (masked) stations of ``batch`` sample ``sample_idx``. The attention
     plotter takes these pre-decoded positions so the plotting layer stays free
     of the experiment's coordinate encoding (decode_domain lives in
-    data/encoding.py) — see plot_attention_geographic (plan r9/r17).
+    data/transforms/encoding.py) — see plot_attention_geographic (plan r9/r17).
     """
     X      = batch['X']
     coords = np.asarray(X['station_coords'][sample_idx])   # (N, 2)
@@ -451,9 +451,11 @@ def evaluate(
     # static asymmetric-mask figure, all from the first batch
     # ------------------------------------------------------------------
     if n_attn_samples > 0:
-        loc_enc  = config['data'].get('location_encoding', 'unit_circle')
-        fov_lat  = config['data'].get('fov_lat')
-        fov_lon  = config['data'].get('fov_lon')
+        # Source the coordinate convention + FOV from the InputSpec (single
+        # source of truth; same pattern as dm.target_spec).
+        loc_enc  = dm.input_spec.location_encoding
+        fov_lat  = dm.input_spec.fov_lat
+        fov_lon  = dm.input_spec.fov_lon
         rad_km   = config['data'].get('radius_km', 500.0)
 
         attn_batch   = exmp_batch  # first batch reused
@@ -496,7 +498,7 @@ def evaluate(
                 if batch_meta is not None else None
             )
             # Domain mode: decode coords→lat/lon here (the plotter no longer
-            # depends on data.encoding); unit_circle passes None (unused).
+            # depends on data.transforms.encoding); unit_circle passes None (unused).
             station_latlon, query_latlon = (
                 domain_latlon_for_sample(attn_batch, i, fov_lat, fov_lon)
                 if loc_enc == 'domain' else (None, None)

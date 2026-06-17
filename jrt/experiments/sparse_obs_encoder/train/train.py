@@ -157,7 +157,7 @@ def _make_attn_figure_callback(
         title   = f'true: {true_c}, pred: {pred_c}'
 
         # Domain mode: decode coords→lat/lon here (the plotter no longer
-        # depends on data.encoding); unit_circle passes None (unused).
+        # depends on data.transforms.encoding); unit_circle passes None (unused).
         station_latlon, query_latlon = (
             domain_latlon_for_sample(probe_batch, 0, fov_lat, fov_lon)
             if loc_enc == 'domain' else (None, None)

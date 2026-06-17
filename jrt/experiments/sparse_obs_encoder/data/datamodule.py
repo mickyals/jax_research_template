@@ -47,6 +47,7 @@ from experiments.sparse_obs_encoder.data.sources.ibtracs import IBTrACSDataset
 from experiments.sparse_obs_encoder.data.sources.insitu_land import InsituLandDataset
 from experiments.sparse_obs_encoder.data.dataset import TCDataset
 from experiments.sparse_obs_encoder.data.splits import resolve_splits
+from experiments.sparse_obs_encoder.data.inputs import resolve_input
 from experiments.sparse_obs_encoder.data.targets import resolve_target
 
 
@@ -481,29 +482,26 @@ class TCDataModule(BaseDataModule):
         obs_path          = config['insitu_obs_path']
         meta_path         = config['insitu_meta_path']
         reliability       = config.get('reliability_levels', ['always_active', 'mostly_active'])
-        obs_vars          = config.get('obs_vars', None)
         radius_km         = float(config.get('radius_km', 500.0))
         time_window_h     = float(config.get('time_window_hours', 3.0))
         max_stations      = int(config.get('max_stations', 64))
         min_stations      = int(config.get('min_stations', 1))
         buf_hours         = float(config.get('background_buffer_hours', 6.0))
-        location_encoding = config.get('location_encoding', 'unit_circle')
-        obs_normalisation = config.get('obs_normalisation', 'minmax_01')
 
-        # obs_bounds: dict[var, [min, max]] or dict[var, [mean, std]] for standardise
-        obs_bounds_raw = config.get('obs_bounds', None)
-        obs_bounds: Optional[dict[str, tuple[float, float]]] = None
-        if obs_bounds_raw is not None:
-            obs_bounds = {k: tuple(v) for k, v in obs_bounds_raw.items()}
+        # Input configuration (data.obs_vars / obs_normalisation / obs_bounds /
+        # location_encoding / fov_*) — drives the observation variables, their
+        # normalisation, the coordinate encoding, and the FOV bounds (see
+        # data/inputs.py). The encoder stays input-agnostic.
+        self._input_spec         = resolve_input(config)
 
         self._batch_size         = int(config.get('batch_size', 64))
         self._tc_fraction        = float(config.get('tc_fraction', 0.5))
-        self._fov_lat            = tuple(config.get('fov_lat', [0.0, 30.0]))
-        self._fov_lon            = tuple(config.get('fov_lon', [-100.0, -45.0]))
+        # FOV bounds live on the InputSpec (single source of truth) — used here
+        # for the loaders' background sampling and the background pool.
+        self._fov_lat            = self._input_spec.fov_lat
+        self._fov_lon            = self._input_spec.fov_lon
         self._max_stations       = max_stations
         self._min_stations       = min_stations
-        self._location_encoding  = location_encoding
-        self._obs_normalisation  = obs_normalisation
         # Prediction target (data.target) — drives the label, head size, loss,
         # metrics, and class names downstream (see data/targets.py). None →
         # the default 'organisation' 9-class ordinal scale.
@@ -538,13 +536,8 @@ class TCDataModule(BaseDataModule):
                 time_window_hours=time_window_h,
                 max_stations=max_stations,
                 min_stations=min_stations,
-                obs_vars=obs_vars,
                 background_timestamps=bg_pool,
-                location_encoding=location_encoding,
-                fov_lat=self._fov_lat,
-                fov_lon=self._fov_lon,
-                obs_bounds=obs_bounds,
-                obs_normalisation=obs_normalisation,
+                inputs=self._input_spec,
                 target=self._target_spec,
             )
             setattr(self, f'_{split_name}_ds', ds)
@@ -621,6 +614,13 @@ class TCDataModule(BaseDataModule):
         n_classes, class_names, and the default loss downstream."""
         return self._target_spec
 
+    @property
+    def input_spec(self):
+        """The resolved InputSpec (data.obs_vars/obs_normalisation/obs_bounds/
+        location_encoding/fov_*) — single source of truth for the observation
+        variables, normalisation, coordinate encoding, and FOV bounds."""
+        return self._input_spec
+
     # ------------------------------------------------------------------
     # Station-count diagnostics
     # ------------------------------------------------------------------
@@ -694,7 +694,7 @@ class TCDataModule(BaseDataModule):
 
         print()
         print("─" * 58)
-        print(f"Data  ({self._location_encoding} · {self._obs_normalisation})")
+        print(f"Data  ({self._input_spec.location_encoding} · {self._input_spec.normalisation})")
         print(f"  {'split':<6}  {'years':>16}  {'SIDs':>6}")
         for name in ('train', 'val', 'test'):
             entry = self._manifest[name]

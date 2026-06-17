@@ -11,6 +11,7 @@ import pytest
 from experiments.sparse_obs_encoder.data.sources.ibtracs import IBTrACSDataset, status_sshs_to_class
 from experiments.sparse_obs_encoder.data.sources.insitu_land import InsituLandDataset
 from experiments.sparse_obs_encoder.data.dataset import TCDataset
+from experiments.sparse_obs_encoder.data.inputs import InputSpec
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +288,8 @@ class TestBackgroundSample:
 
 class TestLocationEncoding:
 
-    def _make_ds(self, tmp_path, encoding, **kwargs):
+    def _make_ds(self, tmp_path, encoding,
+                 fov_lat=(0.0, 30.0), fov_lon=(-100.0, -45.0)):
         ib_path, ms_path, base_ns = _make_ibtracs(tmp_path)
         obs_path, meta_path = _make_insitu(tmp_path, base_ns)
         ibtracs = IBTrACSDataset(ib_path, ms_path)
@@ -299,8 +301,9 @@ class TestLocationEncoding:
             time_window_hours=3.0,
             max_stations=8,
             min_stations=1,
-            location_encoding=encoding,
-            **kwargs,
+            inputs=InputSpec(
+                location_encoding=encoding, fov_lat=fov_lat, fov_lon=fov_lon,
+            ),
         )
 
     def test_unit_circle_query_coords_are_zeros(self, tmp_path):
@@ -363,10 +366,6 @@ class TestLocationEncoding:
         coords = s['station_coords'][:n_real]
         assert np.all(np.abs(coords) <= np.pi / 2 + 1e-5)
 
-    def test_invalid_location_encoding_raises(self, tmp_path):
-        with pytest.raises(ValueError, match="location_encoding"):
-            self._make_ds(tmp_path, 'polar')
-
 
 # ---------------------------------------------------------------------------
 # Obs normalisation
@@ -395,8 +394,9 @@ class TestObsNormalisation:
             time_window_hours=3.0,
             max_stations=8,
             min_stations=1,
-            obs_bounds=obs_bounds,
-            obs_normalisation=obs_normalisation,
+            inputs=InputSpec(
+                obs_bounds=obs_bounds, normalisation=obs_normalisation,
+            ),
         )
 
     def test_no_bounds_obs_not_normalised(self, tmp_path):
@@ -440,10 +440,6 @@ class TestObsNormalisation:
             real_mask = s['obs_mask'][:n_real]
             assert (real_obs[~real_mask] == 0.0).all(), f"failed for mode={mode}"
 
-    def test_invalid_obs_normalisation_raises(self, tmp_path):
-        with pytest.raises(ValueError, match="obs_normalisation"):
-            self._make_ds(tmp_path, obs_normalisation='zscore')
-
 
 # ---------------------------------------------------------------------------
 # Derived wind components (decision 18)
@@ -458,7 +454,8 @@ class TestWindDecomposition:
         'wind_north':                (-115.0,  115.0),
     }
 
-    def _make_ds(self, tmp_path, wind_speed, wind_dir, **kwargs):
+    def _make_ds(self, tmp_path, wind_speed, wind_dir,
+                 obs_bounds=None, obs_normalisation='minmax_01'):
         """TCDataset over a fixture with controlled wind values on every row."""
         ib_path, ms_path, base_ns = _make_ibtracs(tmp_path)
         obs_path, meta_path = _make_insitu(tmp_path, base_ns)
@@ -478,8 +475,11 @@ class TestWindDecomposition:
             time_window_hours=3.0,
             max_stations=8,
             min_stations=1,
-            obs_vars=self._WIND_VARS,
-            **kwargs,
+            inputs=InputSpec(
+                obs_vars=tuple(self._WIND_VARS),
+                obs_bounds=obs_bounds,
+                normalisation=obs_normalisation,
+            ),
         )
 
     def test_fetch_vars_expand_derived_names(self, tmp_path):

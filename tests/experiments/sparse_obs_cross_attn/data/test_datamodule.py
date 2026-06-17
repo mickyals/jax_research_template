@@ -415,9 +415,10 @@ class _MockDS:
 def _make_summary_dm():
     """Build a TCDataModule with injected stub datasets."""
     from experiments.sparse_obs_encoder.data.datamodule import TCDataModule
+    from experiments.sparse_obs_encoder.data.inputs import InputSpec
     dm = TCDataModule()
-    dm._location_encoding = 'unit_circle'
-    dm._obs_normalisation = 'minmax_11'
+    dm._input_spec        = InputSpec(location_encoding='unit_circle',
+                                      normalisation='minmax_11')
     dm._max_stations      = 16
     dm._min_stations      = 1
     dm._batch_size        = 4
@@ -545,10 +546,11 @@ class TestTCDataModuleSummary:
             },
         }
         dm = TCDataModule.from_config(cfg)
-        assert dm._location_encoding == 'domain'
-        assert dm._obs_normalisation == 'minmax_01'
-        assert dm._max_stations      == 8
-        assert dm._min_stations      == 1
+        # InputSpec is the single source of truth for the input configuration.
+        assert dm.input_spec.location_encoding == 'domain'
+        assert dm.input_spec.normalisation     == 'minmax_01'
+        assert dm._max_stations                == 8
+        assert dm._min_stations                == 1
 
 
 # ---------------------------------------------------------------------------

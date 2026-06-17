@@ -1,17 +1,19 @@
 """
-Tests for experiments/sparse_obs_encoder/data/encoding.py.
+Tests for experiments/sparse_obs_encoder/data/transforms/encoding.py.
 
 Round-trip exactness for both encode/decode pairs, the north-seam property
-that motivated the local x-y encoding (decision 17), and convention checks
-(north-up = +y, east = +x).
+that motivated the local x-y encoding (decision 17), convention checks
+(north-up = +y, east = +x), and the sample-level COORD_ENCODERS registry.
 """
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from experiments.sparse_obs_encoder.data.encoding import (
+from experiments.sparse_obs_encoder.data.transforms.encoding import (
     encode_unit_circle, decode_unit_circle,
     encode_domain, decode_domain,
+    COORD_ENCODERS, COORD_DECODERS, get_coord_encoder, get_coord_decoder,
 )
 
 FOV_LAT = (0.0, 30.0)
@@ -105,3 +107,59 @@ class TestDomain:
         rlat, rlon = decode_domain(nlat, nlon, FOV_LAT, FOV_LON)
         assert np.allclose(rlat, lats, atol=1e-3)
         assert np.allclose(rlon, lons, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Sample-level coordinate encoders (COORD_ENCODERS registry)
+# ---------------------------------------------------------------------------
+
+def _station_frame():
+    """A small per-sample station frame as produced by get_obs_near."""
+    return pd.DataFrame({
+        'latitude':    np.array([15.0, 16.0, 14.0], dtype=np.float32),
+        'longitude':   np.array([-75.0, -74.5, -75.5], dtype=np.float32),
+        'distance_km': np.array([0.0, 120.0, 90.0], dtype=np.float32),
+    })
+
+
+class TestCoordEncoders:
+
+    def test_registry_membership(self):
+        assert set(COORD_ENCODERS.names()) == {'UNIT_CIRCLE', 'DOMAIN'}
+        assert set(COORD_DECODERS.names()) == {'UNIT_CIRCLE', 'DOMAIN'}
+
+    def test_get_unknown_raises(self):
+        with pytest.raises(KeyError):
+            get_coord_encoder('polar')
+
+    def test_unit_circle_shapes_and_origin(self):
+        df  = _station_frame()
+        enc = get_coord_encoder('unit_circle')
+        station, query = enc(df, 15.0, -75.0,
+                             radius_km=300.0, fov_lat=FOV_LAT, fov_lon=FOV_LON)
+        assert station.shape == (3, 2)
+        assert station.dtype == np.float32
+        assert query.shape == (2,)
+        # query sits at the storm origin
+        assert np.allclose(query, 0.0)
+        # hypot recovers the clipped normalised distance
+        expected = np.clip(df['distance_km'].to_numpy() / 300.0, 0.0, 1.0)
+        assert np.allclose(np.hypot(station[:, 0], station[:, 1]), expected, atol=1e-3)
+
+    def test_domain_matches_encode_domain(self):
+        df  = _station_frame()
+        enc = get_coord_encoder('domain')
+        station, query = enc(df, 15.0, -75.0,
+                             radius_km=300.0, fov_lat=FOV_LAT, fov_lon=FOV_LON)
+        assert station.shape == (3, 2)
+        nlat, nlon = encode_domain(
+            df['latitude'].to_numpy(), df['longitude'].to_numpy(), FOV_LAT, FOV_LON,
+        )
+        assert np.allclose(station[:, 0], nlat, atol=1e-5)
+        assert np.allclose(station[:, 1], nlon, atol=1e-5)
+        q = encode_domain(15.0, -75.0, FOV_LAT, FOV_LON)
+        assert np.allclose(query, q, atol=1e-5)
+
+    def test_decoder_lookup(self):
+        assert get_coord_decoder('domain') is decode_domain
+        assert get_coord_decoder('unit_circle') is decode_unit_circle

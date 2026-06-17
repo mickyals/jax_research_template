@@ -150,13 +150,23 @@ sparse_obs_cross_attn/
 ├── baselines/           Baseline models for comparison
 ├── data/
 │   ├── dataset.py       TCDataset — joins IBTrACS + InsituLand per sample,
-│   │                       coordinate encoding, obs normalisation
+│   │                       orchestrates assembly (delegates the swappable
+│   │                       input transforms to the InputSpec)
 │   ├── datamodule.py    TCDataModule + TCLoader — balanced TC/background
 │   │                       batches, nearest-N station cap,
-│   │                       frozen LHS eval backgrounds, partial-batch flush
-│   ├── encoding.py      encode/decode pairs (unit_circle local x-y,
-│   │                       domain FOV-normalised) — exact inverses shared
-│   │                       by dataset + plotting
+│   │                       frozen LHS eval backgrounds, partial-batch flush;
+│   │                       exposes .input_spec / .target_spec
+│   ├── inputs.py        InputSpec + resolve_input — declarative input config
+│   │                       (obs_vars, normalisation, coordinate encoding, FOV);
+│   │                       config-built, mirrors targets.py
+│   ├── targets.py       TargetSpec + resolve_target — declarative prediction
+│   │                       target (label builder, head size, loss, class names)
+│   ├── transforms/      swappable input transforms selected by InputSpec
+│   │   ├── normalise.py    obs normalisers (minmax_01/minmax_11/standardise)
+│   │   ├── encoding.py     coordinate encoders/decoders (unit_circle local
+│   │   │                      x-y, domain FOV-normalised) — exact inverses
+│   │   │                      shared by dataset + plotting
+│   │   └── derived.py      derived obs variables (wind components)
 │   ├── splits.py        resolve_splits — data.split config → per-split
 │   │                       datasets + run manifest ('year' and 'year_random'
 │   │                       strategies)
