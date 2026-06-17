@@ -41,9 +41,6 @@ from core.embeddings import SinusoidalPosEncoding, LearnedPosEncoding
 from core import get_activation, get_initializer
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
 
 from utils.registry import Registry
 

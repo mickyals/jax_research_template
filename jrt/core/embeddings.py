@@ -1,4 +1,6 @@
 import math
+import inspect
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -19,9 +21,6 @@ def list_embeddings() -> dict[str, str]:
     return dict(sorted(EMBEDDINGS.describe().items()))
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Shared beta schedule
@@ -981,3 +980,166 @@ class LearnedPosEncoding2D(nn.Module):
             f"does not match embed_dim={self.embed_dim}."
         )
         return x + self.pos_embed
+
+
+# ---------------------------------------------------------------------------
+# Embedding composition helpers
+#
+# Adapters that make the embeddings above composable in front of an MLP's
+# first dense layer. Used by core.nets.mlp (the `embedding` field on _BaseMLP).
+# ---------------------------------------------------------------------------
+
+def _call_embedding(embedding: nn.Module, x: jnp.ndarray,
+                    train: bool) -> jnp.ndarray:
+    """Call an embedding module, forwarding train only if it accepts it.
+
+    Deterministic embeddings (all current core.embeddings) define
+    __call__(self, x) and do not receive train. Future trainable or
+    stochastic embeddings that define __call__(self, x, train) will
+    receive it automatically.
+
+    Parameters
+    ----------
+    embedding : nn.Module
+        Embedding module to call.
+    x : jnp.ndarray
+        Input array.
+    train : bool
+        Training flag forwarded only if the embedding accepts it.
+
+    Returns
+    -------
+    jnp.ndarray
+        Embedding output.
+    """
+    sig = inspect.signature(embedding.__call__)
+    if 'train' in sig.parameters:
+        return embedding(x, train=train)
+    return embedding(x)
+
+
+class LatLonEmbeddingWrapper(nn.Module):
+    """Wraps a spherical embedding that takes (lat, lon) into a single x input.
+
+    Adapts embeddings from core.embeddings that expect separate lat and lon
+    arrays (e.g. SphericalGridEmbedding, DFS, SphericalHarmonicsEmbedding)
+    to accept a single concatenated input array, making them composable
+    with CombinedEmbedding and the embedding field on _BaseMLP.
+
+    Parameters
+    ----------
+    embedding : nn.Module
+        Spherical embedding with signature (lat, lon) -> jnp.ndarray.
+
+    Notes
+    -----
+    Expects x of shape (N, 2) where x[:, 0] is lat and x[:, 1] is lon,
+    both in radians.
+
+    Example
+    -------
+    >>> from core.embeddings import get_embedding
+    >>> from core.nets.mlp import SIRENet
+    >>> embed = LatLonEmbeddingWrapper(
+    ...     embedding=get_embedding("SPHERE_GRID", scale=8, r_min=0.01)
+    ... )
+    >>> net = SIRENet(out_features=1, hidden_features=256, n_layers=5,
+    ...               embedding=embed)
+    """
+    embedding: nn.Module
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        return self.embedding(x[:, 0], x[:, 1])
+
+
+class CombinedEmbedding(nn.Module):
+    """Splits input into spatial and temporal components, embeds each,
+    and concatenates the results before the first dense layer.
+
+    The input x is expected to have spatial coords in columns
+    0..spatial_dim-1 and temporal/other coords in the remaining columns.
+    Either or both embeddings may be None, in which case those coords
+    are passed through raw.
+
+    Parameters
+    ----------
+    spatial_dim : int
+        Number of spatial input dimensions used to split x.
+        x must have at least spatial_dim columns.
+    spatial_embedding : nn.Module, optional
+        Applied to x[:, :spatial_dim]. Use LatLonEmbeddingWrapper
+        for spherical embeddings that take (lat, lon) separately.
+        If None, spatial coords are concatenated raw.
+    time_embedding : nn.Module, optional
+        Applied to x[:, spatial_dim:]. If None, temporal coords
+        are concatenated raw. If the auxiliary values are already
+        normalized scalars, leave this as None and they will be
+        concatenated directly.
+
+    Notes
+    -----
+    Output dimension is inferred automatically by Flax at first call.
+    The first dense layer sees spatial_out + time_out features, where
+    each is the embedding output dim or the raw input dim if no embedding.
+
+    x must satisfy x.shape[1] >= spatial_dim. If x.shape[1] == spatial_dim,
+    the time slice is empty and time_embedding is ignored.
+
+    If a sub-embedding accepts a train argument (e.g. a future trainable
+    embedding), it will receive the train flag automatically via
+    _call_embedding. Deterministic embeddings are unaffected.
+
+    Example
+    -------
+    >>> from core.embeddings import get_embedding
+    >>> from core.nets.mlp import SIRENet
+    >>>
+    >>> # lat/lon through spherical embedding, time through Fourier features
+    >>> net = SIRENet(
+    ...     out_features=1,
+    ...     hidden_features=256,
+    ...     n_layers=5,
+    ...     embedding=CombinedEmbedding(
+    ...         spatial_dim=2,
+    ...         spatial_embedding=LatLonEmbeddingWrapper(
+    ...             embedding=get_embedding("SPHERE_GRID", scale=8, r_min=0.01)
+    ...         ),
+    ...         time_embedding=get_embedding(
+    ...             "GENERAL_POSITIONAL", input_dim=1, mapping_dim=32, scale=2.0
+    ...         ),
+    ...     ),
+    ... )
+    >>>
+    >>> # lat/lon embedded, normalised pressure passed raw
+    >>> net = SIRENet(
+    ...     out_features=1,
+    ...     hidden_features=256,
+    ...     n_layers=5,
+    ...     embedding=CombinedEmbedding(
+    ...         spatial_dim=2,
+    ...         spatial_embedding=LatLonEmbeddingWrapper(
+    ...             embedding=get_embedding("SPHERE_GRID", scale=8, r_min=0.01)
+    ...         ),
+    ...         # time_embedding=None -- normalised pressure concatenated raw
+    ...     ),
+    ... )
+    """
+    spatial_dim: int
+    spatial_embedding: Optional[nn.Module] = None
+    time_embedding: Optional[nn.Module] = None
+
+    def __call__(self, x: jnp.ndarray, train: bool = True) -> jnp.ndarray:
+        if x.shape[1] < self.spatial_dim:
+            raise ValueError(
+                f"Input has {x.shape[1]} features but spatial_dim={self.spatial_dim}."
+            )
+        x_spatial = x[:, :self.spatial_dim]
+        x_time    = x[:, self.spatial_dim:]
+
+        if self.spatial_embedding is not None:
+            x_spatial = _call_embedding(self.spatial_embedding, x_spatial, train)
+
+        if self.time_embedding is not None and x_time.shape[1] > 0:
+            x_time = _call_embedding(self.time_embedding, x_time, train)
+
+        return jnp.concatenate([x_spatial, x_time], axis=-1)

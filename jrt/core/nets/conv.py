@@ -11,9 +11,6 @@ from core import get_initializer
 from core import get_norm
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
 
 from utils.registry import Registry
 

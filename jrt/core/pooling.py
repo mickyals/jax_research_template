@@ -18,9 +18,6 @@ def list_pooling() -> dict[str, str]:
     return dict(sorted(POOLING.describe().items()))
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Global reductions
@@ -28,11 +25,15 @@ def list_pooling() -> dict[str, str]:
 #
 # Spatial pooling (conv nets):   axis=(1, 2)  -- reduce over H, W
 # Set aggregation (encoder):     axis=1        -- reduce over N_obs
+#
+# These are global axis reductions, NOT windowed pooling -- flax.linen.pool
+# (and its avg_pool/max_pool partials) slide a window over the spatial dims,
+# so there is no builtin to defer to here; jnp.<reduce> is the right primitive.
+# All five share one base parameterised by the reduce function.
 # ---------------------------------------------------------------------------
 
-@register_pooling("MEAN", description="Mean pooling over axis")
-class MeanPooling:
-    """Computes the mean over the specified axis.
+class _AxisPool:
+    """Base for global axis reductions; subclasses set ``reduce_fn``.
 
     Parameters
     ----------
@@ -45,104 +46,48 @@ class MeanPooling:
     >>> out = pool(x, axis=1)            # set aggregation: (B, N, D) -> (B, D)
     >>> out = pool(x, axis=(1, 2))       # spatial: (B, H, W, C) -> (B, C)
     """
+    reduce_fn = staticmethod(jnp.mean)   # overridden per subclass
+
     def __init__(self, keepdims: bool = False):
         self.keepdims = keepdims
 
     def __call__(self, x: jax.Array,
                  axis: Union[int, Sequence[int]] = 1) -> jax.Array:
-        return jnp.mean(x, axis=axis, keepdims=self.keepdims)
+        return type(self).reduce_fn(x, axis=axis, keepdims=self.keepdims)
+
+
+@register_pooling("MEAN", description="Mean pooling over axis")
+class MeanPooling(_AxisPool):
+    """Mean over the specified axis."""
+    reduce_fn = staticmethod(jnp.mean)
 
 
 @register_pooling("MAX", description="Max pooling over axis")
-class MaxPooling:
-    """Computes the max over the specified axis.
-
-    Parameters
-    ----------
-    keepdims : bool
-        Whether to keep the reduced dimensions. Default False.
-
-    Example
-    -------
-    >>> pool = get_pooling("MAX")
-    >>> out = pool(x, axis=1)            # set aggregation: (B, N, D) -> (B, D)
-    >>> out = pool(x, axis=(1, 2))       # spatial: (B, H, W, C) -> (B, C)
-    """
-    def __init__(self, keepdims: bool = False):
-        self.keepdims = keepdims
-
-    def __call__(self, x: jax.Array,
-                 axis: Union[int, Sequence[int]] = 1) -> jax.Array:
-        return jnp.max(x, axis=axis, keepdims=self.keepdims)
+class MaxPooling(_AxisPool):
+    """Max over the specified axis."""
+    reduce_fn = staticmethod(jnp.max)
 
 
 @register_pooling("MIN", description="Min pooling over axis")
-class MinPooling:
-    """Computes the min over the specified axis.
-
-    Parameters
-    ----------
-    keepdims : bool
-        Whether to keep the reduced dimensions. Default False.
-
-    Example
-    -------
-    >>> pool = get_pooling("MIN")
-    >>> out = pool(x, axis=1)
-    """
-    def __init__(self, keepdims: bool = False):
-        self.keepdims = keepdims
-
-    def __call__(self, x: jax.Array,
-                 axis: Union[int, Sequence[int]] = 1) -> jax.Array:
-        return jnp.min(x, axis=axis, keepdims=self.keepdims)
+class MinPooling(_AxisPool):
+    """Min over the specified axis."""
+    reduce_fn = staticmethod(jnp.min)
 
 
 @register_pooling("SUM", description="Sum pooling over axis")
-class SumPooling:
-    """Computes the sum over the specified axis.
-
-    Parameters
-    ----------
-    keepdims : bool
-        Whether to keep the reduced dimensions. Default False.
-
-    Example
-    -------
-    >>> pool = get_pooling("SUM")
-    >>> out = pool(x, axis=1)
-    """
-    def __init__(self, keepdims: bool = False):
-        self.keepdims = keepdims
-
-    def __call__(self, x: jax.Array,
-                 axis: Union[int, Sequence[int]] = 1) -> jax.Array:
-        return jnp.sum(x, axis=axis, keepdims=self.keepdims)
+class SumPooling(_AxisPool):
+    """Sum over the specified axis."""
+    reduce_fn = staticmethod(jnp.sum)
 
 
 @register_pooling("STD", description="Standard deviation pooling over axis")
-class StdPooling:
-    """Computes the standard deviation over the specified axis.
+class StdPooling(_AxisPool):
+    """Standard deviation over the specified axis.
 
     Useful as a second-order statistic alongside mean pooling for
     richer set representations.
-
-    Parameters
-    ----------
-    keepdims : bool
-        Whether to keep the reduced dimensions. Default False.
-
-    Example
-    -------
-    >>> pool = get_pooling("STD")
-    >>> out = pool(x, axis=1)
     """
-    def __init__(self, keepdims: bool = False):
-        self.keepdims = keepdims
-
-    def __call__(self, x: jax.Array,
-                 axis: Union[int, Sequence[int]] = 1) -> jax.Array:
-        return jnp.std(x, axis=axis, keepdims=self.keepdims)
+    reduce_fn = staticmethod(jnp.std)
 
 
 @register_pooling("MEAN_MAX", description="Concatenation of mean and max pooling over axis")
