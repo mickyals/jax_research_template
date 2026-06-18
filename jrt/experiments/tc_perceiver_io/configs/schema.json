@@ -1,0 +1,244 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "tc_perceiver_io / tc_classifier",
+  "type": "object",
+  "required": ["data", "model", "trainer"],
+  "additionalProperties": true,
+  "properties": {
+
+    "data": {
+      "type": "object",
+      "required": ["ibtracs_path", "insitu_obs_path", "insitu_meta_path", "split"],
+      "additionalProperties": true,
+      "properties": {
+
+        "ibtracs_path":          { "type": "string" },
+        "multi_storm_path":      { "type": ["string", "null"] },
+        "ibtracs_sid_meta_path": { "type": ["string", "null"] },
+        "insitu_obs_path":       { "type": "string" },
+        "insitu_meta_path":      { "type": "string" },
+
+        "split": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "strategy": { "type": "string", "enum": ["year", "year_random"] }
+          },
+          "oneOf": [
+            {
+              "description": "year strategy: disjoint explicit calendar-year lists per split",
+              "required": ["train", "val", "test"],
+              "properties": {
+                "strategy": { "const": "year" },
+                "train": {
+                  "type": "object",
+                  "required": ["years"],
+                  "properties": {
+                    "years": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                  }
+                },
+                "val": {
+                  "type": "object",
+                  "required": ["years"],
+                  "properties": {
+                    "years": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                  }
+                },
+                "test": {
+                  "type": "object",
+                  "required": ["years"],
+                  "properties": {
+                    "years":     { "type": "array", "minItems": 1, "items": { "type": "integer" } },
+                    "hard_test": { "type": "string", "enum": ["multi_storm"] }
+                  }
+                }
+              }
+            },
+            {
+              "description": "year_random strategy: pooled train+val calendar years + a disjoint test year range; the pooled rows are split into train/val by a seeded fraction (row level). No train block — train is the random remainder.",
+              "required": ["strategy", "train_val", "val", "test"],
+              "not": { "required": ["train"] },
+              "properties": {
+                "strategy": { "const": "year_random" },
+                "train_val": {
+                  "type": "object",
+                  "required": ["years"],
+                  "properties": {
+                    "years": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+                  }
+                },
+                "val": {
+                  "type": "object",
+                  "required": ["fraction", "seed"],
+                  "properties": {
+                    "fraction": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+                    "seed":     { "type": "integer", "minimum": 0 }
+                  }
+                },
+                "test": {
+                  "type": "object",
+                  "required": ["years"],
+                  "properties": {
+                    "years":     { "type": "array", "minItems": 1, "items": { "type": "integer" } },
+                    "hard_test": { "type": "string", "enum": ["multi_storm"] }
+                  }
+                }
+              }
+            }
+          ]
+        },
+
+        "reliability_levels": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": ["always_active", "mostly_active", "sparse", "sporadic", "unusable"]
+          }
+        },
+
+        "obs_vars": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "Source columns or derived names (wind_east/wind_north, computed by TCDataset from wind_speed + wind_from_direction)."
+        },
+
+        "radius_km":              { "type": "number", "exclusiveMinimum": 0 },
+        "time_window_hours":      { "type": "number", "minimum": 0 },
+        "max_stations":           { "type": "integer", "minimum": 1 },
+        "min_stations":           { "type": "integer", "minimum": 1 },
+        "batch_size":             { "type": "integer", "minimum": 2 },
+        "tc_fraction":            { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+        "class_weight_scheme":    { "type": "string", "enum": ["none", "inverse_freq", "sqrt_inverse_freq", "effective_number", "median_freq"], "description": "If not 'none', per-class loss weights are computed at setup from the train split's class counts and injected as loss_kwargs.class_weights (stored back in the manifest). An explicit trainer.loss_kwargs.class_weights overrides this." },
+        "class_weight_beta":      { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "description": "Effective-number hyperparameter (class_weight_scheme=effective_number only); near 1, e.g. 0.99/0.999/0.9999." },
+        "fov_lat":                { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+        "fov_lon":                { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+        "background_buffer_hours":{ "type": "number", "minimum": 0 },
+
+        "location_encoding": {
+          "type": "string",
+          "enum": ["unit_circle", "domain"]
+        },
+
+        "target": {
+          "type": "string",
+          "description": "Prediction target, resolved against data/targets.TARGET_SCHEMA. Drives label, head size, default loss, metrics, and class names. Currently only nominal targets are wired; 'organisation' is the default 9-class ordinal scale.",
+          "enum": ["organisation"]
+        },
+
+        "obs_normalisation": {
+          "type": "string",
+          "enum": ["minmax_01", "minmax_11", "standardise"]
+        },
+
+        "obs_bounds": {
+          "type": "object",
+          "description": "Per-variable [min, max] for minmax or [mean, std] for standardise. Keys must match obs_vars as listed (derived names included); use signed symmetric bounds for wind components.",
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": { "type": "number" }
+          }
+        }
+      }
+    },
+
+    "model": {
+      "type": "object",
+      "required": ["embed_dim", "num_heads", "num_latents", "num_process_layers"],
+      "additionalProperties": false,
+      "properties": {
+
+        "missingness_indicator": {
+          "type": "boolean",
+          "description": "True (default) = concatenate obs_mask as its own channel in the shared token-projection input, so a missing feature (filled with 0) is distinguishable from a real observation equal to 0. False drops the mask channel (missing == observed-zero)."
+        },
+
+        "embed_dim":   { "type": "integer", "minimum": 1, "description": "Latent + token width D (divisible by num_heads)." },
+        "num_heads":   { "type": "integer", "minimum": 1 },
+        "num_latents": { "type": "integer", "minimum": 1, "description": "N — number of learned latent vectors (index dim the model processes)." },
+        "num_process_layers": { "type": "integer", "minimum": 1, "description": "L — latent self-attention blocks in the Processor." },
+        "decode_mode": { "type": "string", "enum": ["attention", "avgproj"], "description": "Decoder track: single-query attention (default) or mean+project." },
+
+        "mlp_ratio":        { "type": "number",  "exclusiveMinimum": 0 },
+        "mlp_activation":   { "type": "string" },
+        "mlp_initializer":  { "type": "string" },
+
+        "dropout_rate":     { "type": "number", "minimum": 0, "maximum": 1 },
+        "attn_dropout_rate":{ "type": "number", "minimum": 0, "maximum": 1 },
+
+        "fourier_dim":      {
+          "type": "integer",
+          "minimum": 2,
+          "description": "Must be even — GaussianFourierEmbedding constraint."
+        },
+        "fourier_scale":    { "type": "number", "exclusiveMinimum": 0 },
+
+        "n_obs_features":   {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Must match len(data.obs_vars)."
+        },
+        "n_classes":        { "type": "integer", "minimum": 2 }
+      }
+    },
+
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Single seed for Trainer (model init, dropout) and TCLoader (shuffle)."
+    },
+
+    "trainer": {
+      "type": "object",
+      "required": ["batch_size", "optimizer", "scheduler"],
+      "additionalProperties": true,
+      "properties": {
+        "batch_size":           { "type": "integer", "minimum": 1 },
+        "optimizer":            { "type": "string" },
+        "optimizer_kwargs":     { "type": "object" },
+        "scheduler":            { "type": "string" },
+        "scheduler_kwargs":     { "type": "object" },
+        "loss_key":             { "type": "string", "description": "Which metric is the training loss / differentiated. Defaults to the first metric ('loss', resolved from trainer.loss)." },
+        "loss":                 { "type": "string", "description": "Name of a registered loss from training/losses.py LOSSES ('cross_entropy' default, 'coral'). Used as the training objective and the 'loss' metric." },
+        "loss_kwargs":          { "type": "object", "description": "Forwarded to the loss factory. cross_entropy composes focal_gamma, class_weights, and emd_lambda/emd_omega/emd_mu (squared-EMD regulariser). coral takes n_classes + optional task_weights. An explicit class_weights here overrides data.class_weight_scheme." },
+        "metrics":              { "type": "array", "items": { "type": "string", "enum": ["cross_entropy", "accuracy", "binary_accuracy", "mae_class"] }, "description": "Per-batch metrics to report, selected by name from the METRICS registry (training/metrics.py). Only 'loss' is reported unconditionally; omit this key for the default [binary_accuracy, mae_class]. List 'cross_entropy' to keep the unweighted comparability anchor (and if patience_metric uses it)." },
+        "num_epochs":           { "type": "integer", "minimum": 1 },
+        "num_steps":            { "type": "number",  "minimum": 1 },
+        "steps_per_epoch":      { "type": "integer", "minimum": 1, "description": "Random TC-sampling mode: gradient steps per epoch. Omit/null = sequential mode (one pass over TC data). Read by train.py/tune.py." },
+        "patience":             { "type": "integer", "minimum": 1 },
+        "patience_metric":      { "type": "string" },
+        "patience_direction":   {
+          "type": "string",
+          "enum": ["lower_is_better", "higher_is_better"]
+        },
+        "max_grad_norm":        { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "run_dir": {
+          "type": "string",
+          "description": "Root directory for all run artifacts (checkpoints + logs). Takes precedence over checkpoint_dir."
+        },
+        "checkpoint_dir":       { "type": "string" },
+        "log_backend":          {
+          "type": "string",
+          "enum": ["wandb", "tensorboard", "null"]
+        },
+        "log_every_n_steps":    { "type": "integer", "minimum": 1 },
+        "log_kwargs":           { "type": "object" },
+        "seed":                 { "type": "integer", "minimum": 0 },
+        "use_tqdm":             { "type": "boolean" },
+
+        "attn_log_every_n_steps":   { "type": "integer", "minimum": 1, "description": "Step cadence for val/attn_entropy; defaults to log_every_n_steps." },
+        "attn_fig_every_n_epochs":  { "type": "integer", "minimum": 0, "description": "Epoch cadence for val/attn_map + val/attn_grid figures; 0 = disabled." },
+        "eval_plots_every_n_epochs":{ "type": "integer", "minimum": 0, "description": "Epoch cadence for val confusion matrix / per-class F1; 0 = disabled." },
+        "grad_hist_every_n_epochs": { "type": "integer", "minimum": 0, "description": "Epoch cadence for grad_flow/* histograms (TRAIN probe, also at init); 0 = disabled." },
+        "diagnostics":              { "type": "boolean", "description": "Log the diagnostics/* figure row (weight/gradient/activation distributions) at init and on the best params after training." },
+        "diagnostics_loss_landscape_grid": { "type": "integer", "minimum": 0, "description": "Grid size for the end-of-training loss-landscape figure (grid² forward passes). 0 = skip (the one expensive diagnostic)." },
+        "profile":                  { "type": "boolean", "description": "Trace the first profile_steps training steps with the JAX profiler to <log_dir>/profile (view with TensorBoard's Profile plugin)." },
+        "profile_steps":            { "type": "integer", "minimum": 1 }
+      }
+    }
+
+  }
+}

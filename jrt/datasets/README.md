@@ -136,7 +136,7 @@ def _mydataset_factory(config: dict) -> MyDataset:
     return MyDataset(config["path"])
 ```
 
-(Then `data.dataset: MYDATASET` selects it. For example, `experiments/sparse_obs_cross_attn/data/sources/ibtracs.py` registers `"IBTRACS"` this way.)
+(Then `data.dataset: MYDATASET` selects it. For example, `experiments/tc_perceiver_io/data/sources/ibtracs.py` registers `"IBTRACS"` this way.)
 
 Then subclass `BaseDataModule` to wrap it, resolving the split from the config (`filter_column` for simple value splits; `datasets.splitting` helpers for group/fraction splits):
 

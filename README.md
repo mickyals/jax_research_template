@@ -28,7 +28,7 @@ jax_research_template/
 │   ├── training/           Trainer, losses, optimizers, logger, tuner
 │   ├── utils/              Geoscience, JAX helpers, plotting, sampling
 │   └── experiments/        One directory per experiment
-│       └── sparse_obs_cross_attn/   Tropical cyclone classifier (reference impl)
+│       └── tc_perceiver_io/   Tropical cyclone classifier (reference impl)
 ├── tests/                  Pytest suite mirroring jrt/ structure
 ├── environment.yaml        Conda environment (name: jrt)
 └── pytest.ini
@@ -55,29 +55,29 @@ pip install --upgrade "jax[cuda12]"   # CUDA 12.x
 
 ```bash
 # Edit data paths in the config
-jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
+jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml
 
 # Put jrt/ on the Python path once (packages are rooted there):
 #   export PYTHONPATH=jrt        (bash)   |   $env:PYTHONPATH="jrt"   (PowerShell)
 
 # Train
-python -m experiments.sparse_obs_encoder.train.train \
-    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml
+python -m experiments.tc_perceiver_io.train.train \
+    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml
 
 # Resume interrupted training
-python -m experiments.sparse_obs_encoder.train.train \
-    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
+python -m experiments.tc_perceiver_io.train.train \
+    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml \
     --resume
 
 # Evaluate (config path is positional)
-python -m experiments.sparse_obs_encoder.train.evaluate \
-    jrt/experiments/sparse_obs_encoder/configs/tc_classifier.yaml \
+python -m experiments.tc_perceiver_io.train.evaluate \
+    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml \
     --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
     --output_dir runs/tc_classifier/run_01/eval
 
 # Hyperparameter search
-python -m experiments.sparse_obs_encoder.train.tune \
-    jrt/experiments/sparse_obs_encoder/configs/tc_tune.yaml \
+python -m experiments.tc_perceiver_io.train.tune \
+    jrt/experiments/tc_perceiver_io/configs/tc_tune.yaml \
     --n_trials 25 \
     --storage sqlite:///runs/tc_classifier/hp_search/study.db
 ```
@@ -93,7 +93,7 @@ pytest tests/
 
 ## Starting a new experiment
 
-Each experiment lives in its own directory under `jrt/experiments/`. The reference experiment `sparse_obs_cross_attn/` is the canonical example of how to structure one.
+Each experiment lives in its own directory under `jrt/experiments/`. The reference experiment `tc_perceiver_io/` is the canonical example of how to structure one.
 
 **Minimum files:**
 

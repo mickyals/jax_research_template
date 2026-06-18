@@ -62,6 +62,13 @@ class SirenInit:
     First layer:   U(-1/fan_in, 1/fan_in)
     Hidden layers: U(-sqrt(6/fan_in)/omega, sqrt(6/fan_in)/omega)
 
+    Flax note: the hidden-layer bound equals
+    ``flax.linen.initializers.variance_scaling(2/omega**2, "fan_in", "uniform")``
+    (flax draws U(-a, a) with a = sqrt(3*scale/fan_in), so scale = 2/omega**2
+    gives a = sqrt(6/fan_in)/omega). The FIRST layer is NOT expressible that way
+    -- its bound scales as 1/fan_in, while variance_scaling always scales as
+    1/sqrt(fan_in). Kept hand-rolled to share one first/hidden formula.
+
     Parameters
     ----------
     fan_in : int
@@ -102,6 +109,10 @@ class FinerInit:
 
     First layer:   U(-1/fan_in, 1/fan_in)
     Hidden layers: U(-sqrt(6/fan_in)/omega, sqrt(6/fan_in)/omega)
+
+    Flax note (as for SIREN): the hidden-layer bound equals
+    ``variance_scaling(2/omega**2, "fan_in", "uniform")``; the first layer is
+    not expressible that way (1/fan_in vs 1/sqrt(fan_in)).
 
     Parameters
     ----------

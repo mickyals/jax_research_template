@@ -106,7 +106,7 @@ loss_fn = get_loss("cross_entropy", focal_gamma=2.0, class_weights=[1.0]*11)
 
 Class weighting is **method-agnostic**: the caller supplies the realized per-class vector. The deriving helper lives with the data layer (class imbalance is a data property) — `datasets/class_weights.py::class_weights_from_counts(counts, scheme, beta)` — `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` (Cui et al. 2019) / `median_freq` (Eigen & Fergus 2015); zero-count classes stay 1.0, present classes normalized to mean 1. Compute once from the train-split counts and record it (e.g. in the run manifest).
 
-Convention for classification experiments: a `trainer.loss` (+ `trainer.loss_kwargs`) config key selects the entry resolved via `get_loss` and bound to the `metrics_fns['loss']` key (which `loss_key` defaults to), so the training objective is configured the same way as `trainer.optimizer`/`trainer.scheduler`. An experiment may also compute `class_weights` at setup from a `data.class_weight_scheme` (see the sparse_obs_cross_attn data config); an explicit `loss_kwargs.class_weights` overrides it.
+Convention for classification experiments: a `trainer.loss` (+ `trainer.loss_kwargs`) config key selects the entry resolved via `get_loss` and bound to the `metrics_fns['loss']` key (which `loss_key` defaults to), so the training objective is configured the same way as `trainer.optimizer`/`trainer.scheduler`. An experiment may also compute `class_weights` at setup from a `data.class_weight_scheme` (see the tc_perceiver_io data config); an explicit `loss_kwargs.class_weights` overrides it.
 
 ---
 
