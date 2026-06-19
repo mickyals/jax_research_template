@@ -189,7 +189,15 @@ class ProcessorBlock(nn.Module):
 
 
 class Processor(nn.Module):
-    """Stack of ``num_layers`` latent self-attention blocks (no re-read)."""
+    """``num_layers`` latent self-attention blocks (no re-read of the inputs).
+
+    ``weight_sharing=False`` (default) builds ``num_layers`` independent blocks.
+    ``weight_sharing=True`` builds ONE block and applies it ``num_layers`` times
+    recurrently (ALBERT / Universal-Transformer cross-layer tying; the Senseiver
+    re-uses its second attention block this way) — same depth, one block's worth
+    of parameters. The param tree then has a single ``blocks_0`` regardless of
+    ``num_layers``.
+    """
     num_layers: int
     embed_dim: int
     num_heads: int
@@ -198,8 +206,10 @@ class Processor(nn.Module):
     mlp_initializer: str = 'xavier_uniform'
     dropout_rate: float = 0.0
     attn_dropout_rate: float = 0.0
+    weight_sharing: bool = False
 
     def setup(self):
+        n_unique = 1 if self.weight_sharing else self.num_layers
         self.blocks = [
             ProcessorBlock(
                 embed_dim=self.embed_dim, num_heads=self.num_heads,
@@ -208,18 +218,22 @@ class Processor(nn.Module):
                 dropout_rate=self.dropout_rate,
                 attn_dropout_rate=self.attn_dropout_rate,
             )
-            for _ in range(self.num_layers)
+            for _ in range(n_unique)
         ]
+
+    def _block_at(self, depth: int) -> ProcessorBlock:
+        # Shared mode re-uses the single block at every depth.
+        return self.blocks[0] if self.weight_sharing else self.blocks[depth]
 
     def __call__(self, x, train=True, return_weights=False):
         if return_weights:
             all_scores = []
-            for blk in self.blocks:
-                x, s = blk(x, train=train, return_weights=True)
+            for i in range(self.num_layers):
+                x, s = self._block_at(i)(x, train=train, return_weights=True)
                 all_scores.append(s)
             return x, jnp.stack(all_scores, axis=0)   # (L, B, num_heads, N, N)
-        for blk in self.blocks:
-            x = blk(x, train=train)
+        for i in range(self.num_layers):
+            x = self._block_at(i)(x, train=train)
         return x
 
 
@@ -332,6 +346,10 @@ class TCPerceiverIO(nn.Module):
     missingness_indicator : bool
         True (default) = concatenate obs_mask as its own channel so a missing
         feature (filled 0) is distinguishable from an observed 0.
+    processor_weight_sharing : bool
+        False (default) = num_process_layers independent Processor blocks.
+        True = one shared block applied num_process_layers times (recurrent /
+        cross-layer weight tying), so depth is decoupled from parameter count.
 
     Output: (B, n_classes) raw logits if n_classes is set, else (B, embed_dim)
     mean-pooled normalized latents.
@@ -351,6 +369,7 @@ class TCPerceiverIO(nn.Module):
     n_classes: Optional[int] = None
     decode_mode: str = 'attention'
     missingness_indicator: bool = True
+    processor_weight_sharing: bool = False
 
     def setup(self):
         self.coord_embedding = GaussianFourierEmbedding(
@@ -378,6 +397,7 @@ class TCPerceiverIO(nn.Module):
             mlp_ratio=self.mlp_ratio, mlp_activation=self.mlp_activation,
             mlp_initializer=self.mlp_initializer, dropout_rate=self.dropout_rate,
             attn_dropout_rate=self.attn_dropout_rate,
+            weight_sharing=self.processor_weight_sharing,
         )
         # Trailing LayerNorm (GPT-2 "extra final LN") — the normalized latent
         # array is the encoder asset z.

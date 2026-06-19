@@ -68,7 +68,7 @@ data:
 
   # --- Station filtering ---
   reliability_levels:     [always_active, mostly_active, sporadic, sparse, unusable]
-  radius_km:              500.0       # exclude stations outside this radius of the query point
+  radius_km:              1000.0       # exclude stations outside this radius of the query point
   time_window_hours:      0.1         # temporal tolerance when matching obs to a TC timestamp
 
   # --- Observed variables ---
@@ -100,16 +100,23 @@ data:
     wind_north:                [-115.0,  115.0]         # m/s (max observed speed ~224 kt)
 
   # --- Token padding / truncation ---
-  # All stations within radius_km are used; samples with more than max_stations
-  # are trimmed to the NEAREST max_stations by distance (no random subsampling —
-  # the region is large and stations sparse, so the cap rarely binds).
-  max_stations:           10          # cap on station tokens; pad below, nearest-trim above
-  min_stations:           1          # samples with fewer real stations are discarded
+  # All stations within radius_km are candidates; samples with more than
+  # max_stations are trimmed (see station_selection); fewer are zero-padded.
+  max_stations:           20          # cap on station tokens; pad below, trim above
+  min_stations:           2          # samples with fewer real stations are discarded
+
+  # Which stations to keep when a sample has more than max_stations candidates:
+  #   nearest  deterministic, closest by distance (ALWAYS used for val/test)
+  #   random   TRAIN-ONLY augmentation — each draw of a TC row gets a different
+  #            random station subset, so the finite TC set can't be memorised.
+  #            Only bites when n_available > max_stations (widen radius_km to
+  #            grow the candidate pool — see the n_available sweep).
+  station_selection:      nearest
 
   # --- Batch construction ---
   # batch_size is NOT set here — it flows down from trainer.batch_size automatically.
   # See trainer.batch_size below.
-  tc_fraction:            0.5         # fraction of each batch drawn as TC samples (rest = background)
+  tc_fraction:            0.1         # fraction of each batch drawn as TC samples (rest = background)
 
   # --- Class weighting (within-TC imbalance) ---
   # Per-class loss weights computed at setup from the train split's realized
@@ -123,7 +130,7 @@ data:
   # --- Domain / field of view ---
   fov_lat:                [0.0,  30.0]
   fov_lon:                [-100.0, -45.0]
-  background_buffer_hours: 6.0        # timestamps within this window of any TC obs are excluded
+  background_buffer_hours: 3.0        # timestamps within this window of any TC obs are excluded
                                       # from the background pool
 
   # --- Coordinate encoding ---
@@ -142,10 +149,15 @@ model:
   # --- Latent / attention sizing ---
   embed_dim:            128           # latent + token width D (divisible by num_heads)
   num_heads:            4
-  num_latents:          16            # N — number of learned latent vectors (the
+  num_latents:          16           # N — number of learned latent vectors (the
                                       # index dim the model processes; decoupled
                                       # from the station count M)
   num_process_layers:   2             # L — latent self-attention blocks in the Processor
+
+  # Recurrent / cross-layer weight tying (Senseiver-style): one Processor block
+  # applied num_process_layers times instead of L independent blocks — same
+  # depth, one block's worth of parameters. false (default) = independent blocks.
+  processor_weight_sharing: false
 
   # --- Decoder ---
   # 'attention' — a single learned output query cross-attends the latents, then
@@ -176,7 +188,7 @@ model:
 
   # --- Output ---
   n_obs_features:       5             # must equal len(data.obs_vars)
-  n_classes:            9             # ordinal organisation scale (ibtracs.CLASS_NAMES):
+  n_classes:            9             # ordinal organization scale (ibtracs.CLASS_NAMES):
                                       # 0 Background, 1 Disturbance, 2 Depression,
                                       # 3 Storm, 4–8 Saffir-Simpson Category 1–5
                                       # (synced to data.target by train.py)
@@ -189,7 +201,7 @@ trainer:
 
   # Single source of truth for batch size.
   # train.py propagates this value to the data loader — do not set it in data:.
-  batch_size:           8
+  batch_size:           128
 
   # --- Optimiser ---
   optimizer:            adamw
@@ -197,14 +209,17 @@ trainer:
     weight_decay:       1.0e-4
 
   # --- Learning rate schedule ---
-  # Linear warmup from init_value to peak_value over warmup_steps,
-  # then cosine decay to end_value over decay_steps.
+  # Linear warmup from init_value to peak_value over warmup_steps, then cosine
+  # decay to end_value over decay_steps. decay_steps is the TOTAL schedule length
+  # (warmup included, optax convention); after it the LR sits at end_value.
+  # Leave decay_steps null and train.py fills it with num_epochs*steps_per_epoch
+  # so the anneal spans the whole run; set an integer to override.
   scheduler:            warmup_cosine
   scheduler_kwargs:
     init_value:         0.0
     peak_value:         1.0e-4
-    warmup_steps:       25
-    decay_steps:        200
+    warmup_steps:       50
+    decay_steps:        null          # auto = num_epochs * steps_per_epoch (train.py)
     end_value:          1.0e-6
 
   # --- Training loop ---
@@ -216,7 +231,7 @@ trainer:
   # For a smoke test keep this small (200-500).
   # For a full run use 2000-5000 depending on desired training time per epoch.
   # Remove or set to null to fall back to sequential mode (one pass through TC data).
-  steps_per_epoch:      500
+  steps_per_epoch:     2000
 
   # --- Loss ---
   # Training objective, selected from training/losses.py LOSSES registry.
@@ -260,12 +275,16 @@ trainer:
   profile_steps:        5
 
   # --- Run directory ---
-  # Relative paths are resolved against the experiment directory
-  # (tc_perceiver_io/, two levels above train/train.py), so
-  # runs/tc_classifier/run_01 always expands to
-  #   jrt/experiments/tc_perceiver_io/runs/tc_classifier/run_01
-  # regardless of where the CLI is invoked from.  Absolute paths are used as-is.
-  run_dir:              runs/tc_classifier/run_05
+  # Relative paths resolve against the experiment directory (tc_perceiver_io/,
+  # two levels above train/train.py); absolute paths are used as-is.
+  #
+  # run_group: train.py auto-creates the next run_NN under it (max existing + 1),
+  # so forgetting to bump a number can never clobber an earlier run. Pass
+  # `--name <slug>` to append the run's purpose → run_NN-<slug>, e.g.
+  #   runs/tc_classifier/run_06-tcfrac0.3-cw-effnum
+  # To pin a fixed directory instead, set `run_dir:` (it takes precedence).
+  run_group:            runs/tc_classifier
+  # run_dir:            runs/tc_classifier/run_05   # uncomment to pin
 
   # --- Logging ---
   log_backend:          wandb
@@ -309,8 +328,8 @@ trainer:
   # WandB project / run metadata.
   log_kwargs:
     project:  sparse_obs_encoding
-    name:     unified-transformer-unit-circle-run5
+    name:     perceiver-io-unit-circle-run5
     offline:  false
-    tags:     [unit_circle, unified_transformer]
+    tags:     [unit_circle, perceiver_io]
 
   # seed is injected from the top-level seed by train.py — do not set here.

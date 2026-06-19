@@ -108,6 +108,7 @@
         "time_window_hours":      { "type": "number", "minimum": 0 },
         "max_stations":           { "type": "integer", "minimum": 1 },
         "min_stations":           { "type": "integer", "minimum": 1 },
+        "station_selection":      { "type": "string", "enum": ["nearest", "random"], "description": "How to pick max_stations when a sample has more candidates: 'nearest' (default, deterministic) or 'random' (train-only view augmentation; val/test always nearest). Only bites when n_available > max_stations." },
         "batch_size":             { "type": "integer", "minimum": 2 },
         "tc_fraction":            { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
         "class_weight_scheme":    { "type": "string", "enum": ["none", "inverse_freq", "sqrt_inverse_freq", "effective_number", "median_freq"], "description": "If not 'none', per-class loss weights are computed at setup from the train split's class counts and injected as loss_kwargs.class_weights (stored back in the manifest). An explicit trainer.loss_kwargs.class_weights overrides this." },
@@ -160,6 +161,7 @@
         "num_heads":   { "type": "integer", "minimum": 1 },
         "num_latents": { "type": "integer", "minimum": 1, "description": "N — number of learned latent vectors (index dim the model processes)." },
         "num_process_layers": { "type": "integer", "minimum": 1, "description": "L — latent self-attention blocks in the Processor." },
+        "processor_weight_sharing": { "type": "boolean", "description": "True = one Processor block applied num_process_layers times (recurrent / cross-layer weight tying; fewer params). Default false = independent blocks." },
         "decode_mode": { "type": "string", "enum": ["attention", "avgproj"], "description": "Decoder track: single-query attention (default) or mean+project." },
 
         "mlp_ratio":        { "type": "number",  "exclusiveMinimum": 0 },

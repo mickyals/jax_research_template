@@ -124,8 +124,8 @@ The Decoder reads the normalised latents (the final norm lives in the encoder), 
 ```
 tc_perceiver_io/
 ├── configs/
-│   ├── tc_classifier.yaml   Full training config
-│   ├── tc_tune.yaml         Short-epoch config for HP search
+│   ├── train.yaml   Full training config
+│   ├── tune.yaml         Short-epoch config for HP search
 │   └── schema.json          JSON schema for config validation
 ├── runs/                Training run artifacts (checkpoints, logs, figures)
 ├── baselines/           Baseline models for comparison
@@ -254,7 +254,7 @@ $env:PYTHONPATH = "jrt"
 `CFG` below is the config path (positional argument for every entry point):
 
 ```bash
-CFG=jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml
+CFG=jrt/experiments/tc_perceiver_io/configs/train.yaml
 
 # Train                                  # Resume from latest checkpoint
 python -m experiments.tc_perceiver_io.train.train $CFG
@@ -268,7 +268,7 @@ python -m experiments.tc_perceiver_io.train.evaluate $CFG \
 
 # Hyperparameter search
 python -m experiments.tc_perceiver_io.train.tune \
-    jrt/experiments/tc_perceiver_io/configs/tc_tune.yaml \
+    jrt/experiments/tc_perceiver_io/configs/tune.yaml \
     --n_trials 50 \
     --storage sqlite:///runs/tc_classifier/hp_search/study.db \
     --study_name tc_classifier_v1
@@ -305,11 +305,11 @@ reference above):
 ```bash
 # First run
 python -m experiments.tc_perceiver_io.train.train \
-    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml
+    jrt/experiments/tc_perceiver_io/configs/train.yaml
 
 # Resume an interrupted run
 python -m experiments.tc_perceiver_io.train.train \
-    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml \
+    jrt/experiments/tc_perceiver_io/configs/train.yaml \
     --resume
 ```
 
@@ -332,18 +332,18 @@ The config path is a **positional** argument:
 ```bash
 # Evaluate on test split (default)
 python -m experiments.tc_perceiver_io.train.evaluate \
-    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml \
+    jrt/experiments/tc_perceiver_io/configs/train.yaml \
     --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
     --output_dir runs/tc_classifier/run_01/eval
 
 # Validation split
 python -m experiments.tc_perceiver_io.train.evaluate \
-    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml \
+    jrt/experiments/tc_perceiver_io/configs/train.yaml \
     --split val
 
 # Save plots to disk without displaying
 python -m experiments.tc_perceiver_io.train.evaluate \
-    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml \
+    jrt/experiments/tc_perceiver_io/configs/train.yaml \
     --output_dir runs/tc_classifier/run_01/eval \
     --no_show
 ```
@@ -351,6 +351,8 @@ python -m experiments.tc_perceiver_io.train.evaluate \
 Outputs:
 - Confusion matrix — row-normalised 11×11 and raw counts
 - Per-class precision / recall / F1 bar chart
+- Precision-recall curves — binary TC-vs-background (`plot_pr_curve`, with the no-skill base-rate line and the AP that matches `pr_auc`) and a per-class one-vs-rest overlay (`plot_pr_curves_per_class`, each curve's AP being its `mAP` term)
+- Per-class exemplars — one test sample of each true class (Background → Cat 5) on the Read attention map, with a printed `true → pred ✓/✗` table (`--no_class_examples` to skip)
 - Per-component attention maps (one set per sample, titled with storm attribution `"<SID> <NAME> — true: Cat 3, pred: TS"`, or `background`):
   - **Read map** (`plot_attention_geographic`) — *which stations the model attends to*. The Read cross-attention `softmax(attn['read'])` `(B, H, N, M)` is averaged over the N latents and H heads to a per-station weight `(M,)`, then scattered on the station geometry: storm-centred local x-y with km distance rings (unit_circle) or lat/lon (domain). With `--geo` (or `geo=True`) the scatter is drawn on a cartopy map with coastlines/borders: PlateCarree for domain, and for unit_circle an **AzimuthalEquidistant projection centred on the storm** — that projection's native coordinates are metres east/north of the centre, i.e. exactly the local x-y encoding × radius, so stations, km rings, and coastlines align by construction. Requires cartopy (optional dependency); default stays cartopy-free
   - **Processor grid** (`plot_attention_matrix_grid`) — layers × heads panels of the N×N latent self-attention matrices `softmax(attn['processor'])` `(L, B, H, N, N)` per sample (plain imshow, no per-latent labels)
@@ -361,18 +363,18 @@ Outputs:
 ```bash
 # In-memory search (quick experiments, results lost on exit)
 python -m experiments.tc_perceiver_io.train.tune \
-    jrt/experiments/tc_perceiver_io/configs/tc_tune.yaml \
+    jrt/experiments/tc_perceiver_io/configs/tune.yaml \
     --n_trials 25
 
 # Persistent search — resume by running the same command again
 python -m experiments.tc_perceiver_io.train.tune \
-    jrt/experiments/tc_perceiver_io/configs/tc_tune.yaml \
+    jrt/experiments/tc_perceiver_io/configs/tune.yaml \
     --n_trials 50 \
     --storage sqlite:///runs/tc_classifier/hp_search/study.db \
     --study_name tc_classifier_v1
 ```
 
-After the study finishes, best parameters are printed and written to `runs/tc_classifier/hp_search/best_params.json`. Copy those values into `tc_classifier.yaml` and re-train at full length.
+After the study finishes, best parameters are printed and written to `runs/tc_classifier/hp_search/best_params.json`. Copy those values into `train.yaml` and re-train at full length.
 
 ### Jupyter notebook
 
@@ -389,7 +391,7 @@ os.environ['JAX_LOG_COMPILES'] = '0'
 # Cell 2 — load config, override paths for this machine
 import yaml
 
-with open('jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml') as f:
+with open('jrt/experiments/tc_perceiver_io/configs/train.yaml') as f:
     config = yaml.safe_load(f)
 
 DATA_ROOT = '/data/sparse_obs'   # ← set to your data location
@@ -529,23 +531,22 @@ plt.show()
 | `val/loss` | Same objective evaluated on val |
 | `val/cross_entropy` | Validation CE — always reported for cross-run comparability; patience metric for early stopping |
 | `val/accuracy` | Top-1 accuracy over all 9 classes |
-| `val/binary_accuracy` | TC vs no-TC (class 0 vs class > 0); random chance = 0.5 |
+| `val/binary_accuracy` | TC vs no-TC (class 0 vs class > 0). **Read against the background base rate, not 0.5:** with `tc_fraction = 0.1` the val mix is ~90% background, so an "always background" model already scores ≈0.90 with zero detection skill. Use `pr_auc` / the confusion matrix to judge real detection. |
 | `val/mae_class` | Mean \|predicted class − true class\| in class units |
-| `val/qwk` | Quadratic-weighted kappa (full val set, every `eval_plots_every_n_epochs`) — ordinal agreement; 1 = perfect, 0 = chance, negative = worse than chance |
-| `val/ece` | Expected calibration error (full val set, every `eval_plots_every_n_epochs`) — gap between confidence and accuracy; 0 = perfectly calibrated |
+| `val/mAP` | Macro one-vs-rest mean average precision (full val set, every `eval_plots_every_n_epochs`) — imbalance-robust; surfaces rare classes (Cat 4/5) that accuracy hides |
+| `val/pr_auc` | Binary TC-vs-background detection average precision / PR-AUC (full val set) — the right detection summary under heavy imbalance (ROC/AUC flatters when negatives dominate). The PR **curve** behind this scalar is logged as the `val/pr_curve` figure (and `val/pr_curves_per_class` for the one-vs-rest curves behind `mAP`) |
 | `val/attn_entropy` | Mean entropy of the Read cross-attention — each latent's distribution over the M stations (`softmax(attn['read'])`, averaged over batch/heads/latents). A falling curve means latents are concentrating on fewer stations rather than attending uniformly. |
 
 **Interpretation:**
-- A model that always predicts class 0 achieves `binary_accuracy = 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
-- `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tracks ordinal agreement (rewards near misses over far misses) independent of the training loss; `val/ece` (mean) and the test report's `mce` (worst-bin) are the calibration measurements.
-- **Temperature scaling** (Guo et al. 2017): `evaluate.py` fits a single temperature `T` on the **val** split (`fit_temperature`, an exact ternary search since NLL is convex in `1/T`) and `print_report` prints both `<split>/ece` and `<split>/ece_tempscaled` with the fitted `T`. `T` divides the logits, so it recalibrates confidence without changing the argmax — accuracy, QWK and the per-class table are identical. For `--split test` this is the proper val→test transfer; for `--split val` it is an in-sample check.
+- **`binary_accuracy` is base-rate-dominated.** A model that always predicts class 0 scores `binary_accuracy ≈ (1 − tc_fraction)` — ~0.90 at `tc_fraction = 0.1`, *not* 0.5 — while detecting nothing. So a high `binary_accuracy` can just mean "predicts background"; check it against the background fraction, and lean on `pr_auc`, the confusion matrix (is the TC row bleeding into class 0?), and `mae_class ≈ 3` (large for an always-background model) for real signal.
+- `val/mAP` and `val/pr_auc` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py` / the eval-plots callback, via `training.metrics.compute_full_set_metrics`), not per-batch — they integrate a precision-recall curve over the whole split, so they cannot live in the per-batch `metrics_fns`. They live in the separate `FULL_SET_METRICS` registry. `mAP` is the imbalance-robust multiclass headline; `pr_auc` is the TC-vs-background detection scalar.
 - `val/attn_entropy` starts high (latents attend near-uniformly over the M stations) and is expected to fall as the model learns which stations matter; padded station columns are masked out of the Read attention so they do not contribute.
 
 ---
 
 ## Config reference
 
-Key fields in `tc_classifier.yaml`:
+Key fields in `train.yaml`:
 
 | Key | Default | Notes |
 |-----|---------|-------|
@@ -563,6 +564,7 @@ Key fields in `tc_classifier.yaml`:
 | `model.num_heads` | 4 | Attention heads (`embed_dim` must be divisible) |
 | `model.num_latents` | 16 | N — number of learned latent vectors (the index dim the model processes) |
 | `model.num_process_layers` | 2 | L — latent self-attention blocks in the Processor |
+| `model.processor_weight_sharing` | `false` | `true` = one Processor block applied L times (recurrent / cross-layer weight tying, Senseiver-style) — same depth, one block's params |
 | `model.decode_mode` | `attention` | Decoder track: `attention` (single learned query) or `avgproj` (mean + linear) |
 | `model.fourier_dim` | 64 | `GaussianFourierEmbedding` output dim (must be even) |
 | `model.fourier_scale` | 1.0 | Std dev of frequency matrix; log-uniformly tuned in HP search [0.1, 10.0] |
@@ -573,7 +575,8 @@ Key fields in `tc_classifier.yaml`:
 | `trainer.attn_fig_every_n_epochs` | 5 | Epoch cadence for the per-component attention figures `val/attn_read_map` + `val/attn_processor_grid` + `val/attn_decoder_query` (VAL probe batch); 0 = disabled |
 | `trainer.grad_hist_every_n_epochs` | 5 | Epoch cadence for `grad_flow/*` gradient histograms (TRAIN probe batch, also at init); 0 = disabled |
 | `trainer.patience_metric` | `val/cross_entropy` | |
-| `trainer.run_dir` | `runs/tc_classifier/run_01` | Change per run to avoid overwriting |
+| `trainer.run_group` | `runs/tc_classifier` | Parent dir; `train.py` auto-creates the next `run_NN` under it (no clobbering). `--name <slug>` appends the run's purpose → `run_NN-<slug>` and sets the WandB run name |
+| `trainer.run_dir` | _(unset)_ | Pin a fixed run directory instead of auto-incrementing (takes precedence over `run_group`) |
 | `trainer.log_backend` | `wandb` | `wandb` / `tensorboard` / `null` |
 
 For WandB: set `log_backend: wandb`, add `project` / `name` / `tags` under `log_kwargs`, and export `WANDB_API_KEY` as an environment variable (never in the config file).
@@ -588,7 +591,9 @@ For WandB: set `log_backend: wandb`, add `project` / `name` / `tags` under `log_
 
 **Attention observability** (`train.py`): a fixed validation probe batch is held in memory for the duration of training. `return_weights=True` returns a dict of PRE-softmax scores, one per component: `read (B, H, N, M)`, `processor (L, B, H, N, N)`, `decoder (B, H, 1, N)` (None for `decode_mode='avgproj'`). Softmax over the last axis turns any of these into distributions. The entropy callback logs the Read entropy as `val/attn_entropy` (step cadence). Every `attn_fig_every_n_epochs` epochs three figures are logged from the same probe: `val/attn_read_map` (geographic Read scatter, per-station mean over latents+heads), `val/attn_processor_grid` (layers × heads grid of the N×N latent self-attention), and `val/attn_decoder_query` (heads × latents output-query heatmap, skipped for `avgproj`). Attention figures are VAL/TEST diagnostics — `evaluate.py` produces the same three figures per sample for the test split; nothing attention-related runs on training batches.
 
-**Gradient-flow callback** (`train.py`): a fixed TRAINING probe batch; `jax.grad` of the cross-entropy loss, one histogram per parameter leaf named by its tree path (`grad_flow/processor/blocks_0/...`), pushed via `logger.log_histogram` at init (step 0) and every `grad_hist_every_n_epochs` epochs. Train-only — vanishing/exploding layers show up as histograms collapsing or blowing up across depth.
+**Gradient-flow callback** (`train.py`): a fixed TRAINING probe batch; `jax.grad` of the cross-entropy loss, gradient histograms pushed via `logger.log_histogram` at init (step 0) and every `grad_hist_every_n_epochs` epochs. By default (`final_layers_only=True`) only each stage's OUTPUT layer is logged — Read's FFN output (`grad_flow/read/mlp/output_layer/...`), the last Processor block's FFN output (`grad_flow/processor/blocks_<L-1>/mlp/output_layer/...`), and the Decoder head (`grad_flow/decoder/head/...`) — enough to read flow across Read→Process→Decode without a ~70-leaf dump; set `final_layers_only=False` for every leaf. Train-only — vanishing/exploding stages show up as histograms collapsing or blowing up.
+
+**Diagnostics distribution figures** (`utils/jax_core/diagnostics._plot_dists`): the weight / gradient / activation histograms wrap into a grid of at most 4 panels per row (`max_cols=4`) rather than one long horizontal strip, so a deep model stays reviewable.
 
 **Multi-storm exclusion:** IBTrACS timestamps with ≥2 active storms are not used during training or validation — the model sees only unambiguous single-storm or background samples. These timestamps form the `hard_test` split for post-training analysis.
 

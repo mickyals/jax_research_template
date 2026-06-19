@@ -34,7 +34,10 @@ from experiments.tc_perceiver_io.plotting.plotting import (
     plot_decoder_query,
     plot_class_metrics,
     plot_confusion_matrix,
+    plot_pr_curve,
+    plot_pr_curves_per_class,
 )
+from training.metrics import binary_pr_curve, per_class_pr_curves
 from experiments.tc_perceiver_io.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
 from experiments.tc_perceiver_io.train.evaluate import domain_latlon_for_sample
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
@@ -142,6 +145,34 @@ class TestPlotClassMetrics:
 
     def test_returns_figure(self):
         fig = plot_class_metrics(self._make_metrics(), CLASS_NAMES)
+        assert isinstance(fig, plt.Figure)
+        plt.close('all')
+
+
+# ---------------------------------------------------------------------------
+# TestPRCurves
+# ---------------------------------------------------------------------------
+
+class TestPRCurves:
+
+    def _data(self):
+        rng    = np.random.default_rng(0)
+        logits = rng.standard_normal((50, N_CLASSES)).astype(np.float32)
+        labels = rng.integers(0, N_CLASSES, 50).astype(np.int32)
+        return logits, labels
+
+    def test_binary_pr_curve_returns_figure(self):
+        logits, labels = self._data()
+        fig = plot_pr_curve(binary_pr_curve(logits, labels))
+        assert isinstance(fig, plt.Figure)
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == 'Recall' and ax.get_ylabel() == 'Precision'
+        plt.close('all')
+
+    def test_per_class_pr_curves_returns_figure(self):
+        logits, labels = self._data()
+        fig = plot_pr_curves_per_class(
+            per_class_pr_curves(logits, labels), CLASS_NAMES)
         assert isinstance(fig, plt.Figure)
         plt.close('all')
 
@@ -311,6 +342,15 @@ class TestPlotAttentionGeographic:
             plot_attention_geographic(
                 attn['read'], batch, location_encoding='unit_circle', geo=True,
             )
+        plt.close('all')
+
+    def test_title_caption_appears_in_figure(self):
+        attn, batch = _model_and_attn(location_encoding='unit_circle')
+        fig = plot_attention_geographic(
+            attn['read'], batch, location_encoding='unit_circle',
+            title='AL09 IDA — true: Cat 4, pred: Cat 3')
+        assert 'IDA' in fig.axes[0].get_title()
+        assert 'Read attention' in fig.axes[0].get_title()
         plt.close('all')
 
     def test_sample_idx_selects_different_sample(self):

@@ -551,3 +551,117 @@ class TestMisc:
         r = repr(tc_dataset)
         assert 'TCDataset' in r
         assert 'n_tc=1' in r
+
+
+# ---------------------------------------------------------------------------
+# Station selection (nearest vs random; train-only view augmentation)
+# ---------------------------------------------------------------------------
+
+def _dense_insitu(tmp_path, base_ns):
+    """Five stations all within ~30 km of (15, -75) — a candidate pool larger
+    than the small max_stations used below, so the selection policy bites."""
+    offs = [(0.0, 0.0), (0.2, 0.0), (-0.2, 0.0), (0.0, 0.2), (0.0, -0.2)]
+    sids = [f'STA_{i}' for i in range(len(offs))]
+    rng  = np.random.default_rng(0)
+    cols = {k: [] for k in (
+        'primary_station_id', 'latitude', 'longitude', 'elevation',
+        'report_timestamp', 'station_name', 'station_reliability')}
+    for sid, (dla, dlo) in zip(sids, offs):
+        cols['primary_station_id'].append(sid)
+        cols['latitude'].append(15.0 + dla)
+        cols['longitude'].append(-75.0 + dlo)
+        cols['elevation'].append(5.0)
+        cols['report_timestamp'].append(base_ns)
+        cols['station_name'].append(sid)
+        cols['station_reliability'].append('always_active')
+    n = len(sids)
+    obs = {
+        'primary_station_id':        np.array(cols['primary_station_id']),
+        'latitude':                  np.array(cols['latitude'],  dtype=np.float32),
+        'longitude':                 np.array(cols['longitude'], dtype=np.float32),
+        'elevation':                 np.array(cols['elevation'], dtype=np.float32),
+        'report_timestamp':          np.array(cols['report_timestamp'], dtype=np.int64),
+        'slp_derived':               np.zeros(n, dtype=bool),
+        'slp_unreliable':            np.zeros(n, dtype=bool),
+        'station_name':              np.array(cols['station_name']),
+        'station_reliability':       np.array(cols['station_reliability']),
+        'air_pressure':              rng.uniform(99000, 101000, n).astype(np.float32),
+        'air_pressure_at_sea_level': rng.uniform(100900, 101500, n).astype(np.float32),
+        'air_temperature':           rng.uniform(295, 310, n).astype(np.float32),
+        'dew_point_temperature':     rng.uniform(285, 300, n).astype(np.float32),
+        'wind_speed':                rng.uniform(2, 15, n).astype(np.float32),
+        'wind_from_direction':       rng.uniform(0, 360, n).astype(np.float32),
+    }
+    obs_path = tmp_path / 'dense_obs.npz'
+    np.savez(obs_path, **obs)
+    meta = {
+        'primary_station_id': np.array(sids),
+        'station_name':       np.array(sids),
+        'latitude':           np.array(cols['latitude'],  dtype=np.float32),
+        'longitude':          np.array(cols['longitude'], dtype=np.float32),
+        'elevation':          np.array([5.0] * n, dtype=np.float32),
+        'slp_derived':        np.zeros(n, dtype=bool),
+        'slp_unreliable':     np.zeros(n, dtype=bool),
+        'station_reliability':np.array(['always_active'] * n),
+    }
+    meta_path = tmp_path / 'dense_meta.npz'
+    np.savez(meta_path, **meta)
+    return obs_path, meta_path
+
+
+def _dense_dataset(tmp_path, max_stations):
+    ib_path, ms_path, base_ns = _make_ibtracs(tmp_path)
+    obs_path, meta_path = _dense_insitu(tmp_path, base_ns)
+    return TCDataset(
+        ibtracs=IBTrACSDataset(ib_path, ms_path),
+        insitu=InsituLandDataset(obs_path, meta_path),
+        radius_km=300.0, time_window_hours=3.0,
+        max_stations=max_stations, min_stations=1,
+    )
+
+
+def _coord_set(s):
+    """Identity of the chosen REAL stations: set of rounded (x, y) coords."""
+    m = np.asarray(s['station_mask'])
+    return frozenset(map(tuple, np.round(np.asarray(s['station_coords'])[m], 4)))
+
+
+class TestStationSelection:
+
+    def test_pool_exceeds_cap(self, tmp_path):
+        # Sanity: 5 candidates > max_stations=2, so selection actually bites.
+        ds = _dense_dataset(tmp_path, max_stations=2)
+        s  = ds.get_tc_sample(0)
+        assert int(s['n_available']) == 5
+        assert int(s['n_stations']) == 2
+
+    def test_nearest_is_deterministic(self, tmp_path):
+        ds = _dense_dataset(tmp_path, max_stations=2)
+        a = _coord_set(ds.get_tc_sample(0, station_selection='nearest'))
+        b = _coord_set(ds.get_tc_sample(0, station_selection='nearest'))
+        assert a == b
+
+    def test_random_varies_across_rngs(self, tmp_path):
+        ds = _dense_dataset(tmp_path, max_stations=2)
+        seen = set()
+        for seed in range(25):
+            s = ds.get_tc_sample(0, station_selection='random',
+                                 rng=np.random.default_rng(seed))
+            cs = _coord_set(s)
+            assert len(cs) == 2                       # always max_stations kept
+            seen.add(cs)
+        assert len(seen) > 1                          # different subsets appear
+
+    def test_random_without_rng_falls_back_to_nearest(self, tmp_path):
+        ds = _dense_dataset(tmp_path, max_stations=2)
+        rand_norng = _coord_set(ds.get_tc_sample(0, station_selection='random'))
+        nearest    = _coord_set(ds.get_tc_sample(0, station_selection='nearest'))
+        assert rand_norng == nearest
+
+    def test_no_op_when_pool_within_cap(self, tmp_path):
+        # 5 candidates <= max_stations=8 → random keeps all, same as nearest.
+        ds = _dense_dataset(tmp_path, max_stations=8)
+        nearest = _coord_set(ds.get_tc_sample(0, station_selection='nearest'))
+        rand    = _coord_set(ds.get_tc_sample(0, station_selection='random',
+                                              rng=np.random.default_rng(3)))
+        assert nearest == rand and len(nearest) == 5

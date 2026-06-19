@@ -179,9 +179,11 @@ class TCLoader:
         samples are drawn fresh every step (uniform position + random
         pool timestamp), giving maximum diversity.
 
-    Stations are always taken nearest-first up to max_stations (the dataset
-    uses every station within radius and the region is sparse, so the cap
-    rarely binds) — no random station subsampling, so eval is reproducible.
+    Station selection up to max_stations is controlled by ``station_selection``:
+    'nearest' (default, deterministic — always used for val/test so eval is
+    reproducible) or 'random' (train-only augmentation — each draw of a TC row
+    yields a different station view; only bites when a sample has more than
+    max_stations candidates).
 
     Parameters
     ----------
@@ -220,6 +222,7 @@ class TCLoader:
         fov_lon:            tuple[float, float] = (-100.0, -45.0),
         steps_per_epoch:    Optional[int] = None,
         freeze_backgrounds: bool  = False,
+        station_selection:  str   = 'nearest',
     ) -> None:
         if not (0.0 < tc_fraction < 1.0):
             raise ValueError(f"tc_fraction must be in (0, 1), got {tc_fraction}")
@@ -233,6 +236,11 @@ class TCLoader:
         self._fov_lon            = fov_lon
         self._steps_per_epoch    = steps_per_epoch
         self._freeze_backgrounds = freeze_backgrounds
+        # Station-selection policy when a sample has more than max_stations
+        # candidates: 'nearest' (deterministic) or 'random' (train-only view
+        # augmentation). Applied to BOTH TC and background draws so the two
+        # channels share the same selection statistics (no shortcut).
+        self._station_selection  = station_selection
         self._frozen_bg: Optional[list[dict]] = None
         self._epoch              = 0
 
@@ -273,7 +281,9 @@ class TCLoader:
             lat = float(rng.uniform(self._fov_lat[0], self._fov_lat[1]))
             lon = float(rng.uniform(self._fov_lon[0], self._fov_lon[1]))
             ts  = int(rng.choice(pool))
-            bg  = self._dataset.get_background_sample(lat, lon, ts)
+            bg  = self._dataset.get_background_sample(
+                lat, lon, ts,
+                station_selection=self._station_selection, rng=rng)
             if bg is not None:
                 bg_buf.append(bg)
         return bg_buf, True
@@ -361,7 +371,8 @@ class TCLoader:
             tc_buf: list[dict] = []
             while len(tc_buf) < self._tc_half:
                 idx    = int(rng.integers(0, n_tc))
-                sample = self._dataset.get_tc_sample(idx)
+                sample = self._dataset.get_tc_sample(
+                    idx, station_selection=self._station_selection, rng=rng)
                 if sample is not None:
                     tc_buf.append(sample)
 
@@ -403,7 +414,8 @@ class TCLoader:
             return buf[:n_bg]
 
         for idx in indices:
-            sample = self._dataset.get_tc_sample(int(idx))
+            sample = self._dataset.get_tc_sample(
+                int(idx), station_selection=self._station_selection, rng=rng)
             if sample is None:
                 continue
             tc_buf.append(sample)
@@ -496,6 +508,9 @@ class TCDataModule(BaseDataModule):
 
         self._batch_size         = int(config.get('batch_size', 64))
         self._tc_fraction        = float(config.get('tc_fraction', 0.5))
+        # Train-only station-selection policy ('nearest' | 'random'); val/test
+        # always use 'nearest' (deterministic eval). See TCLoader.
+        self._station_selection  = str(config.get('station_selection', 'nearest'))
         # FOV bounds live on the InputSpec (single source of truth) — used here
         # for the loaders' background sampling and the background pool.
         self._fov_lat            = self._input_spec.fov_lat
@@ -563,6 +578,7 @@ class TCDataModule(BaseDataModule):
             fov_lon            = self._fov_lon,
             steps_per_epoch    = steps_per_epoch,
             freeze_backgrounds = False,
+            station_selection  = self._station_selection,   # train-only random views
         )
 
     def val_loader(

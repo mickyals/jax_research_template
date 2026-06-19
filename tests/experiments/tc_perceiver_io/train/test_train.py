@@ -399,8 +399,11 @@ matplotlib.use('Agg')   # headless — set before train.py pulls in pyplot
 from experiments.tc_perceiver_io.train.train import (   # noqa: E402
     _make_attn_entropy_callback,
     _make_attn_figure_callback,
+    _make_eval_plots_callback,
     _make_grad_flow_callback,
     _log_diagnostics,
+    _print_token_summary,
+    _resolve_run_dir,
 )
 from experiments.tc_perceiver_io.data.sources.ibtracs import (   # noqa: E402
     CLASS_NAMES,
@@ -482,22 +485,33 @@ class TestObservabilityCallbacks:
         cb(state, epoch=5, global_step=20)   # on-cadence
         assert len(logger.figures) == 3
 
-    def test_grad_flow_callback_logs_named_histograms(self):
-        model, state, batch = self._model_state_batch()
+    def test_grad_flow_callback_logs_final_layers_only(self):
+        # Default final_layers_only=True logs only each stage's output layer:
+        # Read FFN out, the LAST Processor block's FFN out, and the Decoder head.
+        model, state, batch = self._model_state_batch()  # num_process_layers=2
         logger = _RecordingLogger()
         cb = _make_grad_flow_callback(model, batch, logger, every_n_epochs=1)
         cb(state, epoch=1, global_step=7)
-        assert len(logger.histograms) > 0
         tags = [t for t, _, _ in logger.histograms]
-        # Named by tree path under the grad_flow/ prefix
         assert all(t.startswith('grad_flow/') for t in tags)
-        assert any('processor' in t for t in tags)  # encoder body submodule
-        assert any(t.endswith('kernel') for t in tags)
-        # One histogram per parameter leaf
-        n_leaves = len(jax.tree_util.tree_leaves(state.params))
-        assert len(tags) == n_leaves
-        # All logged at the given step
+        # The three stage-output seams are present (kernel + bias each → 6).
+        assert 'grad_flow/read/mlp/output_layer/kernel'              in tags
+        assert 'grad_flow/processor/blocks_1/mlp/output_layer/kernel' in tags
+        assert 'grad_flow/decoder/head/kernel'                       in tags
+        assert len(tags) == 6
+        # Internal attention projections are filtered out (not a full dump).
+        assert not any('q_proj' in t or 'out_proj' in t for t in tags)
+        # All logged at the given step.
         assert all(s == 7 for _, _, s in logger.histograms)
+
+    def test_grad_flow_callback_all_leaves_when_unfiltered(self):
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        cb = _make_grad_flow_callback(model, batch, logger, every_n_epochs=1,
+                                      final_layers_only=False)
+        cb(state, epoch=1, global_step=3)
+        tags = [t for t, _, _ in logger.histograms]
+        assert len(tags) == len(jax.tree_util.tree_leaves(state.params))
 
     def test_grad_flow_callback_respects_cadence(self):
         model, state, batch = self._model_state_batch()
@@ -537,3 +551,62 @@ class TestObservabilityCallbacks:
                          loss_landscape_grid=4)
         tags = [t for t, _ in logger.figures]
         assert 'diagnostics/loss_landscape' in tags
+
+    def test_eval_plots_callback_uses_prefix(self):
+        # The end-of-training test pass reuses this callback with prefix='test'.
+        model, state, batch = self._model_state_batch()
+        logger = _RecordingLogger()
+        cb = _make_eval_plots_callback(
+            model, [batch], logger, class_names=CLASS_NAMES, prefix='test')
+        cb(state, epoch=0, global_step=5)
+        fig_tags = [t for t, _ in logger.figures]
+        assert 'test/confusion_norm' in fig_tags
+        assert 'test/per_class_metrics' in fig_tags
+        assert 'test/pr_curve' in fig_tags
+        assert 'test/pr_curves_per_class' in fig_tags
+        logged = set().union(*[set(m) for m, _ in logger.metrics])
+        assert 'test/mAP' in logged and 'test/pr_auc' in logged
+
+
+# ---------------------------------------------------------------------------
+# Run-dir resolution + token summary (config-glue helpers)
+# ---------------------------------------------------------------------------
+
+class TestRunDirAndTokenSummary:
+
+    def test_run_group_autoincrements(self, tmp_path):
+        cfg = {'run_group': 'runs/g'}
+        d1 = _resolve_run_dir(cfg, tmp_path)
+        assert d1.name == 'run_01'
+        d1.mkdir(parents=True)                 # realise it, then ask for the next
+        assert _resolve_run_dir(cfg, tmp_path).name == 'run_02'
+
+    def test_run_group_appends_name_slug(self, tmp_path):
+        d = _resolve_run_dir({'run_group': 'runs/g'}, tmp_path, name='tcfrac0.3')
+        assert d.name == 'run_01-tcfrac0.3'
+
+    def test_explicit_run_dir_takes_precedence(self, tmp_path):
+        d = _resolve_run_dir({'run_dir': 'runs/fixed'}, tmp_path, name='ignored')
+        assert d == tmp_path / 'runs' / 'fixed'
+
+    def test_missing_both_keys_raises(self, tmp_path):
+        with pytest.raises(ValueError, match='run_dir.*run_group|run_group'):
+            _resolve_run_dir({}, tmp_path)
+
+    def test_token_summary_reports_dims(self, capsys):
+        cfg = {
+            'model': {'n_obs_features': 5, 'fourier_dim': 64, 'embed_dim': 128,
+                      'missingness_indicator': True},
+            'data':  {'max_stations': 20},
+        }
+        _print_token_summary(cfg)
+        out = capsys.readouterr().out
+        assert '74d' in out          # 2*5 + 64
+        assert '128d' in out         # embed_dim
+        assert '20 stations' in out
+
+    def test_token_summary_without_missingness(self, capsys):
+        cfg = {'model': {'n_obs_features': 5, 'fourier_dim': 64, 'embed_dim': 128,
+                         'missingness_indicator': False}, 'data': {}}
+        _print_token_summary(cfg)
+        assert '69d' in capsys.readouterr().out   # 5 + 64 (no mask channel)

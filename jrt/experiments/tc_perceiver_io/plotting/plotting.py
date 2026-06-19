@@ -60,8 +60,9 @@ def plot_confusion_matrix(
     plt.Figure
     """
     if normalize:
-        display = np.where(cm.sum(axis=1, keepdims=True) > 0,
-                            cm.astype(float) / cm.sum(axis=1, keepdims=True), 0.0)
+        rowsum  = cm.sum(axis=1, keepdims=True)
+        display = np.divide(cm.astype(float), rowsum,
+                            out=np.zeros(cm.shape, dtype=float), where=rowsum > 0)
         vmax    = 1.0
         clabel  = 'Recall (fraction of true class)'
         fmt     = '.2f'
@@ -102,6 +103,74 @@ def plot_class_metrics(
         ylabel='Score', title='Per-class Precision / Recall / F1',
         ylim=(0, 1.05), colors=['steelblue', 'darkorange', 'seagreen'],
     )
+
+
+# ---------------------------------------------------------------------------
+# Precision-recall curves
+# ---------------------------------------------------------------------------
+
+def plot_pr_curve(
+    curve: dict,
+    title: str = 'Precision-Recall — TC vs. background detection',
+) -> plt.Figure:
+    """Plot a binary precision-recall curve with its AP and no-skill baseline.
+
+    Parameters
+    ----------
+    curve : dict
+        Output of ``training.metrics.binary_pr_curve`` —
+        {'precision', 'recall', 'ap', 'base_rate'}. The figure's AP is the
+        same number logged as the ``pr_auc`` scalar (shared code path).
+    """
+    fig, ax = plt.subplots(figsize=(6.5, 6))
+    ax.plot(curve['recall'], curve['precision'], color='steelblue',
+            lw=2, label=f"AP = {curve['ap']:.3f}")
+    base = float(curve.get('base_rate', 0.0))
+    ax.axhline(base, color='grey', lw=1, ls='--',
+               label=f'no-skill (base rate = {base:.3f})')
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.02)
+    ax.set_xlabel('Recall')
+    ax.set_ylabel('Precision')
+    ax.set_title(title, fontsize=11)
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def plot_pr_curves_per_class(
+    curves:      dict[int, dict],
+    class_names: list[str],
+    title:       str = 'Per-class Precision-Recall (one-vs-rest)',
+) -> plt.Figure:
+    """Overlay one-vs-rest PR curves for every present class.
+
+    Parameters
+    ----------
+    curves : dict[int, dict]
+        Output of ``training.metrics.per_class_pr_curves`` — keyed by class
+        index, each value a ``precision_recall_curve`` dict. Each class's AP
+        (in the legend) is exactly its contribution to ``mAP``.
+    class_names : list[str]
+    """
+    fig, ax = plt.subplots(figsize=(8, 6.5))
+    keys = sorted(curves)
+    cmap = plt.get_cmap('viridis', max(len(keys), 1))
+    for i, c in enumerate(keys):
+        cv   = curves[c]
+        name = class_names[c] if c < len(class_names) else f'class {c}'
+        ax.plot(cv['recall'], cv['precision'], lw=1.6, color=cmap(i),
+                label=f"{name} (AP={cv['ap']:.2f})")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.02)
+    ax.set_xlabel('Recall')
+    ax.set_ylabel('Precision')
+    ax.set_title(title, fontsize=11)
+    ax.legend(loc='center left', bbox_to_anchor=(1.01, 0.5), fontsize=8)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +292,7 @@ def plot_attention_geographic(
     storm_latlon:      Optional[tuple[float, float]] = None,
     station_latlon:    Optional[tuple[np.ndarray, np.ndarray]] = None,
     query_latlon:      Optional[tuple[float, float]] = None,
+    title:             Optional[str] = None,
 ) -> plt.Figure:
     """Geographic Read map — which stations the model attends to.
 
@@ -281,7 +351,11 @@ def plot_attention_geographic(
     query_latlon : (lat, lon), optional
         DOMAIN mode only: decoded query/storm position in degrees. Required for
         domain encoding.
+    title : str, optional
+        Caption appended after "Read attention — " (e.g. a storm/true/pred
+        string). Default describes the plot generically.
     """
+    _caption = title if title is not None else 'stations the latents attend to'
     X      = batch['X']
     coords = np.asarray(X['station_coords'][sample_idx])   # (M, 2)
     mask   = np.asarray(X['station_mask'][sample_idx])     # (M,) bool
@@ -360,7 +434,7 @@ def plot_attention_geographic(
                 [-1.08 * r_m, 1.08 * r_m, -1.08 * r_m, 1.08 * r_m],
                 crs=ax.projection,
             )
-        ax.set_title('Read attention — stations the latents attend to\n'
+        ax.set_title(f'Read attention — {_caption}\n'
                      '(storm-centred local map, north up)',
                      pad=15, fontsize=10)
         fig.colorbar(sc, ax=ax, label='Attention weight', shrink=0.7, pad=0.1)
@@ -387,7 +461,7 @@ def plot_attention_geographic(
         None, lons, lats, scatter_values=w_real,
         extent=[lon_min, lon_max, lat_min, lat_max],
         cmap='YlOrRd',
-        title='Read attention — stations the latents attend to (domain encoding)',
+        title=f'Read attention — {_caption} (domain encoding)',
         xlabel='Longitude', ylabel='Latitude',
         colorbar_label='Attention weight',
         scatter_size_range=(30, 280), grid=True, geo=geo,

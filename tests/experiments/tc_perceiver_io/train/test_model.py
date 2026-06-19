@@ -293,6 +293,30 @@ def test_missingness_indicator_false_runs():
     assert jnp.all(jnp.isfinite(logits))
 
 
+def test_processor_weight_sharing_reduces_params_keeps_depth():
+    """Recurrent weight tying = one Processor block applied num_process_layers
+    times: fewer params, single blocks_0 leaf, but still L attention applications."""
+    L = 4
+    shared = _make_model(num_process_layers=L, processor_weight_sharing=True)
+    indep  = _make_model(num_process_layers=L, processor_weight_sharing=False)
+    X  = _fake_X()
+    ps = shared.init(KEY, X, train=False)['params']
+    pi = indep.init(KEY, X, train=False)['params']
+
+    n_shared = sum(int(np.prod(x.shape)) for x in jax.tree_util.tree_leaves(ps))
+    n_indep  = sum(int(np.prod(x.shape)) for x in jax.tree_util.tree_leaves(pi))
+    assert n_shared < n_indep                       # tying drops parameters
+
+    assert set(ps['processor'].keys()) == {'blocks_0'}      # one shared block
+    assert len(pi['processor'].keys()) == L                 # L distinct blocks
+
+    # Still runs, and the Processor still applies L times (depth preserved).
+    logits, attn = shared.apply({'params': ps}, X, train=False, return_weights=True)
+    assert logits.shape == (B, N_CLASSES)
+    assert attn['processor'].shape[0] == L
+    assert jnp.all(jnp.isfinite(logits))
+
+
 # ---------------------------------------------------------------------------
 # Encoder / head split — frozen-encoder probing
 # ---------------------------------------------------------------------------

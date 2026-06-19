@@ -117,7 +117,7 @@ class InputSpec:
         """Per-variable (lo, hi) float32 arrays aligned to obs_vars.
 
         Returns (None, None) when no obs_bounds are set. For minmax modes the
-        arrays are (min, max); for 'standardise' they are (mean, std).
+        arrays are (min, max); for 'standardize' they are (mean, std).
         """
         if self.obs_bounds is None:
             return None, None

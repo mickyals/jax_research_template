@@ -118,6 +118,17 @@ class TestVincentyNp:
         assert float(fwd) == pytest.approx(0.0, abs=1e-4)
         assert float(back) == pytest.approx(0.0, abs=1e-4)
 
+    def test_coincident_points_emit_no_divide_warning(self):
+        # sin_sig == 0 / c2a == 0 at coincident points: the masked np.divide must
+        # not raise the benign 0/0 RuntimeWarning the old np.where form produced.
+        import warnings
+        lat = np.array([_LAT1, 15.0, 0.0])
+        lon = np.array([_LON1, -75.0, 0.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', RuntimeWarning)
+            d, _, _, _ = vincenty_np(lat, lon, lat, lon)   # all coincident
+        assert np.allclose(np.asarray(d), 0.0, atol=1e-4)
+
     def test_embed_bearing_shape(self):
         _, _, _, emb = vincenty_np(_LAT1, _LON1, _LAT2, _LON2, embed_bearing=True)
         assert emb is not None

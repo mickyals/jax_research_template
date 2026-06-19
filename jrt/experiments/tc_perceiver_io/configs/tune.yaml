@@ -2,7 +2,7 @@
 # TC Classifier -- hyperparameter search configuration
 #
 # Use this config with tune.py to find the best architecture and training HPs.
-# Once the best params are found, copy them into tc_classifier.yaml and run a
+# Once the best params are found, copy them into train.yaml and run a
 # full-length training with train.py.
 #
 # What this file controls vs. what tune.py controls
@@ -116,7 +116,7 @@ data:
   target:                 organisation
 
   # --- Train/val/test split ---
-  # Independent of tc_classifier.yaml's split. Splits are by ISO_TIME calendar
+  # Independent of train.yaml's split. Splits are by ISO_TIME calendar
   # year (strategy 'year'; see data/splits.py). Re-tune or re-train the chosen
   # config at full length once the split policy is finalised.
   split:
@@ -132,12 +132,12 @@ data:
 
   # --- Station filtering ---
   reliability_levels:     [always_active, mostly_active, sporadic, sparse, unusable]
-  radius_km:              500.0
+  radius_km:              1000.0
   time_window_hours:      0.1
 
   # --- Observed variables ---
   # wind_east/wind_north are DERIVED from wind_speed + wind_from_direction
-  # by TCDataset (see tc_classifier.yaml for rationale).
+  # by TCDataset (see train.yaml for rationale).
   obs_vars:
     - air_pressure_at_sea_level
     - air_temperature
@@ -156,14 +156,14 @@ data:
 
   # --- Token padding / truncation ---
   # All stations within radius used; >max_stations → nearest-trim (no random).
-  max_stations:           16
-  min_stations:           1
+  max_stations:           25
+  min_stations:           10
 
   # --- Batch construction ---
   # batch_size is set in trainer: and propagated here by tune.py.
   tc_fraction:            0.5         # 50/50 balanced for tuning
 
-  # Class weighting from train-split counts (see tc_classifier.yaml):
+  # Class weighting from train-split counts (see train.yaml):
   # none | inverse_freq | sqrt_inverse_freq | effective_number | median_freq
   class_weight_scheme:    none
   class_weight_beta:      0.999
@@ -185,6 +185,7 @@ model:
   # --- Fixed across all trials ---
   missingness_indicator: true  # concat obs_mask as its own channel (missing obs filled 0)
   decode_mode:          attention  # single-query attention decoder (or 'avgproj')
+  processor_weight_sharing: false  # recurrent weight tying off for the sweep (fixed)
   n_obs_features:       5
   n_classes:            9    # ordinal organisation scale (ibtracs.CLASS_NAMES)
   mlp_ratio:            4.0
@@ -226,7 +227,7 @@ trainer:
 
   # --- Tuning loop ---
   # Short epochs so the pruner can cut bad trials quickly.
-  # Re-train the best config at full length using tc_classifier.yaml.
+  # Re-train the best config at full length using train.yaml.
   num_epochs:           30
   num_steps:            .inf
 

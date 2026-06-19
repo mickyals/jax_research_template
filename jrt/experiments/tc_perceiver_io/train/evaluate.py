@@ -6,8 +6,9 @@ Post-training evaluation for TCPerceiverIO.
 Produces
 --------
 - Scalar metrics (loss, cross-entropy, accuracy, binary_accuracy, mae_class)
-- Quadratic-weighted kappa (ordinal agreement) and ECE (calibration gap),
-  computed over the full accumulated split — see metrics.py
+- Full-set metrics — mAP (macro one-vs-rest average precision) and pr_auc
+  (binary TC-vs-background detection AP), computed over the full accumulated
+  split — see training/metrics.py FULL_SET_METRICS
 - 9×9 confusion matrix — row-normalised (recall per class) + raw counts
 - Per-class precision, recall, F1 bar chart
 - Binary detection summary (TC vs. no-storm)
@@ -15,19 +16,19 @@ Produces
 CLI
 ---
     python -m experiments.tc_perceiver_io.train.evaluate \\
-        jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml
+        jrt/experiments/tc_perceiver_io/configs/train.yaml
 
     # Override checkpoint directory
     python -m experiments.tc_perceiver_io.train.evaluate \\
-        jrt/.../tc_classifier.yaml --checkpoint_dir runs/exp01/checkpoints
+        jrt/.../train.yaml --checkpoint_dir runs/exp01/checkpoints
 
     # Save plots to disk instead of displaying
     python -m experiments.tc_perceiver_io.train.evaluate \\
-        jrt/.../tc_classifier.yaml --output_dir runs/exp01/eval --no_show
+        jrt/.../train.yaml --output_dir runs/exp01/eval --no_show
 
     # Evaluate on validation split instead of test
     python -m experiments.tc_perceiver_io.train.evaluate \\
-        jrt/.../tc_classifier.yaml --split val
+        jrt/.../train.yaml --split val
 """
 
 from __future__ import annotations
@@ -46,6 +47,11 @@ from experiments.tc_perceiver_io.data.datamodule import TCDataModule
 from experiments.tc_perceiver_io.data.transforms.encoding import decode_domain
 from experiments.tc_perceiver_io.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
+from training.metrics import (
+    binary_pr_curve,
+    compute_full_set_metrics,
+    per_class_pr_curves,
+)
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
 from experiments.tc_perceiver_io.plotting.plotting import (
     plot_confusion_matrix,
@@ -53,6 +59,8 @@ from experiments.tc_perceiver_io.plotting.plotting import (
     plot_attention_geographic,
     plot_attention_matrix_grid,
     plot_decoder_query,
+    plot_pr_curve,
+    plot_pr_curves_per_class,
 )
 from training.trainer import Trainer
 
@@ -140,6 +148,41 @@ def collect_predictions(
         np.concatenate(all_logits),
         meta,
     )
+
+
+def collect_class_exemplars(loader, n_classes: int):
+    """Pull ONE example of each true class from the loader (first seen).
+
+    Used to show a concrete prediction per class (Background → Cat 5) on the
+    attention Read map. Returns ``(X, labels, metas)`` stacked over the classes
+    actually present (class order), or None if the loader is empty:
+        X      : dict of (C', ...) arrays — the model input for the exemplars
+        labels : (C',) int true classes
+        metas  : list of per-sample meta dicts (sid / query_lat / query_lon),
+                 or None entries when the loader carries no 'meta'.
+    """
+    found: dict[int, tuple[dict, Optional[dict]]] = {}
+    for batch in loader:
+        y    = np.asarray(batch['y'])
+        meta = batch.get('meta')
+        for j in range(len(y)):
+            c = int(y[j])
+            if c in found:
+                continue
+            xj = {k: np.asarray(v[j]) for k, v in batch['X'].items()}
+            mj = ({k: v[j] for k, v in meta.items()} if meta is not None else None)
+            found[c] = (xj, mj)
+        if len(found) >= n_classes:
+            break
+
+    if not found:
+        return None
+    classes = sorted(found)
+    X = {k: np.stack([found[c][0][k] for c in classes])
+         for k in found[classes[0]][0]}
+    labels = np.array(classes, dtype=np.int32)
+    metas  = [found[c][1] for c in classes]
+    return X, labels, metas
 
 
 def per_storm_metrics(
@@ -285,6 +328,12 @@ def print_report(
         val = float(fn(logits_j, labels_j))
         print(f"    {split}/{name}: {val:.5f}")
 
+    # Full-set metrics — integrate a PR curve over the whole split, so they are
+    # computed here over the accumulated logits/labels, not per batch.
+    print(f"\n  Full-set metrics:")
+    for name, val in compute_full_set_metrics(logits, labels).items():
+        print(f"    {split}/{name}: {val:.5f}")
+
     print(f"\n  Binary detection (TC vs. Background):")
     print(f"    Accuracy : {bin_m['accuracy']:.4f}")
     print(f"    Precision: {bin_m['precision']:.4f}")
@@ -320,13 +369,14 @@ def evaluate(
     n_attn_samples: int  = 4,
     show_plots:     bool = True,
     geo:            bool = False,
+    class_examples: bool = True,
 ) -> None:
     """Full evaluation pipeline: load checkpoint → inference → report + plots.
 
     Parameters
     ----------
     config_path : str or Path
-        Path to tc_classifier.yaml.
+        Path to train.yaml.
     checkpoint_dir : str or Path, optional
         Override ``trainer.checkpoint_dir`` in config.
     output_dir : str or Path, optional
@@ -404,13 +454,23 @@ def evaluate(
     )
     fig_cls = plot_class_metrics(pcm, class_names)
 
+    # Precision-recall curves (the shape behind pr_auc / mAP).
+    fig_pr     = plot_pr_curve(
+        binary_pr_curve(logits, labels),
+        title=f'PR — TC vs. background detection ({split})')
+    fig_pr_cls = plot_pr_curves_per_class(
+        per_class_pr_curves(logits, labels), class_names,
+        title=f'Per-class PR — one-vs-rest ({split})')
+
     if output_dir is not None:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         fig_norm.savefig(out / f'{split}_confusion_norm.png',    dpi=150, bbox_inches='tight')
         fig_raw.savefig( out / f'{split}_confusion_counts.png',  dpi=150, bbox_inches='tight')
         fig_cls.savefig( out / f'{split}_per_class_metrics.png', dpi=150, bbox_inches='tight')
-        print(f"Confusion / metrics plots saved to {out}/")
+        fig_pr.savefig(  out / f'{split}_pr_curve.png',          dpi=150, bbox_inches='tight')
+        fig_pr_cls.savefig(out / f'{split}_pr_curves_per_class.png', dpi=150, bbox_inches='tight')
+        print(f"Confusion / metrics / PR-curve plots saved to {out}/")
 
     # ------------------------------------------------------------------
     # Attention plots — the three Perceiver-IO components (pre-softmax scores,
@@ -464,6 +524,7 @@ def evaluate(
                     if (geo and loc_enc == 'unit_circle'
                         and batch_meta is not None) else None),
                 station_latlon=station_latlon, query_latlon=query_latlon,
+                title=_sample_title(i),
             )
 
             fig_g = plot_attention_matrix_grid(
@@ -490,6 +551,59 @@ def evaluate(
         if output_dir is not None:
             print(f"Attention plots saved to {out}/")
 
+    # ------------------------------------------------------------------
+    # Per-class exemplars — one sample of each true class (Background → Cat 5)
+    # with its prediction, shown on the Read attention map. A quick "how does
+    # the model behave on each class" panel.
+    # ------------------------------------------------------------------
+    if class_examples:
+        ex = collect_class_exemplars(
+            dm.test_loader() if split == 'test' else dm.val_loader(), n_classes)
+        if ex is not None:
+            Xex, yex, metas = ex
+            logits_ex, attn_ex = model.apply(variables, Xex, train=False,
+                                             return_weights=True)
+            read_ex  = np.asarray(jax.nn.softmax(attn_ex['read'], axis=-1))
+            preds_ex = np.asarray(logits_ex).argmax(-1)
+            ds          = dm._test_ds if split == 'test' else dm._val_ds
+            sid_to_name = dict(zip(
+                np.asarray(ds.ibtracs['SID']).tolist(),
+                np.asarray(ds.ibtracs['NAME']).tolist(),
+            ))
+
+            print(f"\n  Per-class exemplars (true → pred):")
+            for k in range(len(yex)):
+                true_c = class_names[int(yex[k])]
+                pred_c = class_names[int(preds_ex[k])]
+                sid    = metas[k]['sid'] if metas[k] is not None else None
+                who    = (f"{sid} {sid_to_name.get(sid, '')}".strip()
+                          if sid is not None else 'background')
+                mark   = '✓' if int(yex[k]) == int(preds_ex[k]) else '✗'
+                print(f"    {true_c:<14} → {pred_c:<14} {mark}  ({who})")
+
+                station_latlon = query_latlon = None
+                if loc_enc == 'domain':
+                    station_latlon, query_latlon = domain_latlon_for_sample(
+                        {'X': Xex}, k, fov_lat, fov_lon)
+                storm_latlon = None
+                if (geo and loc_enc == 'unit_circle' and metas[k] is not None
+                        and 'query_lat' in metas[k]):
+                    storm_latlon = (float(metas[k]['query_lat']),
+                                    float(metas[k]['query_lon']))
+                fig_ex = plot_attention_geographic(
+                    read_ex, {'X': Xex}, location_encoding=loc_enc,
+                    fov_lat=fov_lat, fov_lon=fov_lon, radius_km=radius_km,
+                    sample_idx=k, geo=geo, storm_latlon=storm_latlon,
+                    station_latlon=station_latlon, query_latlon=query_latlon,
+                    title=f"true: {true_c}, pred: {pred_c} ({who})",
+                )
+                if output_dir is not None:
+                    fig_ex.savefig(
+                        out / f'{split}_classex_{int(yex[k])}_read_map.png',
+                        dpi=150, bbox_inches='tight')
+            if output_dir is not None:
+                print(f"Per-class exemplar maps saved to {out}/")
+
     if show_plots:
         plt.show()
     else:
@@ -506,7 +620,7 @@ def _parse_args(argv=None):
     )
     parser.add_argument(
         'config', type=str,
-        help="Path to tc_classifier.yaml.",
+        help="Path to train.yaml.",
     )
     parser.add_argument(
         '--checkpoint_dir', type=str, default=None,
@@ -534,6 +648,11 @@ def _parse_args(argv=None):
              "borders; azimuthal storm-centred for unit_circle). "
              "Requires cartopy.",
     )
+    parser.add_argument(
+        '--no_class_examples', action='store_true',
+        help="Skip the per-class exemplar Read maps (one sample per class with "
+             "its prediction).",
+    )
     return parser.parse_args(argv)
 
 
@@ -547,4 +666,5 @@ if __name__ == '__main__':
         n_attn_samples=args.n_attn_samples,
         show_plots=not args.no_show,
         geo=args.geo,
+        class_examples=not args.no_class_examples,
     )

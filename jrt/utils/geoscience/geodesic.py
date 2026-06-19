@@ -248,9 +248,15 @@ def vincenty_np(
         )
         cos_sig  = sinU1 * sinU2 + cosU1 * cosU2 * cosLam
         sigma    = np.arctan2(sin_sig, cos_sig)
-        sin_alp  = np.where(sin_sig == 0, 0.0, cosU1 * cosU2 * sinLam / sin_sig)
+        # Masked divides: only evaluate num/denom where denom != 0 (else 0). The
+        # np.where form computed the division everywhere first, raising a benign
+        # 0/0 RuntimeWarning at coincident/antipodal points before discarding it.
+        sin_alp  = np.divide(cosU1 * cosU2 * sinLam, sin_sig,
+                             out=np.zeros_like(lam), where=sin_sig != 0)
         c2a      = 1 - sin_alp ** 2
-        cos2m    = np.where(c2a == 0, 0.0, cos_sig - 2 * sinU1 * sinU2 / c2a)
+        _equ     = np.divide(2 * sinU1 * sinU2, c2a,
+                             out=np.zeros_like(lam), where=c2a != 0)
+        cos2m    = np.where(c2a == 0, 0.0, cos_sig - _equ)
         C        = _F / 16 * c2a * (4 + _F * (4 - 3 * c2a))
         lam_prev = lam
         lam      = L + (1 - C) * _F * sin_alp * (
@@ -267,7 +273,9 @@ def vincenty_np(
     sigma   = np.arctan2(sin_sig, cos_sig)
     sin_alp = cosU1 * cosU2 * sinLam / sin_sig
     c2a     = 1 - sin_alp ** 2
-    cos2m   = np.where(c2a == 0, 0.0, cos_sig - 2 * sinU1 * sinU2 / c2a)
+    _equ    = np.divide(2 * sinU1 * sinU2, c2a,
+                        out=np.zeros_like(lam), where=c2a != 0)
+    cos2m   = np.where(c2a == 0, 0.0, cos_sig - _equ)
 
     forward_azimuth_deg: np.ndarray = np.degrees(np.arctan2(
         cosU2 * sinLam,

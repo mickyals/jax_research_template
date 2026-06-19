@@ -158,17 +158,25 @@ class TCDataset:
     # TC sample
     # ------------------------------------------------------------------
 
-    def get_tc_sample(self, idx: int) -> Optional[dict]:
+    def get_tc_sample(
+        self, idx: int,
+        station_selection: str = 'nearest',
+        rng: Optional[np.random.Generator] = None,
+    ) -> Optional[dict]:
         """Assemble one TC sample from IBTrACS row idx.
 
-        All stations within radius_km are used; when more than max_stations
-        match, the nearest max_stations by distance are kept (the candidate
-        frame from get_obs_near is distance-sorted).
+        All stations within radius_km are candidates; when more than
+        max_stations match, ``station_selection`` decides which are kept —
+        'nearest' (default, deterministic; val/test) or 'random' (train-only
+        augmentation, requires ``rng``). See _build_sample.
 
         Parameters
         ----------
         idx : int
             Row index into the IBTrACS split.
+        station_selection : {'nearest', 'random'}
+        rng : np.random.Generator, optional
+            Required for 'random'; threaded from the loader's per-epoch stream.
 
         Returns
         -------
@@ -196,7 +204,8 @@ class TCDataset:
             return None
 
         return self._build_sample(df, lat, lon, label,
-                                  sid=str(self._sid[idx]), iso_time=ts)
+                                  sid=str(self._sid[idx]), iso_time=ts,
+                                  station_selection=station_selection, rng=rng)
 
     # ------------------------------------------------------------------
     # Background sample
@@ -207,6 +216,8 @@ class TCDataset:
         lat:          float,
         lon:          float,
         timestamp_ns: int,
+        station_selection: str = 'nearest',
+        rng: Optional[np.random.Generator] = None,
     ) -> Optional[dict]:
         """Assemble one background (no-storm) sample at a given point/time.
 
@@ -242,7 +253,8 @@ class TCDataset:
         if len(df) < self.min_stations:
             return None
 
-        return self._build_sample(df, lat, lon, 0, sid=None, iso_time=ts)
+        return self._build_sample(df, lat, lon, 0, sid=None, iso_time=ts,
+                                  station_selection=station_selection, rng=rng)
 
     # ------------------------------------------------------------------
     # Shared sample builder
@@ -256,6 +268,8 @@ class TCDataset:
         label:     int,
         sid:       Optional[str],
         iso_time:  int,
+        station_selection: str = 'nearest',
+        rng:       Optional[np.random.Generator] = None,
     ) -> dict:
         # Compute derived obs columns (e.g. wind_east/wind_north from
         # speed + direction) so df[self.obs_vars] below resolves directly.
@@ -264,12 +278,18 @@ class TCDataset:
         n_available = len(df)
         F = len(self.obs_vars)
 
-        # Use all stations within radius; when over max_stations keep the
-        # NEAREST (df from get_obs_near is sorted by distance). No random
-        # subsampling — the region is large and stations sparse, so the cap
-        # rarely binds and deterministic selection keeps eval reproducible.
+        # Trim to max_stations when the candidate set is larger. 'nearest'
+        # (default) keeps the closest by distance (df from get_obs_near is
+        # distance-sorted) — deterministic, used for val/test. 'random' draws a
+        # uniform subset (train-only augmentation): each draw of the same TC row
+        # gives a different station view, so the finite TC set can't be
+        # memorised. Only bites when n_available > max_stations.
         if n_available > self.max_stations:
-            df = df.iloc[:self.max_stations]
+            if station_selection == 'random' and rng is not None:
+                sel = rng.choice(n_available, size=self.max_stations, replace=False)
+                df  = df.iloc[np.sort(sel)]
+            else:
+                df = df.iloc[:self.max_stations]
             n_real = self.max_stations
         else:
             n_real = n_available

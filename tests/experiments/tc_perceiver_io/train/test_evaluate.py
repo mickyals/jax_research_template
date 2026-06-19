@@ -26,6 +26,7 @@ import pytest
 
 from experiments.tc_perceiver_io.train.evaluate import (
     binary_metrics,
+    collect_class_exemplars,
     collect_predictions,
     confusion_matrix,
     per_class_metrics,
@@ -328,6 +329,37 @@ class TestPerStormMetrics:
 
 
 # ---------------------------------------------------------------------------
+# TestCollectClassExemplars
+# ---------------------------------------------------------------------------
+
+class TestCollectClassExemplars:
+
+    def test_one_example_per_class(self):
+        b1 = _fake_batch(); b1['y'] = jnp.array([0, 1, 2, 0, 1, 2], dtype=jnp.int32)
+        b2 = _fake_batch(); b2['y'] = jnp.array([3, 3, 3, 3, 3, 3], dtype=jnp.int32)
+        ex = collect_class_exemplars([b1, b2], n_classes=N_CLASSES)
+        assert ex is not None
+        X, labels, metas = ex
+        assert sorted(labels.tolist()) == [0, 1, 2, 3]   # one per present class
+        assert X['station_obs'].shape[0] == 4            # stacked over classes
+        assert len(metas) == 4 and all(m is None for m in metas)  # no 'meta' here
+
+    def test_empty_loader_returns_none(self):
+        assert collect_class_exemplars([], n_classes=N_CLASSES) is None
+
+    def test_meta_captured_per_exemplar(self):
+        b = _fake_batch(); b['y'] = jnp.array([0, 1, 2, 3, 4, 5], dtype=jnp.int32)
+        b['meta'] = {'sid': [None, 'S1', 'S2', 'S3', 'S4', 'S5'],
+                     'query_lat': np.full(B, 15.0, np.float32),
+                     'query_lon': np.full(B, -75.0, np.float32)}
+        X, labels, metas = collect_class_exemplars([b], n_classes=N_CLASSES)
+        assert len(labels) == 6
+        # class 1's exemplar carries its sid
+        i = labels.tolist().index(1)
+        assert metas[i]['sid'] == 'S1'
+
+
+# ---------------------------------------------------------------------------
 # TestPrintReport
 # ---------------------------------------------------------------------------
 
@@ -348,6 +380,9 @@ class TestPrintReport:
         assert 'TEST evaluation' in out
         assert 'Binary detection' in out
         assert 'Per-class metrics' in out
+        # Full-set metrics block (mAP / pr_auc) over the accumulated split.
+        assert 'Full-set metrics' in out
+        assert 'test/mAP' in out and 'test/pr_auc' in out
 
     def test_report_prints_each_scalar_metric(self, capsys):
         preds, labels, logits = self._data()

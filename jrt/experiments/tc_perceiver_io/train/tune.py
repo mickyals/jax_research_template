@@ -7,18 +7,18 @@ Usage
 -----
     # Fresh search — results lost on exit (quick experiments)
     python -m experiments.tc_perceiver_io.train.tune \
-        jrt/experiments/tc_perceiver_io/configs/tc_tune.yaml \
+        jrt/experiments/tc_perceiver_io/configs/tune.yaml \
         --n_trials 25
 
     # Persistent search — resume by running the same command again
     python -m experiments.tc_perceiver_io.train.tune \
-        jrt/experiments/tc_perceiver_io/configs/tc_tune.yaml \
+        jrt/experiments/tc_perceiver_io/configs/tune.yaml \
         --n_trials 50 \
         --storage sqlite:///runs/tc_classifier/hp_search/study.db \
         --study_name tc_classifier_v1
 
 After the study completes the best params are printed via tuner.summary()
-and written to <trainer.run_dir>/best_params.json for use in tc_classifier.yaml.
+and written to <trainer.run_dir>/best_params.json for use in train.yaml.
 
 Search space
 ------------
@@ -49,7 +49,7 @@ from training.tuner import Tuner, apply_search_space
 # ---------------------------------------------------------------------------
 # Suggest function
 # ---------------------------------------------------------------------------
-# The search space (ranges and choices) lives in tc_tune.yaml under search_space:.
+# The search space (ranges and choices) lives in tune.yaml under search_space:.
 # This function defines the MAPPING from sampled HP names to config paths —
 # structural code that changes when the model architecture changes, not when
 # you want to widen or narrow a search range.
@@ -58,7 +58,7 @@ def suggest_fn(trial, base_config: dict) -> dict:
     """Sample HPs for one trial; return the full modified config dict.
 
     Reads search_space from base_config so ranges and choices are controlled
-    entirely from tc_tune.yaml without touching this file.
+    entirely from tune.yaml without touching this file.
     """
     hp  = apply_search_space(trial, base_config['search_space'])
     cfg = copy.deepcopy(base_config)
@@ -200,7 +200,7 @@ def _parse_args(argv=None):
         description="Hyperparameter search for TCPerceiverIO."
     )
     p.add_argument("config",             type=str,
-                   help="Path to tc_tune.yaml")
+                   help="Path to tune.yaml")
     p.add_argument("--n_trials",         type=int, default=25,
                    help="Total trials to run (default 25)")
     p.add_argument("--storage",          type=str, default=None,

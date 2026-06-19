@@ -6,19 +6,20 @@ Entry point for the tc_perceiver_io experiment.
 Usage
 -----
     python -m experiments.tc_perceiver_io.train.train \
-        jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml
+        jrt/experiments/tc_perceiver_io/configs/train.yaml
 
     # Resume an interrupted run
     python -m experiments.tc_perceiver_io.train.train \
-        jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml \
+        jrt/experiments/tc_perceiver_io/configs/train.yaml \
         --resume
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 import jax
@@ -38,11 +39,18 @@ from experiments.tc_perceiver_io.plotting.plotting import (
     plot_decoder_query,
     plot_class_metrics,
     plot_confusion_matrix,
+    plot_pr_curve,
+    plot_pr_curves_per_class,
 )
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
 from datasets.class_weights import class_weights_from_counts
-from training.metrics import cross_entropy
+from training.metrics import (
+    binary_pr_curve,
+    compute_full_set_metrics,
+    cross_entropy,
+    per_class_pr_curves,
+)
 from training.trainer import Trainer, TrainState
 from utils.jax_core.diagnostics import (
     model_tabulate,
@@ -177,6 +185,7 @@ def _make_attn_figure_callback(
             fov_lat=fov_lat, fov_lon=fov_lon, radius_km=radius_km,
             sample_idx=0,
             station_latlon=station_latlon, query_latlon=query_latlon,
+            title=caption,
         )
         logger.log_figure('val/attn_read_map', fig_read, step=global_step)
 
@@ -200,19 +209,42 @@ def _make_attn_figure_callback(
 # Gradient-flow callback (TRAIN probe only)
 # ---------------------------------------------------------------------------
 
+def _grad_flow_keep(name: str, last_block: int) -> bool:
+    """Keep only the OUTPUT projection of each Perceiver stage for grad-flow.
+
+    A full per-leaf dump (~70 histograms) is too much to review. The three
+    seams that matter for vanishing/exploding diagnosis are the layer that
+    produces each stage's output: Read's FFN output, the LAST Processor block's
+    FFN output, and the Decoder's classifier head. ``last_block`` is the index
+    of the deepest Processor block (so this tracks num_process_layers).
+    """
+    return (
+        name.startswith('read/mlp/output_layer')
+        or name.startswith(f'processor/blocks_{last_block}/mlp/output_layer')
+        or name.startswith('decoder/head')
+    )
+
+
 def _make_grad_flow_callback(
     model:       TCPerceiverIO,
     probe_batch: dict,
     logger,
-    every_n_epochs: int = 5,
+    every_n_epochs:   int  = 5,
+    final_layers_only: bool = True,
 ) -> Callable[[TrainState, int, int], None]:
-    """Return an epoch-level callback that logs per-layer gradient histograms.
+    """Return an epoch-level callback that logs gradient histograms.
 
-    Computes jax.grad of the cross-entropy loss on a fixed TRAIN probe
-    batch and pushes one histogram per parameter leaf, named by its tree
-    path (e.g. ``grad_flow/transformer/blocks_0/attn/query/kernel``), via
-    ``logger.log_histogram``. Vanishing/exploding layers show up as
-    histograms collapsing to 0 or blowing up across depth.
+    Computes jax.grad of the cross-entropy loss on a fixed TRAIN probe batch and
+    pushes gradient histograms named by tree path (e.g.
+    ``grad_flow/processor/blocks_1/mlp/output_layer/kernel``) via
+    ``logger.log_histogram``. Vanishing/exploding stages show up as histograms
+    collapsing to 0 or blowing up.
+
+    By default (``final_layers_only=True``) only the OUTPUT projection of each
+    stage is logged — Read's FFN output, the last Processor block's FFN output,
+    and the Decoder head — which is enough to read gradient flow across the
+    Read→Process→Decode path without dumping every leaf. Set False to log every
+    parameter leaf.
 
     Call once manually with the freshly initialised state for the init
     snapshot, then register as an epoch callback.
@@ -227,6 +259,8 @@ def _make_grad_flow_callback(
         Must expose ``log_histogram``.
     every_n_epochs : int
         Log every this many epochs. 0 = never. Default 5.
+    final_layers_only : bool
+        Restrict to each stage's output layer (default True). False = all leaves.
     """
     probe_X = probe_batch['X']
     probe_y = probe_batch['y']
@@ -241,10 +275,19 @@ def _make_grad_flow_callback(
     def _log(params, step: int) -> None:
         grads = _grads(params)
         leaves = jax.tree_util.tree_flatten_with_path(grads)[0]
-        for path, leaf in leaves:
-            name = '/'.join(
-                getattr(k, 'key', getattr(k, 'name', str(k))) for k in path
-            )
+        names = [
+            '/'.join(getattr(k, 'key', getattr(k, 'name', str(k))) for k in path)
+            for path, _ in leaves
+        ]
+        # Deepest Processor block index, so the filter tracks num_process_layers.
+        last_block = max(
+            (int(n.split('/')[1].removeprefix('blocks_'))
+             for n in names if n.startswith('processor/blocks_')),
+            default=0,
+        )
+        for name, (_, leaf) in zip(names, leaves):
+            if final_layers_only and not _grad_flow_keep(name, last_block):
+                continue
             logger.log_histogram(
                 f'grad_flow/{name}', np.asarray(leaf).ravel(), step=step,
             )
@@ -264,24 +307,30 @@ def _make_eval_plots_callback(
     logger,
     class_names: list[str],
     every_n_epochs: int = 1,
+    prefix:      str = 'val',
 ) -> Callable[[TrainState, int, int], None]:
-    """Return an epoch-level callback that logs confusion matrix and per-class F1.
+    """Return an epoch-level callback that logs confusion / per-class figures
+    and full-set scalar metrics under ``<prefix>/...``.
 
-    Runs a full forward pass over the val loader to collect predictions, then
-    plots and uploads to WandB as images (appears under Media → Images) and
-    logs full-set scalars ``val/qwk`` (quadratic-weighted kappa — ordinal
-    agreement) and ``val/ece`` (expected calibration error), both from
-    metrics.py over the accumulated predictions/logits.
+    Runs a full forward pass over the loader to collect predictions, then plots
+    and uploads the confusion matrix + per-class F1 to WandB as images (Media →
+    Images), and logs the full-set scalars ``<prefix>/mAP`` (macro one-vs-rest
+    average precision) and ``<prefix>/pr_auc`` (binary TC-vs-background PR-AUC)
+    from training/metrics.py over the accumulated logits/labels — these
+    integrate a PR curve over the whole split, so they cannot be per-batch.
 
     Parameters
     ----------
     model : TCPerceiverIO
     val_loader : TCLoader
-        Re-iterable val loader — iterated fresh on each callback invocation.
+        Re-iterable loader — iterated fresh on each callback invocation.
     logger : experiment logger
         Must expose ``log_figure`` and ``log_metrics``.
     every_n_epochs : int
         How often to run. 0 = disabled. Default 1 (every epoch).
+    prefix : str
+        Metric/figure namespace ('val' during training; 'test' for the one-shot
+        end-of-training pass).
     """
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
         if every_n_epochs <= 0 or epoch % every_n_epochs != 0:
@@ -290,24 +339,44 @@ def _make_eval_plots_callback(
         variables = {'params': state.params}
         preds, labels, logits, _ = collect_predictions(model, variables, val_loader)
 
+        # Full-set scalars (PR-curve based — not per-batch averageable).
+        logger.log_metrics(
+            {f'{prefix}/{k}': v
+             for k, v in compute_full_set_metrics(logits, labels).items()},
+            step=global_step,
+        )
+
         cm  = confusion_matrix(preds, labels)
         pcm = per_class_metrics(cm)
 
         fig_norm = plot_confusion_matrix(
             cm, class_names, normalize=True,
-            title=f'Val confusion matrix — epoch {epoch} (recall per class)',
+            title=f'{prefix.capitalize()} confusion matrix (recall per class)',
         )
         fig_raw = plot_confusion_matrix(
             cm, class_names, normalize=False,
-            title=f'Val confusion matrix — epoch {epoch} (counts)',
+            title=f'{prefix.capitalize()} confusion matrix (counts)',
         )
         fig_cls = plot_class_metrics(
             pcm, class_names,
         )
 
-        logger.log_figure('val/confusion_norm',    fig_norm, step=global_step)
-        logger.log_figure('val/confusion_counts',  fig_raw,  step=global_step)
-        logger.log_figure('val/per_class_metrics', fig_cls,  step=global_step)
+        logger.log_figure(f'{prefix}/confusion_norm',    fig_norm, step=global_step)
+        logger.log_figure(f'{prefix}/confusion_counts',  fig_raw,  step=global_step)
+        logger.log_figure(f'{prefix}/per_class_metrics', fig_cls,  step=global_step)
+
+        # Precision-recall CURVES (the shape behind the pr_auc / mAP scalars):
+        # binary TC-vs-background detection + per-class one-vs-rest overlay.
+        fig_pr = plot_pr_curve(
+            binary_pr_curve(logits, labels),
+            title=f'{prefix.capitalize()} PR — TC vs. background detection',
+        )
+        fig_pr_cls = plot_pr_curves_per_class(
+            per_class_pr_curves(logits, labels), class_names,
+            title=f'{prefix.capitalize()} per-class PR (one-vs-rest)',
+        )
+        logger.log_figure(f'{prefix}/pr_curve',           fig_pr,     step=global_step)
+        logger.log_figure(f'{prefix}/pr_curves_per_class', fig_pr_cls, step=global_step)
 
     return callback
 
@@ -375,19 +444,120 @@ def _validate_config(config: dict) -> None:
         )
 
 
+def _print_token_summary(config: dict) -> None:
+    """Print the per-station token width so it is never a mystery.
+
+    A station token is one linear projection of [obs; (mask); Fourier(coords)].
+    The raw concatenation width is ``F (+ F mask) + fourier_dim``; ``token_proj``
+    maps it to ``embed_dim`` (D). The sequence length is ``max_stations``.
+    """
+    m       = config['model']
+    F       = int(m['n_obs_features'])
+    fdim    = int(m.get('fourier_dim', 64))
+    miss    = bool(m.get('missingness_indicator', True))
+    embed   = int(m['embed_dim'])
+    max_st  = config.get('data', {}).get('max_stations')
+    obs_part = f"obs {F}" + (f" + mask {F}" if miss else "")
+    raw      = (2 * F if miss else F) + fdim
+    print(f"  token input : {raw}d   [{obs_part} + Fourier(coords) {fdim}]")
+    print(f"  token_proj  : {raw}d -> {embed}d   (embed_dim D)")
+    if max_st:
+        print(f"  sequence    : up to {max_st} stations (padded)")
+
+
+def _resolve_run_dir(trainer_cfg: dict, experiment_dir: Path,
+                     name: Optional[str] = None) -> Path:
+    """Resolve the run directory, auto-incrementing under a run_group.
+
+    Precedence:
+      * an explicit ``trainer.run_dir`` is used as-is (pin a fixed directory;
+        relative paths anchor to the experiment dir) — back-compat.
+      * otherwise ``trainer.run_group`` is treated as the parent and the next
+        ``run_NN`` (max existing + 1) is created under it, so forgetting to bump
+        a number can never clobber an earlier run. ``name`` (the run's purpose
+        slug, from --name) is appended as ``run_NN-<name>`` for legibility.
+
+    Raises if neither key is set.
+    """
+    explicit = trainer_cfg.get('run_dir')
+    if explicit:
+        rd = Path(explicit)
+        return rd if rd.is_absolute() else experiment_dir / rd
+
+    group = trainer_cfg.get('run_group')
+    if not group:
+        raise ValueError(
+            "Set trainer.run_dir (a fixed directory) or trainer.run_group "
+            "(parent under which run_NN is auto-created)."
+        )
+    group_dir = Path(group)
+    group_dir = group_dir if group_dir.is_absolute() else experiment_dir / group_dir
+    group_dir.mkdir(parents=True, exist_ok=True)
+
+    nums = [
+        int(mt.group(1))
+        for p in group_dir.iterdir() if p.is_dir()
+        if (mt := re.match(r'run_(\d+)', p.name))
+    ]
+    leaf = f"run_{max(nums, default=0) + 1:02d}"
+    if name:
+        leaf += f"-{name}"
+    return group_dir / leaf
+
+
+def _resolve_schedule_steps(trainer_cfg: dict) -> None:
+    """Fill a cosine schedule's ``decay_steps`` to span the run when omitted.
+
+    The Trainer is schedule-agnostic — it forwards ``scheduler_kwargs`` verbatim
+    to optax and never relates ``decay_steps`` to the run length. For the cosine
+    schedules (``warmup_cosine`` / ``cosine``) ``decay_steps`` is the TOTAL number
+    of steps over which the LR anneals to ``end_value`` (warmup included, per the
+    optax convention); set shorter than the run, the LR floors at ``end_value``
+    for every remaining step. So when ``decay_steps`` is omitted (or null) we
+    derive it here, in the experiment glue, as ``num_epochs * steps_per_epoch``
+    so the anneal covers all of training. An explicit ``decay_steps`` is always
+    respected (this only fills the gap).
+
+    No-op for non-cosine schedules and for sequential mode (``steps_per_epoch``
+    unset), where the total step count is not known until the loader is built —
+    set ``decay_steps`` explicitly in that case.
+    """
+    if trainer_cfg.get('scheduler') not in ('warmup_cosine', 'cosine'):
+        return
+    sk = trainer_cfg.setdefault('scheduler_kwargs', {})
+    if sk.get('decay_steps') is not None:
+        return                                   # explicit — respect it
+    spe = trainer_cfg.get('steps_per_epoch')
+    if not spe:
+        print("  [schedule] decay_steps omitted but steps_per_epoch is unset "
+              "(sequential mode) — set scheduler_kwargs.decay_steps explicitly "
+              "so the cosine anneal spans the run.")
+        return
+    total = int(trainer_cfg.get('num_epochs', 1)) * int(spe)
+    sk['decay_steps'] = total
+    print(f"  [schedule] decay_steps auto-set to num_epochs * steps_per_epoch "
+          f"= {trainer_cfg.get('num_epochs', 1)} * {int(spe)} = {total}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def train(config_path: str | Path, resume: bool = False) -> None:
+def train(config_path: str | Path, resume: bool = False,
+          name: Optional[str] = None) -> None:
     """Run training from a YAML config file.
 
     Parameters
     ----------
     config_path : str or Path
-        Path to tc_classifier.yaml (or any config following the same schema).
+        Path to train.yaml (or any config following the same schema).
     resume : bool
         If True, resume from the latest checkpoint in trainer.checkpoint_dir.
+    name : str, optional
+        Short purpose/hypothesis slug for this run (e.g. ``tcfrac0.3-cw-effnum``).
+        Appended to the auto-incremented run dir (``run_NN-<name>`` under
+        trainer.run_group) and used as the WandB run name. Ignored when a fixed
+        trainer.run_dir is set (the dir is pinned), though it still names WandB.
     """
     # Resolve config path immediately so relative paths inside the config
     # can be anchored to the config file's own directory.
@@ -409,6 +579,12 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # batch_size lives in trainer: (training hyperparam); data loader reads it here.
     config['data']['batch_size'] = trainer_cfg['batch_size']
 
+    # Cosine LR schedules: fill decay_steps to span the whole run when the
+    # config leaves it open (omitted/null). The Trainer forwards scheduler_kwargs
+    # verbatim to optax, so without this the anneal would complete in decay_steps
+    # and then sit at end_value for the rest of training.
+    _resolve_schedule_steps(trainer_cfg)
+
     # location_encoding picks the coordinate convention for the datamodule's
     # encoder. The model is coordinate-agnostic (Senseiver single projection of
     # whatever coords it is handed), so it is injected into the data block only.
@@ -419,19 +595,22 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     # datamodule only — nothing is injected into config['model'].
 
     # ------------------------------------------------------------------
-    # Resolve run_dir relative to the experiment root (two levels up from
-    # this script, which lives in train/), NOT the config file directory
-    # (configs/).  This ensures that runs/tc_classifier/run_01 always
-    # expands to
-    #   <experiment_dir>/runs/tc_classifier/run_01
-    # regardless of where the CLI is invoked from.  Absolute paths are used
-    # as-is.
+    # Resolve run_dir relative to the experiment root (two levels up from this
+    # script, which lives in train/), NOT the config file directory (configs/),
+    # so a relative run path always expands under <experiment_dir>/runs/...
+    # regardless of where the CLI is invoked from. Either pin trainer.run_dir or
+    # let trainer.run_group auto-increment run_NN (so a forgotten number never
+    # clobbers an earlier run); --name appends the run's purpose slug.
     # ------------------------------------------------------------------
     _experiment_dir = Path(__file__).resolve().parent.parent
-    if 'run_dir' in trainer_cfg:
-        rd = Path(trainer_cfg['run_dir'])
-        if not rd.is_absolute():
-            trainer_cfg['run_dir'] = str(_experiment_dir / rd)
+    run_dir = _resolve_run_dir(trainer_cfg, _experiment_dir, name=name)
+    trainer_cfg['run_dir'] = str(run_dir)
+    print(f"  run_dir     : {run_dir}")
+
+    # --name sets the WandB run NAME (the run's purpose/hypothesis); tags stay as
+    # facets and the full config is in hparams.json. Overrides log_kwargs.name.
+    if name:
+        trainer_cfg.setdefault('log_kwargs', {})['name'] = name
 
     # ------------------------------------------------------------------
     # Data
@@ -470,6 +649,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     print()
     print("─" * 58)
     print("Model  (TCPerceiverIO)")
+    _print_token_summary(config)
     model_tabulate(model, _exmp, False)   # args: X dict, train=False
     del _exmp
 
@@ -619,6 +799,15 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     for k, v in test_metrics.items():
         print(f"  {k}: {v:.5f}")
 
+    # One-shot eval-plots on the TEST split (best params): test/confusion_*,
+    # test/per_class_metrics figures + test/mAP + test/pr_auc full-set scalars —
+    # trainer.test() only reports the per-batch scalars, so this fills in the
+    # per-class picture without a separate evaluate.py run.
+    _make_eval_plots_callback(
+        model, test_loader, trainer.logger, class_names=class_names,
+        every_n_epochs=1, prefix='test',
+    )(best_state, epoch=0, global_step=int(best_state.step))
+
     # Finalize logger here, after test(), so test metrics are logged before
     # the WandB run is closed.  fit() no longer calls finalize() internally.
     trainer.logger.finalize("completed")
@@ -643,9 +832,17 @@ def _parse_args(argv=None):
         default=False,
         help="Resume training from the latest checkpoint.",
     )
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Short purpose/hypothesis slug for this run (e.g. "
+             "'tcfrac0.3-cw-effnum'). Appended to the auto-incremented "
+             "run_NN dir under trainer.run_group and used as the WandB run name.",
+    )
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    train(args.config, resume=args.resume)
+    train(args.config, resume=args.resume, name=args.name)
