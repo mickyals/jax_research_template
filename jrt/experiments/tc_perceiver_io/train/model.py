@@ -52,6 +52,22 @@ attention maps, one per component, for val/test diagnostics:
     {'read':      (B, num_heads, N, M),
      'processor': (num_layers, B, num_heads, N, N),
      'decoder':   (B, num_heads, 1, N)}   # absent / None for headless / avgproj
+
+Representation probing. Every stage also sows its OUTPUT representation into the
+Flax ``intermediates`` collection (``self.sow``), so a linear probe can read what
+information is present after Read, after each Processor block, and after Decode::
+
+    out, state = model.apply({'params': p}, X, train=False,
+                             mutable=['intermediates'])
+    reps = state['intermediates']
+        reps['read']['output']            -> ((B, N, D),)         post-Read latents
+        reps['processor']['blocks_<l>']['output'] -> ((B, N, D),) per-block output
+        reps['encoded']                   -> ((B, N, D),)         post-trailing-LN asset
+        reps['decoder']['output']         -> ((B, D),)            decoder pre-head repr
+
+``sow`` is a no-op unless the ``intermediates`` collection is mutable, so the
+normal forward path (and return_weights) is unchanged and carries zero overhead.
+``extract_representations`` returns these as a flat, probe-ready dict.
 """
 
 from __future__ import annotations
@@ -126,6 +142,9 @@ class Read(nn.Module):
         z = latents + self.drop(attn_out, deterministic=not train)              # eq 5
         z = z + self.drop(self.mlp(self.norm_mlp(z), train=train),
                           deterministic=not train)                             # eq 6
+        # Sow the Read output for representation probing (no-op unless the
+        # 'intermediates' collection is mutable).
+        self.sow('intermediates', 'output', z)
         return (z, scores) if return_weights else z
 
 
@@ -163,6 +182,9 @@ class ProcessorBlock(nn.Module):
         x = x + self.drop(attn_out, deterministic=not train)
         x = x + self.drop(self.mlp(self.norm2(x), train=train),
                           deterministic=not train)
+        # Sow this block's output for per-layer representation probing (no-op
+        # unless the 'intermediates' collection is mutable).
+        self.sow('intermediates', 'output', x)
         return (x, scores) if return_weights else x
 
 
@@ -247,7 +269,9 @@ class Decoder(nn.Module):
 
     def __call__(self, latents, train=True, return_weights=False):
         if self.mode == 'avgproj':
-            logits = self.head(jnp.mean(latents, axis=1))                  # (B, n_classes)
+            repr = jnp.mean(latents, axis=1)                               # (B, D)
+            self.sow('intermediates', 'output', repr)
+            logits = self.head(repr)                                       # (B, n_classes)
             return (logits, None) if return_weights else logits
 
         B = latents.shape[0]
@@ -263,7 +287,11 @@ class Decoder(nn.Module):
         z = q + self.drop(attn_out, deterministic=not train)               # eq 5
         z = z + self.drop(self.mlp(self.norm_mlp(z), train=train),
                           deterministic=not train)                         # eq 6
-        logits = self.head(z[:, 0, :])                                     # (B, n_classes)
+        repr = z[:, 0, :]                                                  # (B, D)
+        # Sow the decoder's pre-head representation for probing (no-op unless
+        # the 'intermediates' collection is mutable).
+        self.sow('intermediates', 'output', repr)
+        logits = self.head(repr)                                          # (B, n_classes)
         return (logits, scores) if return_weights else logits
 
 
@@ -405,6 +433,9 @@ class TCPerceiverIO(nn.Module):
             z = self.processor(z, train=train)
 
         z = self.norm(z)                                                 # (B, N, D)
+        # Sow the normalized encoder asset (the frozen-transferable
+        # representation) for probing (no-op unless 'intermediates' is mutable).
+        self.sow('intermediates', 'encoded', z)
 
         # 4. Headless -> pooled representation; headed -> decoder logits.
         if self.n_classes is None:
@@ -419,6 +450,54 @@ class TCPerceiverIO(nn.Module):
                 'read': read_scores, 'processor': proc_scores, 'decoder': dec_scores,
             }
         return self.decoder(z, train=train)
+
+
+# ---------------------------------------------------------------------------
+# Representation probing
+# ---------------------------------------------------------------------------
+
+def extract_representations(
+    model:     TCPerceiverIO,
+    variables: dict,
+    X:         dict,
+) -> dict:
+    """Run a forward pass capturing every stage's OUTPUT representation.
+
+    Collects the ``intermediates`` the model sows at each seam and flattens them
+    into a probe-ready dict (the sown values are 1-tuples — Flax's default
+    append reducer — so this unwraps the ``[0]``):
+
+        {'read':    (B, N, D)        post-Read latents,
+         'process': [(B, N, D)] * L  per-Processor-block outputs (depth order),
+         'encoded': (B, N, D)        post-trailing-LN encoder asset,
+         'decode':  (B, D) | None    decoder pre-head representation
+                                     (None for a headless model)}
+
+    Probe a stage by pooling/flattening its representation and fitting a linear
+    classifier on the frozen encoder. ``D`` is ``embed_dim``, ``N`` ``num_latents``,
+    ``L`` ``num_process_layers``.
+
+    Parameters
+    ----------
+    model : TCPerceiverIO
+    variables : dict
+        Flax variables, e.g. ``{'params': state.params}``.
+    X : dict
+        Batch input dict (station_obs / station_coords / station_mask / obs_mask).
+    """
+    _, state = model.apply(variables, X, train=False, mutable=['intermediates'])
+    inter    = state['intermediates']
+
+    proc    = inter['processor']
+    n_blocks = sum(1 for k in proc if k.startswith('blocks_'))
+    process  = [proc[f'blocks_{l}']['output'][0] for l in range(n_blocks)]
+
+    return {
+        'read':    inter['read']['output'][0],
+        'process': process,
+        'encoded': inter['encoded'][0],
+        'decode':  inter['decoder']['output'][0] if 'decoder' in inter else None,
+    }
 
 
 # ---------------------------------------------------------------------------

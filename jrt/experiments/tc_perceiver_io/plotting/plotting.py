@@ -2,7 +2,24 @@
 experiments/tc_perceiver_io/plotting/plotting.py
 
 Plotting functions for the tc_perceiver_io experiment: confusion
-matrix / per-class metric charts, and geographic attention visualizations.
+matrix / per-class metric charts, and per-component Perceiver-IO attention
+visualizations.
+
+The model's ``model.apply(v, X, train=False, return_weights=True)`` returns
+``(output, attn_dict)`` where attn_dict holds PRE-softmax scores, one per
+component (see model.TCPerceiverIO):
+
+    read       (B, H, N, M)        N latents cross-attend M station tokens
+    processor  (L, B, H, N, N)     L blocks of latent self-attention
+    decoder    (B, H, 1, N)        single output query cross-attends N latents
+                                   (None for decode_mode='avgproj' / headless)
+
+Apply ``softmax`` over the LAST axis to turn any of these into attention
+distributions. The three plotters below each take the softmaxed weights:
+
+    plot_attention_geographic   Read map  — which stations the latents attend to
+    plot_attention_matrix_grid  Processor — layers × heads grid of N×N matrices
+    plot_decoder_query          Decoder   — output query's weight over N latents
 """
 
 from __future__ import annotations
@@ -10,10 +27,8 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-import jax
 import matplotlib.pyplot as plt
 
-from experiments.tc_perceiver_io.train.model import TCPerceiverIO
 from utils.plotting._style import _value_scatter
 from utils.plotting.curves import plot_grouped_bars
 from utils.plotting.fields import plot_heatmap, plot_scatter_overlay
@@ -90,30 +105,8 @@ def plot_class_metrics(
 
 
 # ---------------------------------------------------------------------------
-# Attention visualization
+# Attention visualization — one plotter per Perceiver-IO component
 # ---------------------------------------------------------------------------
-
-def extract_attention_weights(
-    model:     TCPerceiverIO,
-    variables: dict,
-    batch:     dict,
-) -> np.ndarray:
-    """Run batch through model with return_weights=True.
-
-    Returns
-    -------
-    np.ndarray float32 (num_layers, B, num_heads, 1+N, 1+N)
-        Full attention matrices from every encoder layer. CLS-first:
-        token 0 is the query, tokens 1..N are stations (N = max_stations).
-        The query row of layer l is ``weights[l, :, :, 0, :]`` — its first
-        element is the query's self-attention weight; padding positions ≈ 0.
-    """
-    apply_fn = jax.jit(
-        lambda X: model.apply(variables, X, train=False, return_weights=True)
-    )
-    _, weights = apply_fn(batch['X'])
-    return np.asarray(weights, dtype=np.float32)
-
 
 def plot_attention_matrix_grid(
     weights:    np.ndarray,
@@ -121,18 +114,17 @@ def plot_attention_matrix_grid(
     cmap:       str = 'viridis',
     title:      Optional[str] = None,
 ) -> plt.Figure:
-    """Layers × heads grid of full (N+1)×(N+1) attention matrices.
+    """Layers × heads grid of the Processor's N×N latent self-attention matrices.
 
-    One panel per (layer, head) for a single sample, plain ``imshow`` with
-    NO per-token tick labels (unreadable at 1+N = 65) and a shared colour
-    scale. CLS-first: the query row/column (first token, top-left) is marked
-    with dashed lines — the all-False stations→query column reads as an empty
-    first column, and padding stations as empty rows/columns.
+    One panel per (layer, head) for a single sample, plain ``imshow`` with NO
+    per-latent tick labels (unreadable at N = 16+) and a shared colour scale.
+    Rows are query latents, columns the latents they attend to; each row of a
+    softmaxed matrix sums to 1.
 
     Parameters
     ----------
-    weights : np.ndarray (num_layers, B, num_heads, N+1, N+1)
-        From extract_attention_weights().
+    weights : np.ndarray (num_layers, B, num_heads, N, N)
+        Softmaxed Processor scores — ``softmax(attn['processor'], axis=-1)``.
     sample_idx : int
         Which sample in the batch to visualise.
     cmap : str
@@ -143,8 +135,8 @@ def plot_attention_matrix_grid(
     -------
     plt.Figure
     """
-    w = np.asarray(weights)[:, sample_idx]          # (L, H, T, T)
-    L, H, T, _ = w.shape
+    w = np.asarray(weights)[:, sample_idx]          # (L, H, N, N)
+    L, H, _, _ = w.shape
     vmax = float(w.max()) if w.max() > 0 else 1.0
 
     fig, axes = plt.subplots(
@@ -157,9 +149,6 @@ def plot_attention_matrix_grid(
             im = ax.imshow(w[l, h], cmap=cmap, vmin=0.0, vmax=vmax,
                            origin='upper', aspect='equal',
                            interpolation='nearest')
-            # Query/CLS token = first row/column (CLS-first, top-left)
-            ax.axhline(0.5, color='w', linewidth=0.6, linestyle='--')
-            ax.axvline(0.5, color='w', linewidth=0.6, linestyle='--')
             ax.set_xticks([])
             ax.set_yticks([])
             if l == 0:
@@ -171,78 +160,58 @@ def plot_attention_matrix_grid(
                  shrink=0.85, pad=0.02)
     fig.suptitle(
         title if title is not None
-        else f'Attention matrices — sample {sample_idx} '
-             f'(rows attend to columns; dashed = query token)',
+        else f'Processor self-attention — sample {sample_idx} '
+             f'(latent rows attend to latent columns)',
         fontsize=10,
     )
     return fig
 
 
-def plot_attention_mask(
-    station_mask: np.ndarray,
-    full_self_attention: bool = False,
+def plot_decoder_query(
+    weights:    np.ndarray,
+    sample_idx: int = 0,
+    title:      Optional[str] = None,
 ) -> plt.Figure:
-    """Static figure of the (N+1)×(N+1) attention mask.
+    """Heads × latents heatmap of the Decoder output query's attention.
 
-    Renders the exact boolean mask the model builds (single source of
-    truth: model.build_attention_mask) for one sample's station_mask.
-    CLS-first: token 0 is the query. Default: stations are blocked from
-    attending to the query (empty first column except the query's own
-    self-attention cell); with ``full_self_attention=True`` that block opens
-    (complete self-attention). Padding-station columns are blocked for every
-    token. Plain imshow, no per-token tick labels; the query row/column
-    (top-left) is marked with dashed lines.
+    The Decoder's single learned output query cross-attends the N latents
+    before classifying (decode_mode='attention'). This shows, per head, how
+    that query weights each latent — each row (head) is a distribution over the
+    N latents and sums to 1.
 
     Parameters
     ----------
-    station_mask : np.ndarray
-        (N,) bool — True = real station, False = padding.
-    full_self_attention : bool
-        Match the model's flag so the figure shows the actual pattern in
-        use. Default False (asymmetric).
+    weights : np.ndarray (B, num_heads, 1, N)
+        Softmaxed Decoder scores — ``softmax(attn['decoder'], axis=-1)``.
+        Pass only when decode_mode='attention' (it is None for 'avgproj').
+    sample_idx : int
+        Which sample in the batch to visualise.
+    title : str, optional
 
     Returns
     -------
     plt.Figure
     """
-    from experiments.tc_perceiver_io.train.model import (
-        build_attention_mask,
-    )
-    import jax.numpy as jnp
+    w = np.asarray(weights)[sample_idx, :, 0, :]    # (H, N)
+    H, N = w.shape
+    vmax = float(w.max()) if w.max() > 0 else 1.0
 
-    station_mask = np.asarray(station_mask, dtype=bool)
-    mask = np.asarray(
-        build_attention_mask(
-            jnp.asarray(station_mask[None, :]), full_self_attention)
-    )[0, 0]                                          # (N+1, N+1)
-    T = mask.shape[0]
-    n_real = int(station_mask.sum())
-    _desc = ('complete self-attention'
-             if full_self_attention
-             else 'stations cannot attend to the query')
-
-    fig, ax = plt.subplots(figsize=(6.5, 6))
-    im = ax.imshow(mask.astype(float), cmap='Greys_r', vmin=0.0, vmax=1.0,
-                   origin='upper', aspect='equal', interpolation='nearest')
-    ax.axhline(0.5, color='red', linewidth=0.8, linestyle='--')
-    ax.axvline(0.5, color='red', linewidth=0.8, linestyle='--')
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_xlabel('to token (first = query)')
-    ax.set_ylabel('from token (first = query)')
-    ax.set_title(
-        f'Attention mask — white = allowed, black = blocked\n'
-        f'{_desc}; {T - 1 - n_real} padding columns blocked',
-        fontsize=10,
+    return plot_heatmap(
+        w,
+        row_labels=[f'head {h}' for h in range(H)],
+        col_labels=[str(i) for i in range(N)],
+        xlabel='Latent index', ylabel='Head',
+        cmap='magma', vmin=0.0, vmax=vmax,
+        title=title if title is not None
+        else 'Decoder output-query attention over latents',
+        colorbar_label='Attention weight',
+        annotate=(N <= 24), fmt='.2f', annotate_fontsize=6,
+        figsize=(min(0.7 * N + 2.5, 14), 0.6 * H + 2.0),
     )
-    cbar = fig.colorbar(im, ax=ax, shrink=0.8, ticks=[0, 1])
-    cbar.ax.set_yticklabels(['blocked', 'allowed'])
-    fig.tight_layout()
-    return fig
 
 
 def plot_attention_geographic(
-    weights:           np.ndarray,
+    read_weights:      np.ndarray,
     batch:             dict,
     location_encoding: str,
     fov_lat:           Optional[tuple[float, float]] = None,
@@ -255,30 +224,34 @@ def plot_attention_geographic(
     station_latlon:    Optional[tuple[np.ndarray, np.ndarray]] = None,
     query_latlon:      Optional[tuple[float, float]] = None,
 ) -> plt.Figure:
-    """Plot per-station attention weight for one sample.
+    """Geographic Read map — which stations the model attends to.
 
-    For ``unit_circle`` encoding: the station coords ARE a storm-centred
-    local map (x = east, y = north, storm at the origin) — scatter them
-    directly on equal-aspect Cartesian axes, with distance rings at
-    0.25/0.5/0.75/1.0 of radius_km. Bespoke to this plot, so it composes
-    ``_value_scatter`` directly.
+    Aggregates the Read cross-attention over the N latents (and heads) to a
+    single per-station weight, then plots it on the station geometry. Each
+    latent's softmaxed row sums to 1 over the M stations, so the latent-mean is
+    a per-station share of attention mass (summing to ~1 across real stations).
 
-    For ``domain`` encoding: lat/lon axes. The decoded positions are supplied
-    by the caller (``station_latlon`` / ``query_latlon``) rather than decoded
-    here — this module is a viz layer and does not depend on the experiment's
-    coordinate encoding; the attention callback decodes via
-    ``data.transforms.encoding.decode_domain`` and passes the result in. Query position
-    marked with a star. Renders via ``utils.plotting.fields.plot_scatter_overlay``.
+    For ``unit_circle`` encoding: the station coords ARE a storm-centred local
+    map (x = east, y = north, storm at the origin) — scatter them directly on
+    equal-aspect Cartesian axes, with distance rings at 0.25/0.5/0.75/1.0 of
+    radius_km. Bespoke to this plot, so it composes ``_value_scatter`` directly.
+
+    For ``domain`` encoding: lat/lon axes. The decoded positions are supplied by
+    the caller (``station_latlon`` / ``query_latlon``) rather than decoded here
+    — this module is a viz layer and does not depend on the experiment's
+    coordinate encoding; the caller decodes via
+    ``evaluate.domain_latlon_for_sample`` (which wraps
+    ``data.transforms.encoding.decode_domain``) and passes the result in. The
+    storm centre is marked with a star. Renders via
+    ``utils.plotting.fields.plot_scatter_overlay``.
 
     Parameters
     ----------
-    weights : np.ndarray (B, H, 1+N)
-        Query-row attention of ONE layer — slice the output of
-        extract_attention_weights(), e.g. ``all_w[-1][:, :, 0, :]`` for
-        the last layer's query row (CLS-first: the query is token 0).
+    read_weights : np.ndarray (B, H, N, M)
+        Softmaxed Read scores — ``softmax(attn['read'], axis=-1)`` — where N is
+        the number of latents and M the (padded) station count.
     batch : dict
-        Raw batch dict (contains 'X' with station_coords, station_mask,
-        query_coords).
+        Raw batch dict (contains 'X' with station_coords, station_mask).
     location_encoding : {'unit_circle', 'domain'}
     fov_lat, fov_lon : required for domain mode.
     radius_km : float
@@ -286,40 +259,39 @@ def plot_attention_geographic(
     sample_idx : int
         Which sample in the batch to visualise.
     head_agg : {'mean', 'max'}
-        How to collapse the head dimension before plotting.
+        How to collapse the head dimension before the latent-mean.
     geo : bool or dict
         Draw on a cartopy map with coastlines/borders (requires cartopy,
-        optional dependency; default False keeps the cartopy-free
-        plain-axes plot). Domain mode: forwarded to
-        ``plot_scatter_overlay`` (PlateCarree). unit_circle mode: an
-        AzimuthalEquidistant map centred on the storm — the local x-y
-        encoding times radius_km IS that projection's native metre grid,
-        so stations, km rings, and coastlines align exactly; requires
-        ``storm_latlon``. Dict keys (scale/color/lw/gridlines) are
-        forwarded to the canvas factory.
+        optional dependency; default False keeps the cartopy-free plain-axes
+        plot). Domain mode: forwarded to ``plot_scatter_overlay`` (PlateCarree).
+        unit_circle mode: an AzimuthalEquidistant map centred on the storm — the
+        local x-y encoding times radius_km IS that projection's native metre
+        grid, so stations, km rings, and coastlines align exactly; requires
+        ``storm_latlon``. Dict keys (scale/color/lw/gridlines) are forwarded to
+        the canvas factory.
     storm_latlon : (lat, lon), optional
-        Absolute storm/query position in degrees — the projection centre
-        for the unit_circle geo map (available as
-        batch['meta']['query_lat']/['query_lon']). Ignored unless
-        unit_circle mode with geo enabled.
+        Absolute storm position in degrees — the projection centre for the
+        unit_circle geo map (available as
+        batch['meta']['query_lat']/['query_lon']). Ignored unless unit_circle
+        mode with geo enabled.
     station_latlon : (lats, lons), optional
         DOMAIN mode only: decoded latitudes/longitudes of the REAL (masked)
         stations, aligned with the masked attention weights — decoded by the
-        caller (data.transforms.encoding.decode_domain). Required for domain encoding.
+        caller. Required for domain encoding.
     query_latlon : (lat, lon), optional
-        DOMAIN mode only: decoded query/storm position in degrees. Required
-        for domain encoding.
+        DOMAIN mode only: decoded query/storm position in degrees. Required for
+        domain encoding.
     """
-    X            = batch['X']
-    coords       = np.asarray(X['station_coords'][sample_idx])   # (N, 2)
-    mask         = np.asarray(X['station_mask'][sample_idx])     # (N,) bool
+    X      = batch['X']
+    coords = np.asarray(X['station_coords'][sample_idx])   # (M, 2)
+    mask   = np.asarray(X['station_mask'][sample_idx])     # (M,) bool
 
-    # Aggregate attention over heads: (H, 1+N) → (1+N,) then drop query self-weight.
-    # CLS-first: token 0 is the query's self-attention, tokens 1..N are stations.
-    w = weights[sample_idx]                                       # (H, 1+N)
-    w_station = w.mean(axis=0) if head_agg == 'mean' else w.max(axis=0)
-    w_station = w_station[1:]                                     # (N,) drop query self-attn
-    w_real = w_station[mask]                                      # (n_real,)
+    # Aggregate the Read attention to a single per-station weight: collapse the
+    # head axis (mean/max), then mean over the N latents -> (M,).
+    w = np.asarray(read_weights)[sample_idx]               # (H, N, M)
+    w = w.mean(axis=0) if head_agg == 'mean' else w.max(axis=0)   # (N, M)
+    w_station = w.mean(axis=0)                              # (M,) latent-mean
+    w_real = w_station[mask]                                # (n_real,)
 
     if location_encoding == 'unit_circle':
         x = coords[mask, 0]                    # east offset,  [-1, 1]
@@ -356,7 +328,7 @@ def plot_attention_geographic(
             cmap='YlOrRd', size_range=(30, 280),
             alpha=0.85, edgecolors='k', linewidths=0.4, zorder=3,
         )
-        # Storm centre — query position (0, 0) on the local map
+        # Storm centre — the query/origin of the local map
         ax.scatter([0], [0], marker='*', s=200, color='royalblue',
                    zorder=5, label='Storm centre')
 
@@ -388,7 +360,7 @@ def plot_attention_geographic(
                 [-1.08 * r_m, 1.08 * r_m, -1.08 * r_m, 1.08 * r_m],
                 crs=ax.projection,
             )
-        ax.set_title('Self-attention weights (query row)\n'
+        ax.set_title('Read attention — stations the latents attend to\n'
                      '(storm-centred local map, north up)',
                      pad=15, fontsize=10)
         fig.colorbar(sc, ax=ax, label='Attention weight', shrink=0.7, pad=0.1)
@@ -403,7 +375,7 @@ def plot_attention_geographic(
         raise ValueError(
             "plot_attention_geographic: domain encoding requires station_latlon "
             "and query_latlon, decoded by the caller "
-            "(data.transforms.encoding.decode_domain) — plotting does not decode coords."
+            "(evaluate.domain_latlon_for_sample) — plotting does not decode coords."
         )
 
     lats, lons   = station_latlon          # decoded REAL (masked) stations
@@ -415,10 +387,10 @@ def plot_attention_geographic(
         None, lons, lats, scatter_values=w_real,
         extent=[lon_min, lon_max, lat_min, lat_max],
         cmap='YlOrRd',
-        title='Self-attention weights (query row) (domain encoding)',
+        title='Read attention — stations the latents attend to (domain encoding)',
         xlabel='Longitude', ylabel='Latitude',
         colorbar_label='Attention weight',
         scatter_size_range=(30, 280), grid=True, geo=geo,
-        marker_x=q_lon, marker_y=q_lat, marker_label='Query (storm centre)',
+        marker_x=q_lon, marker_y=q_lat, marker_label='Storm centre',
         marker_kwargs={'s': 250}, figsize=(9, 7),
     )

@@ -12,9 +12,9 @@ TestPerClassMetrics       perfect class gives p/r/f1=1; zero support;
 TestBinaryMetrics         all TC correct; all no-storm correct; perfect binary;
                           mixed case; all keys present; counts add up
 TestCollectPredictions    output shapes; preds are argmax of logits;
-                          labels match loader; no model mutation
-TestPrintReport           temperature branch: ece_tempscaled printed only
-                          when T != 1.0; report runs without error
+                          labels match loader; no model mutation; meta passthrough
+TestPerStormMetrics       groups by SID, skips background
+TestPrintReport           report runs; prints scalar metrics + binary + per-class
 """
 
 from __future__ import annotations
@@ -33,63 +33,60 @@ from experiments.tc_perceiver_io.train.evaluate import (
     print_report,
 )
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
-from experiments.tc_perceiver_io.train.model import TCEncoder, N_CLASSES
+from experiments.tc_perceiver_io.train.model import TCPerceiverIO
+from experiments.tc_perceiver_io.data.sources.ibtracs import N_CLASSES
 
 # ---------------------------------------------------------------------------
 # Shared constants and helpers
 # ---------------------------------------------------------------------------
 
 B     = 6
-N     = 8
+M     = 8
 F     = 5
 HEADS = 2
 EMBED = 32
+NLAT  = 6
 
 
-def _init_model() -> tuple[TCEncoder, dict]:
-    """Return a tiny TCEncoder and its initialized variables."""
-    model = TCEncoder(
-        embed_dim       = EMBED,
-        num_heads       = HEADS,
-        num_layers      = 1,
-        fourier_dim     = 16,
-        n_obs_features  = F,
-        n_classes       = N_CLASSES,
+def _init_model() -> tuple[TCPerceiverIO, dict]:
+    """Return a tiny TCPerceiverIO and its initialized variables."""
+    model = TCPerceiverIO(
+        embed_dim          = EMBED,
+        num_heads          = HEADS,
+        num_latents        = NLAT,
+        num_process_layers = 1,
+        fourier_dim        = 16,
+        n_obs_features     = F,
+        n_classes          = N_CLASSES,
     )
     rng  = np.random.default_rng(0)
-    obs  = jnp.array(rng.standard_normal((B, N, F)).astype(np.float32))
+    obs  = jnp.array(rng.standard_normal((B, M, F)).astype(np.float32))
     X    = {
         'station_obs':    obs,
-        'station_coords': jnp.zeros((B, N, 2)),
-        'station_mask':   jnp.ones((B, N), dtype=bool),
-        'obs_mask':       jnp.ones((B, N, F), dtype=bool),
-        'query_coords':   jnp.zeros((B, 2)),
+        'station_coords': jnp.zeros((B, M, 2)),
+        'station_mask':   jnp.ones((B, M), dtype=bool),
+        'obs_mask':       jnp.ones((B, M, F), dtype=bool),
     }
     variables = model.init({'params': jax.random.PRNGKey(0)}, X, train=False)
     return model, variables
 
 
-def _fake_batch(location_encoding: str = 'unit_circle') -> dict:
+def _fake_batch() -> dict:
     rng  = np.random.default_rng(1)
-    obs  = rng.standard_normal((B, N, F)).astype(np.float32)
-    if location_encoding == 'unit_circle':
-        query = np.zeros((B, 2), dtype=np.float32)
-    else:
-        query = rng.uniform(-1.5, 1.5, (B, 2)).astype(np.float32)
+    obs  = rng.standard_normal((B, M, F)).astype(np.float32)
     return {
         'X': {
             'station_obs':    jnp.array(obs),
-            'station_coords': jnp.array(rng.uniform(-1., 1., (B, N, 2)).astype(np.float32)),
-            'station_mask':   jnp.ones((B, N), dtype=bool),
-            'obs_mask':       jnp.ones((B, N, F), dtype=bool),
-            'query_coords':   jnp.array(query),
+            'station_coords': jnp.array(rng.uniform(-1., 1., (B, M, 2)).astype(np.float32)),
+            'station_mask':   jnp.ones((B, M), dtype=bool),
+            'obs_mask':       jnp.ones((B, M, F), dtype=bool),
         },
         'y': jnp.array(rng.integers(0, N_CLASSES, size=B), dtype=jnp.int32),
     }
 
 
 class _FakeLoader:
-    """Minimal re-iterable loader yielding a single fake batch."""
+    """Minimal re-iterable loader yielding fake batches."""
     def __init__(self, n: int = 2):
         self._batches = [_fake_batch() for _ in range(n)]
     def __iter__(self):
@@ -331,7 +328,7 @@ class TestPerStormMetrics:
 
 
 # ---------------------------------------------------------------------------
-# TestPrintReport — temperature-scaling branch
+# TestPrintReport
 # ---------------------------------------------------------------------------
 
 class TestPrintReport:
@@ -344,16 +341,18 @@ class TestPrintReport:
         preds  = logits.argmax(-1).astype(np.int32)
         return preds, labels, logits
 
-    def test_no_tempscaled_line_when_temperature_one(self, capsys):
+    def test_report_runs_and_prints_sections(self, capsys):
         preds, labels, logits = self._data()
-        print_report(preds, labels, logits, build_metrics_fns(), temperature=1.0)
+        print_report(preds, labels, logits, build_metrics_fns(), split='test')
         out = capsys.readouterr().out
-        assert '/ece:' in out
-        assert 'ece_tempscaled' not in out
+        assert 'TEST evaluation' in out
+        assert 'Binary detection' in out
+        assert 'Per-class metrics' in out
 
-    def test_tempscaled_line_printed_when_temperature_not_one(self, capsys):
+    def test_report_prints_each_scalar_metric(self, capsys):
         preds, labels, logits = self._data()
-        print_report(preds, labels, logits, build_metrics_fns(), temperature=2.5)
+        metrics_fns = build_metrics_fns()   # {'loss','binary_accuracy','mae_class'}
+        print_report(preds, labels, logits, metrics_fns, split='val')
         out = capsys.readouterr().out
-        assert 'ece_tempscaled' in out
-        assert 'T=2.500' in out
+        for name in metrics_fns:
+            assert f'val/{name}' in out

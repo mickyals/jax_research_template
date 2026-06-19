@@ -1,5 +1,5 @@
 """
-Integration tests: Trainer + TCEncoder end-to-end training.
+Integration tests: Trainer + TCPerceiverIO end-to-end training.
 
 All tests use synthetic in-memory data — no disk access required.
 
@@ -9,8 +9,8 @@ TestOneForwardBackwardPass
     forward pass: all five metric keys returned (loss, cross_entropy,
         accuracy, binary_accuracy, mae_class); all finite; deterministic
     backward pass: params change after one gradient update; loss finite and positive
-    both attention paths (use_self_attention True / False)
-    both location encodings (unit_circle / domain)
+    both location conventions (unit_circle / domain) — the model is
+        coordinate-agnostic, so they differ only in station_coords values
     missing obs (obs_mask partially False) handled without NaN
     padded stations (station_mask partially False) handled without NaN
 
@@ -21,6 +21,11 @@ TestLossVariation
     loss decreases over training when data has a clear separable signal
     trainer.fit() completes and returns TrainState
     epoch callbacks receive correct (epoch, global_step) pairs
+
+TestObservabilityCallbacks
+    entropy callback logs val/attn_entropy; per-component figure callback logs
+    the read/processor/decoder maps and respects its cadence; gradient-flow
+    histograms named by tree path; diagnostics figure row
 """
 
 from __future__ import annotations
@@ -31,7 +36,8 @@ import numpy as np
 import pytest
 
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
-from experiments.tc_perceiver_io.train.model import TCEncoder, N_CLASSES
+from experiments.tc_perceiver_io.train.model import TCPerceiverIO
+from experiments.tc_perceiver_io.data.sources.ibtracs import N_CLASSES
 from training.trainer import Trainer, TrainState
 
 
@@ -161,14 +167,15 @@ class _FakeTCLoader:
 
 def _make_model(
     embed_dim:         int = 32,
-) -> TCEncoder:
-    return TCEncoder(
-        embed_dim         = embed_dim,
-        num_heads         = 2,
-        num_layers        = 2,
-        fourier_dim       = 16,     # must be even
-        n_obs_features    = F,
-        n_classes         = N_CLASSES,
+) -> TCPerceiverIO:
+    return TCPerceiverIO(
+        embed_dim          = embed_dim,
+        num_heads          = 2,
+        num_latents        = 8,
+        num_process_layers = 2,
+        fourier_dim        = 16,     # must be even
+        n_obs_features     = F,
+        n_classes          = N_CLASSES,
     )
 
 
@@ -398,7 +405,6 @@ from experiments.tc_perceiver_io.train.train import (   # noqa: E402
 from experiments.tc_perceiver_io.data.sources.ibtracs import (   # noqa: E402
     CLASS_NAMES,
 )
-from experiments.tc_perceiver_io.data.inputs import InputSpec   # noqa: E402
 
 
 class _RecordingLogger:
@@ -445,33 +451,36 @@ class TestObservabilityCallbacks:
         assert 'val/attn_entropy' in metrics
         assert np.isfinite(metrics['val/attn_entropy'])
 
-    def test_attn_figure_callback_logs_map_and_grid(self):
+    def test_attn_figure_callback_logs_all_components(self):
         model, state, batch = self._model_state_batch()
         logger = _RecordingLogger()
         cb = _make_attn_figure_callback(
             model, batch, logger,
-            input_spec=InputSpec(location_encoding='unit_circle'),
             class_names=CLASS_NAMES,
+            location_encoding='unit_circle',
             radius_km=500.0,
             fig_every=2,
         )
         cb(state, epoch=2, global_step=10)
         tags = [t for t, _ in logger.figures]
-        assert tags == ['val/attn_map', 'val/attn_grid']
+        # Read map, Processor grid, and (decode_mode='attention') Decoder query.
+        assert tags == [
+            'val/attn_read_map', 'val/attn_processor_grid', 'val/attn_decoder_query',
+        ]
 
     def test_attn_figure_callback_respects_cadence(self):
         model, state, batch = self._model_state_batch()
         logger = _RecordingLogger()
         cb = _make_attn_figure_callback(
             model, batch, logger,
-            input_spec=InputSpec(location_encoding='unit_circle'),
             class_names=CLASS_NAMES,
+            location_encoding='unit_circle',
             fig_every=5,
         )
         cb(state, epoch=3, global_step=10)   # off-cadence
         assert logger.figures == []
         cb(state, epoch=5, global_step=20)   # on-cadence
-        assert len(logger.figures) == 2
+        assert len(logger.figures) == 3
 
     def test_grad_flow_callback_logs_named_histograms(self):
         model, state, batch = self._model_state_batch()
@@ -482,7 +491,7 @@ class TestObservabilityCallbacks:
         tags = [t for t, _, _ in logger.histograms]
         # Named by tree path under the grad_flow/ prefix
         assert all(t.startswith('grad_flow/') for t in tags)
-        assert any('transformer' in t for t in tags)  # encoder body submodule
+        assert any('processor' in t for t in tags)  # encoder body submodule
         assert any(t.endswith('kernel') for t in tags)
         # One histogram per parameter leaf
         n_leaves = len(jax.tree_util.tree_leaves(state.params))

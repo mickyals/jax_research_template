@@ -29,10 +29,13 @@ from experiments.tc_perceiver_io.data.datamodule import TCDataModule
 from experiments.tc_perceiver_io.train.evaluate import (
     collect_predictions,
     confusion_matrix,
+    domain_latlon_for_sample,
     per_class_metrics,
 )
 from experiments.tc_perceiver_io.plotting.plotting import (
+    plot_attention_geographic,
     plot_attention_matrix_grid,
+    plot_decoder_query,
     plot_class_metrics,
     plot_confusion_matrix,
 )
@@ -95,18 +98,29 @@ def _make_attn_entropy_callback(
 
 
 def _make_attn_figure_callback(
-    model:       TCPerceiverIO,
-    probe_batch: dict,
+    model:             TCPerceiverIO,
+    probe_batch:       dict,
     logger,
-    class_names: list[str],
-    fig_every:   int = 5,
+    class_names:       list[str],
+    location_encoding: str = 'unit_circle',
+    radius_km:         float = 500.0,
+    fov_lat:           tuple[float, float] | None = None,
+    fov_lon:           tuple[float, float] | None = None,
+    fig_every:         int = 5,
 ) -> Callable[[TrainState, int, int], None]:
-    """Return an **epoch-level** callback logging the Processor self-attention grid.
+    """Return an **epoch-level** callback logging the per-component attention maps.
 
-    ``val/attn_processor_grid``: a layers × heads grid of the N×N latent
-    self-attention matrices (softmax of the pre-softmax Processor scores) for
-    the fixed VAL probe sample. The per-component geographic Read map and the
-    Decoder query map are a separate (deferred) visualization.
+    All three Perceiver-IO components are rendered from the fixed VAL probe
+    sample (softmax of the pre-softmax scores) every ``fig_every`` epochs:
+
+    ``val/attn_read_map`` — geographic Read map: per-station attention (mean
+        over latents + heads) on the station geometry (unit_circle local x-y
+        with km rings, or domain lat/lon).
+    ``val/attn_processor_grid`` — layers × heads grid of the N×N latent
+        self-attention matrices.
+    ``val/attn_decoder_query`` — heads × latents heatmap of the Decoder output
+        query's attention (only for decode_mode='attention'; absent for
+        'avgproj').
 
     Parameters
     ----------
@@ -117,30 +131,67 @@ def _make_attn_figure_callback(
         Must expose ``log_figure``.
     class_names : list[str]
         For the figure caption (true/pred of the probe sample).
+    location_encoding : {'unit_circle', 'domain'}
+        Coordinate convention for the Read map. For 'domain' the probe's
+        station/query positions are decoded once here (the probe is fixed).
+    radius_km : float
+        Search radius (unit_circle Read-map km-ring labels).
+    fov_lat, fov_lon : tuple, optional
+        Domain field-of-view (required when location_encoding='domain').
     fig_every : int
         Log figures every this many epochs. 0 = never. Default 5.
     """
     probe_X = probe_batch['X']
 
+    # The probe batch is fixed, so for domain mode decode its sample-0
+    # station/query positions once (plotting does not import the encoding).
+    station_latlon = query_latlon = None
+    if location_encoding == 'domain':
+        station_latlon, query_latlon = domain_latlon_for_sample(
+            probe_batch, 0, fov_lat, fov_lon)
+
     @jax.jit
     def _attn(params):
         logits, attn = model.apply({'params': params}, probe_X,
                                    train=False, return_weights=True)
-        # softmax the pre-softmax processor scores so the [0,1] grid plotter
-        # renders them as proper attention distributions. (L, B, H, N, N)
-        return logits, jax.nn.softmax(attn['processor'], axis=-1)
+        # softmax the pre-softmax scores (over the LAST axis) so each plotter
+        # renders proper attention distributions.
+        read = jax.nn.softmax(attn['read'], axis=-1)          # (B, H, N, M)
+        proc = jax.nn.softmax(attn['processor'], axis=-1)     # (L, B, H, N, N)
+        dec  = attn.get('decoder')                            # (B, H, 1, N) | None
+        if dec is not None:
+            dec = jax.nn.softmax(dec, axis=-1)
+        return logits, read, proc, dec
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
         if fig_every <= 0 or epoch % fig_every != 0:
             return
-        logits, proc = _attn(state.params)
+        logits, read, proc, dec = _attn(state.params)
         true_c = class_names[int(probe_batch['y'][0])]
         pred_c = class_names[int(np.asarray(logits)[0].argmax())]
+        caption = f'true: {true_c}, pred: {pred_c}'
+
+        fig_read = plot_attention_geographic(
+            np.asarray(read), probe_batch,
+            location_encoding=location_encoding,
+            fov_lat=fov_lat, fov_lon=fov_lon, radius_km=radius_km,
+            sample_idx=0,
+            station_latlon=station_latlon, query_latlon=query_latlon,
+        )
+        logger.log_figure('val/attn_read_map', fig_read, step=global_step)
+
         fig_grid = plot_attention_matrix_grid(
             np.asarray(proc), sample_idx=0,
-            title=f'Processor self-attention — true: {true_c}, pred: {pred_c}',
+            title=f'Processor self-attention — {caption}',
         )
         logger.log_figure('val/attn_processor_grid', fig_grid, step=global_step)
+
+        if dec is not None:
+            fig_dec = plot_decoder_query(
+                np.asarray(dec), sample_idx=0,
+                title=f'Decoder output-query attention — {caption}',
+            )
+            logger.log_figure('val/attn_decoder_query', fig_dec, step=global_step)
 
     return callback
 
@@ -514,6 +565,10 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     epoch_callbacks = [
         _make_attn_figure_callback(model, probe_batch, trainer.logger,
                                    class_names=class_names,
+                                   location_encoding=loc_enc,
+                                   radius_km=config['data'].get('radius_km', 500.0),
+                                   fov_lat=config['data'].get('fov_lat'),
+                                   fov_lon=config['data'].get('fov_lon'),
                                    fig_every=fig_every),
         _make_eval_plots_callback(model, val_loader, trainer.logger,
                                   class_names=class_names,

@@ -50,7 +50,9 @@ from experiments.tc_perceiver_io.train.model import TCPerceiverIO
 from experiments.tc_perceiver_io.plotting.plotting import (
     plot_confusion_matrix,
     plot_class_metrics,
+    plot_attention_geographic,
     plot_attention_matrix_grid,
+    plot_decoder_query,
 )
 from training.trainer import Trainer
 
@@ -350,7 +352,12 @@ def evaluate(
     loc_enc = config.get('location_encoding',
                          config['data'].get('location_encoding', 'unit_circle'))
     config['data']['location_encoding'] = loc_enc
-    config['model']['learnable_query_pos'] = (loc_enc == 'unit_circle')
+    # The model is coordinate-agnostic (the learned latent array is the query),
+    # so location_encoding configures the datamodule only — nothing is injected
+    # into config['model'].
+    radius_km = float(config['data'].get('radius_km', 500.0))
+    fov_lat   = config['data'].get('fov_lat')
+    fov_lon   = config['data'].get('fov_lon')
 
     dm          = TCDataModule.from_config(config['data'])
     target_spec = dm.target_spec
@@ -406,15 +413,21 @@ def evaluate(
         print(f"Confusion / metrics plots saved to {out}/")
 
     # ------------------------------------------------------------------
-    # Attention plots — Processor latent self-attention grids (pre-softmax
-    # scores, softmaxed for display) from the first batch. The geographic Read
-    # map and the Decoder-query map are a separate (deferred) visualization.
+    # Attention plots — the three Perceiver-IO components (pre-softmax scores,
+    # softmaxed for display) from the first batch:
+    #   Read map      — per-station attention on the station geometry,
+    #   Processor grid — layers × heads of the N×N latent self-attention,
+    #   Decoder query  — heads × latents output-query attention (decode_mode
+    #                    'attention' only; None for 'avgproj').
     # ------------------------------------------------------------------
     if n_attn_samples > 0:
         attn_batch   = exmp_batch  # first batch reused
         logits, attn = model.apply(variables, attn_batch['X'],
                                    train=False, return_weights=True)
+        read   = np.asarray(jax.nn.softmax(attn['read'],      axis=-1))  # (B,H,N,M)
         proc   = np.asarray(jax.nn.softmax(attn['processor'], axis=-1))  # (L,B,H,N,N)
+        dec    = attn.get('decoder')
+        dec    = np.asarray(jax.nn.softmax(dec, axis=-1)) if dec is not None else None
         n_plot = min(n_attn_samples, proc.shape[1])
 
         # Per-batch predictions + storm attribution for figure titles.
@@ -435,13 +448,44 @@ def evaluate(
             return f"{who} — true: {true_c}, pred: {pred_c}"
 
         for i in range(n_plot):
+            # Geographic Read map. For domain encoding decode this sample's
+            # positions (plotting does not import the coordinate encoding).
+            station_latlon = query_latlon = None
+            if loc_enc == 'domain':
+                station_latlon, query_latlon = domain_latlon_for_sample(
+                    attn_batch, i, fov_lat, fov_lon)
+            fig_r = plot_attention_geographic(
+                read, attn_batch, location_encoding=loc_enc,
+                fov_lat=fov_lat, fov_lon=fov_lon, radius_km=radius_km,
+                sample_idx=i, geo=geo,
+                storm_latlon=(
+                    (float(batch_meta['query_lat'][i]),
+                     float(batch_meta['query_lon'][i]))
+                    if (geo and loc_enc == 'unit_circle'
+                        and batch_meta is not None) else None),
+                station_latlon=station_latlon, query_latlon=query_latlon,
+            )
+
             fig_g = plot_attention_matrix_grid(
                 proc, sample_idx=i,
                 title=f'Processor self-attention — {_sample_title(i)}',
             )
+
+            fig_d = None
+            if dec is not None:
+                fig_d = plot_decoder_query(
+                    dec, sample_idx=i,
+                    title=f'Decoder output-query attention — {_sample_title(i)}',
+                )
+
             if output_dir is not None:
+                fig_r.savefig(out / f'{split}_attn_read_map_sample{i}.png',
+                              dpi=150, bbox_inches='tight')
                 fig_g.savefig(out / f'{split}_attn_processor_grid_sample{i}.png',
                               dpi=150, bbox_inches='tight')
+                if fig_d is not None:
+                    fig_d.savefig(out / f'{split}_attn_decoder_query_sample{i}.png',
+                                  dpi=150, bbox_inches='tight')
 
         if output_dir is not None:
             print(f"Attention plots saved to {out}/")

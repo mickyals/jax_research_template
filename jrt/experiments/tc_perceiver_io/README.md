@@ -351,9 +351,10 @@ python -m experiments.tc_perceiver_io.train.evaluate \
 Outputs:
 - Confusion matrix — row-normalised 11×11 and raw counts
 - Per-class precision / recall / F1 bar chart
-- Geographic attention maps — storm-centred local x-y scatter with km distance rings (unit_circle) or lat/lon scatter (domain), coloured by mean attention weight of the last layer's query row. Figure titles carry storm attribution: `"<SID> <NAME> — true: Cat 3, pred: TS"` (or `background`). With `--geo` (or `geo=True`) the scatter is drawn on a cartopy map with coastlines/borders: PlateCarree for domain, and for unit_circle an **AzimuthalEquidistant projection centred on the storm** — that projection's native coordinates are metres east/north of the centre, i.e. exactly the local x-y encoding × radius, so stations, km rings, and coastlines align by construction. Requires cartopy (optional dependency); default stays cartopy-free
-- Attention-matrix grids — layers × heads panels of the full (N+1)×(N+1) matrices per sample (`plot_attention_matrix_grid`; plain imshow, no per-token labels, dashed lines mark the query row/column)
-- Attention-mask figure — the exact asymmetric boolean mask the model builds (`plot_attention_mask`, single source of truth: `model.build_attention_mask`)
+- Per-component attention maps (one set per sample, titled with storm attribution `"<SID> <NAME> — true: Cat 3, pred: TS"`, or `background`):
+  - **Read map** (`plot_attention_geographic`) — *which stations the model attends to*. The Read cross-attention `softmax(attn['read'])` `(B, H, N, M)` is averaged over the N latents and H heads to a per-station weight `(M,)`, then scattered on the station geometry: storm-centred local x-y with km distance rings (unit_circle) or lat/lon (domain). With `--geo` (or `geo=True`) the scatter is drawn on a cartopy map with coastlines/borders: PlateCarree for domain, and for unit_circle an **AzimuthalEquidistant projection centred on the storm** — that projection's native coordinates are metres east/north of the centre, i.e. exactly the local x-y encoding × radius, so stations, km rings, and coastlines align by construction. Requires cartopy (optional dependency); default stays cartopy-free
+  - **Processor grid** (`plot_attention_matrix_grid`) — layers × heads panels of the N×N latent self-attention matrices `softmax(attn['processor'])` `(L, B, H, N, N)` per sample (plain imshow, no per-latent labels)
+  - **Decoder-query map** (`plot_decoder_query`) — heads × latents heatmap of the single output query's attention over the N latents `softmax(attn['decoder'])` `(B, H, 1, N)` (decode_mode `attention` only; absent for `avgproj`)
 
 ### Hyperparameter search (CLI)
 
@@ -441,10 +442,13 @@ print('finite:', bool(jnp.all(jnp.isfinite(logits))))
 import numpy as np
 
 def attn_callback(state, epoch, global_step):
-    _, w = model.apply({'params': state.params}, batch['X'],
-                       train=False, return_weights=True)
-    w       = np.asarray(w)[-1][:, :, 0, :]   # last layer, query row (CLS=token 0) → (B, H, 1+N)
-    entropy = float(-np.sum(w * np.log(w + 1e-12), axis=-1).mean())
+    import jax.nn as jnn
+    _, attn = model.apply({'params': state.params}, batch['X'],
+                          train=False, return_weights=True)
+    # Read entropy: each latent's attention over the M stations (softmax of the
+    # pre-softmax Read scores), averaged over batch/heads/latents.
+    p       = np.asarray(jnn.softmax(attn['read'], axis=-1))   # (B, H, N, M)
+    entropy = float(-np.sum(p * np.log(p + 1e-12), axis=-1).mean())
     print(f'  epoch {epoch:3d}  val/attn_entropy = {entropy:.4f}')
 
 best_state = trainer.fit(train_loader, val_loader,
@@ -476,23 +480,29 @@ plt.show()
 ```
 
 ```python
-# Cell 7 — attention figures
+# Cell 7 — per-component attention figures
+import jax.nn as jnn
 from experiments.tc_perceiver_io.plotting.plotting import (
-  extract_attention_weights, plot_attention_geographic,
-  plot_attention_matrix_grid, plot_attention_mask,
+  plot_attention_geographic, plot_attention_matrix_grid, plot_decoder_query,
 )
+from experiments.tc_perceiver_io.train.evaluate import domain_latlon_for_sample
 
 attn_batch = next(iter(val_loader))
-attn_weights = extract_attention_weights(model, variables, attn_batch)
-print('weights:', attn_weights.shape)  # (num_layers, B, H, N+1, N+1)
+_, attn = model.apply(variables, attn_batch['X'], train=False, return_weights=True)
+# attn holds PRE-softmax scores; softmax each over its LAST axis to get
+# distributions. Shapes: read (B,H,N,M), processor (L,B,H,N,N), decoder (B,H,1,N).
+read = np.asarray(jnn.softmax(attn['read'],      axis=-1))
+proc = np.asarray(jnn.softmax(attn['processor'], axis=-1))
+dec  = (np.asarray(jnn.softmax(attn['decoder'], axis=-1))
+        if attn.get('decoder') is not None else None)   # None for decode_mode='avgproj'
 
-# Geographic map — query row of the last layer (CLS-first: query is token 0).
+# Read map — which stations the latents attend to (mean over latents + heads).
 # unit_circle needs nothing extra; domain mode requires the caller to decode
 # coords→lat/lon (the plotter doesn't import the coordinate encoding) — use
-# evaluate.domain_latlon_for_sample(attn_batch, 0, fov_lat, fov_lon) and pass
+# domain_latlon_for_sample(attn_batch, 0, fov_lat, fov_lon) and pass
 # station_latlon=/query_latlon=.
-fig = plot_attention_geographic(
-  attn_weights[-1][:, :, 0, :], attn_batch,
+fig_read = plot_attention_geographic(
+  read, attn_batch,
   location_encoding=config['data']['location_encoding'],
   fov_lat=config['data'].get('fov_lat'),
   fov_lon=config['data'].get('fov_lon'),
@@ -500,11 +510,12 @@ fig = plot_attention_geographic(
   sample_idx=0,
 )
 
-# Layers × heads grid of full (N+1)×(N+1) matrices
-fig_grid = plot_attention_matrix_grid(attn_weights, sample_idx=0)
+# Processor — layers × heads grid of the N×N latent self-attention matrices
+fig_grid = plot_attention_matrix_grid(proc, sample_idx=0)
 
-# Static asymmetric-mask figure (stations blocked from query, padding blocked)
-fig_mask = plot_attention_mask(np.asarray(attn_batch['X']['station_mask'][0]))
+# Decoder — heads × latents output-query attention (skip when None / avgproj)
+if dec is not None:
+  fig_dec = plot_decoder_query(dec, sample_idx=0)
 plt.show()
 ```
 
@@ -522,13 +533,13 @@ plt.show()
 | `val/mae_class` | Mean \|predicted class − true class\| in class units |
 | `val/qwk` | Quadratic-weighted kappa (full val set, every `eval_plots_every_n_epochs`) — ordinal agreement; 1 = perfect, 0 = chance, negative = worse than chance |
 | `val/ece` | Expected calibration error (full val set, every `eval_plots_every_n_epochs`) — gap between confidence and accuracy; 0 = perfectly calibrated |
-| `val/attn_entropy` | Entropy of the LAST layer's query-row attention weights over N+1 positions. A falling curve means the model is concentrating attention on specific stations. |
+| `val/attn_entropy` | Mean entropy of the Read cross-attention — each latent's distribution over the M stations (`softmax(attn['read'])`, averaged over batch/heads/latents). A falling curve means latents are concentrating on fewer stations rather than attending uniformly. |
 
 **Interpretation:**
 - A model that always predicts class 0 achieves `binary_accuracy = 0.5` but `mae_class ≈ 3`. Use `mae_class` as the primary signal for ordinal quality.
 - `val/qwk` and `val/ece` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py`/the eval-plots callback), not per-batch — they're too noisy/ill-defined on a `batch_size`-8 step to live in `metrics_fns`. `val/qwk` tracks ordinal agreement (rewards near misses over far misses) independent of the training loss; `val/ece` (mean) and the test report's `mce` (worst-bin) are the calibration measurements.
 - **Temperature scaling** (Guo et al. 2017): `evaluate.py` fits a single temperature `T` on the **val** split (`fit_temperature`, an exact ternary search since NLL is convex in `1/T`) and `print_report` prints both `<split>/ece` and `<split>/ece_tempscaled` with the fitted `T`. `T` divides the logits, so it recalibrates confidence without changing the argmax — accuracy, QWK and the per-class table are identical. For `--split test` this is the proper val→test transfer; for `--split val` it is an in-sample check.
-- `val/attn_entropy` includes the query's self-attention weight (the first of 1+N positions, CLS-first). A high self-attention weight early in training is expected — the model is relying on its learned query prior (`query_obs_slots`). Expect it to decrease as the model learns to trust station data.
+- `val/attn_entropy` starts high (latents attend near-uniformly over the M stations) and is expected to fall as the model learns which stations matter; padded station columns are masked out of the Read attention so they do not contribute.
 
 ---
 
@@ -559,7 +570,7 @@ Key fields in `tc_classifier.yaml`:
 | `trainer.loss_kwargs` | `{}` | Composable kwargs for `cross_entropy`: `focal_gamma` (focal loss), `emd_lambda`/`emd_omega`/`emd_mu` (squared-EMD regulariser), and/or explicit `class_weights` (length-11; overrides `data.class_weight_scheme`) |
 | `trainer.steps_per_epoch` | 500 | Random TC-sampling mode: gradient steps per epoch. Omit/`null` = sequential mode (one pass over TC data) |
 | `trainer.profile` | `false` | Trace the first `profile_steps` training steps (JAX profiler) → `<run_dir>/logs/profile`; WandB uploads it as an artifact, TensorBoard/Null leave it on disk |
-| `trainer.attn_fig_every_n_epochs` | 5 | Epoch cadence for `val/attn_map` + `val/attn_grid` figures (VAL probe batch); 0 = disabled |
+| `trainer.attn_fig_every_n_epochs` | 5 | Epoch cadence for the per-component attention figures `val/attn_read_map` + `val/attn_processor_grid` + `val/attn_decoder_query` (VAL probe batch); 0 = disabled |
 | `trainer.grad_hist_every_n_epochs` | 5 | Epoch cadence for `grad_flow/*` gradient histograms (TRAIN probe batch, also at init); 0 = disabled |
 | `trainer.patience_metric` | `val/cross_entropy` | |
 | `trainer.run_dir` | `runs/tc_classifier/run_01` | Change per run to avoid overwriting |
@@ -571,13 +582,13 @@ For WandB: set `log_backend: wandb`, add `project` / `name` / `tags` under `log_
 
 ## Implementation notes
 
-**Single `token_proj` (Senseiver-style):** one `Dense((2F+K) → embed_dim)` projects every token from the concatenation `[obs; mask; Fourier(position)]`. Observations, missingness, and position therefore share one learned map and live in the same coordinate space — the right inductive bias for relative geometry, and one fewer projection than the old separate obs/position layers (which were provably equivalent up to a redundant bias). The query token uses the same layer.
+**Single `token_proj` (Senseiver-style):** one `Dense((2F+K) → embed_dim)` projects every station token from the concatenation `[obs; mask; Fourier(coords)]`. Observations, missingness, and position therefore share one learned map and live in the same coordinate space — the right inductive bias for relative geometry. There is no query token: the model is coordinate-agnostic and the learned latent array is the encode query (`location_encoding` configures the datamodule only).
 
-**`query_obs_slots` param (ξ):** a learned `(2F,)` vector (or `(F,)` when `missingness_indicator=False`) occupying the obs/mask slots of the query's projection input; `Fourier(query_coords)` supplies the position slots. For unit_circle the position is constant at `(0,0)`, so the query token reduces to a fixed learned vector — the standard ViT/BERT special-token role. For domain the query position varies and flows through the same `token_proj`.
+**Learned latent array (ξ):** a `(num_latents, embed_dim)` parameter (truncated-normal init), broadcast over the batch and used as the Read cross-attention query. It replaces any explicit query/CLS token — the index dimension the Processor and Decoder operate over is the N latents, decoupled from the station count M.
 
-**Attention observability** (`train.py`): a fixed validation probe batch is held in memory for the duration of training. `return_weights=True` returns the full attention matrices from EVERY encoder layer, shape `(num_layers, B, H, N+1, N+1)`. The entropy callback computes mean entropy over the last layer's query row and logs it as `val/attn_entropy` (step cadence). Every `attn_fig_every_n_epochs` epochs two figures are logged from the same probe: `val/attn_map` (geographic query-row scatter — the query self-attention weight is dropped before the station mask is applied) and `val/attn_grid` (layers × heads grid of full matrices). The static `val/attn_mask` figure is logged once at step 0. Attention figures are VAL/TEST diagnostics — `evaluate.py` produces the same map + grid + mask figures for the test split; nothing attention-related runs on training batches.
+**Attention observability** (`train.py`): a fixed validation probe batch is held in memory for the duration of training. `return_weights=True` returns a dict of PRE-softmax scores, one per component: `read (B, H, N, M)`, `processor (L, B, H, N, N)`, `decoder (B, H, 1, N)` (None for `decode_mode='avgproj'`). Softmax over the last axis turns any of these into distributions. The entropy callback logs the Read entropy as `val/attn_entropy` (step cadence). Every `attn_fig_every_n_epochs` epochs three figures are logged from the same probe: `val/attn_read_map` (geographic Read scatter, per-station mean over latents+heads), `val/attn_processor_grid` (layers × heads grid of the N×N latent self-attention), and `val/attn_decoder_query` (heads × latents output-query heatmap, skipped for `avgproj`). Attention figures are VAL/TEST diagnostics — `evaluate.py` produces the same three figures per sample for the test split; nothing attention-related runs on training batches.
 
-**Gradient-flow callback** (`train.py`): a fixed TRAINING probe batch; `jax.grad` of the cross-entropy loss, one histogram per parameter leaf named by its tree path (`grad_flow/encoder/blocks_0/...`), pushed via `logger.log_histogram` at init (step 0) and every `grad_hist_every_n_epochs` epochs. Train-only — vanishing/exploding layers show up as histograms collapsing or blowing up across depth.
+**Gradient-flow callback** (`train.py`): a fixed TRAINING probe batch; `jax.grad` of the cross-entropy loss, one histogram per parameter leaf named by its tree path (`grad_flow/processor/blocks_0/...`), pushed via `logger.log_histogram` at init (step 0) and every `grad_hist_every_n_epochs` epochs. Train-only — vanishing/exploding layers show up as histograms collapsing or blowing up across depth.
 
 **Multi-storm exclusion:** IBTrACS timestamps with ≥2 active storms are not used during training or validation — the model sees only unambiguous single-storm or background samples. These timestamps form the `hard_test` split for post-training analysis.
 
