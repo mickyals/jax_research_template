@@ -13,6 +13,7 @@ Will add for zarr, nc files and others as they are needed.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -164,16 +165,24 @@ class NpzDataset:
     # Export
     # ------------------------------------------------------------------
 
-    def to_dataframe(self, cols: Optional[list[str]] = None) -> pd.DataFrame:
+    def to_dataframe(self, cols: Optional[list[str]] = None,
+                     time_col: Optional[str] = None) -> pd.DataFrame:
         """
         Convert to a pandas DataFrame.
 
-        ISO_TIME columns are automatically cast to datetime64.
+        Datetime handling. If ``time_col`` is given, that one column is cast
+        to datetime64. Otherwise columns whose *name* looks date-like
+        (matches ``year|month|date|day|time``) AND hold object/string data
+        are cast, leaving non-date object columns (e.g. SID, NAME) untouched.
+        Columns that fail to parse are left as-is rather than raising.
 
         Parameters
         ----------
         cols : list[str], optional
             Subset of columns to include. Defaults to all columns.
+        time_col : str, optional
+            Explicit datetime column to cast. Overrides name detection;
+            use when the time column does not match the name pattern.
 
         Returns
         -------
@@ -181,8 +190,30 @@ class NpzDataset:
         """
         cols = cols or self.columns
         df   = pd.DataFrame({c: self._data[c] for c in cols})
-        if "ISO_TIME" in df.columns:
-            df["ISO_TIME"] = pd.to_datetime(df["ISO_TIME"])
+
+        if time_col is not None:
+            if time_col in df.columns:
+                df[time_col] = pd.to_datetime(df[time_col])
+            return df
+
+        # Name-based datetime detection -- cast only date-like *string*
+        # columns so string ids (SID, NAME) and numeric fields (a YEAR int
+        # column) are never coerced/mangled.
+        # Adapted from https://stackoverflow.com/a/79102960
+        #   posted by Jayanth MKV, retrieved 2026-06-16, CC BY-SA 4.0.
+        # Two project adaptations: 'time' is added to the pattern so
+        # ISO_TIME-style columns are caught, and the original
+        # ``dtype == 'object'`` guard is broadened to "non-numeric,
+        # non-datetime" so it also matches pandas StringDtype columns.
+        pattern = "year|month|date|day|time"
+        for col in df.columns:
+            if (re.search(pattern, col.lower())
+                    and not pd.api.types.is_numeric_dtype(df[col])
+                    and not pd.api.types.is_datetime64_any_dtype(df[col])):
+                try:
+                    df[col] = pd.to_datetime(df[col])
+                except (ValueError, TypeError):
+                    pass
         return df
 
     def to_Xy(

@@ -6,7 +6,7 @@ import optax
 
 from core.nets.mlp import (
     MLP,
-    SIREN,
+    SIRENet,
     FINERNet,
     GaussianNet,
     GaussianFINERNet,
@@ -16,10 +16,12 @@ from core.nets.mlp import (
     HOSCNet,
     HOSCFINERNet,
     SincNet,
-    LatLonEmbeddingWrapper,
-    CombinedEmbedding,
     get_mlp,
     list_mlps,
+)
+from core.embeddings import (
+    LatLonEmbeddingWrapper,
+    CombinedEmbedding,
 )
 
 # ---------------------------------------------------------------------------
@@ -51,7 +53,7 @@ def key():
 # ---------------------------------------------------------------------------
 ALL_NETS = [
     (MLP,              {}),
-    (SIREN,            {}),
+    (SIRENet,          {}),
     (FINERNet,         {}),
     (GaussianNet,      {}),
     (GaussianFINERNet, {}),
@@ -153,7 +155,7 @@ class TestMLP:
     def test_output_bias_configurable(self, x, key):
         model = MLP(out_features=OUT_DIM, hidden_features=HIDDEN,
                     n_layers=N_LAYERS, output_bias_initializer="normal",
-                    output_bias_initializer_kwargs={"std": 0.1})
+                    output_bias_initializer_kwargs={"stddev": 0.1})
         variables, _ = init_and_forward(model, x, key)
         output_bias = variables['params']['output_layer']['bias']
         assert jnp.any(output_bias != 0.0)
@@ -161,7 +163,7 @@ class TestMLP:
     def test_hidden_bias_configurable(self, x, key):
         model = MLP(out_features=OUT_DIM, hidden_features=HIDDEN,
                     n_layers=N_LAYERS, bias_initializer="normal",
-                    bias_initializer_kwargs={"std": 0.1})
+                    bias_initializer_kwargs={"stddev": 0.1})
         variables, _ = init_and_forward(model, x, key)
         first_bias = variables['params']['first_layer']['bias']
         assert jnp.any(first_bias != 0.0)
@@ -176,10 +178,10 @@ class TestMLP:
 # SIREN
 # ---------------------------------------------------------------------------
 
-class TestSIREN:
+class TestSIRENet:
     @pytest.fixture
     def model(self):
-        return SIREN(out_features=OUT_DIM, hidden_features=HIDDEN, n_layers=N_LAYERS)
+        return SIRENet(out_features=OUT_DIM, hidden_features=HIDDEN, n_layers=N_LAYERS)
 
     def test_forward(self, model, x, key):
         check_forward(model, x, key)
@@ -188,13 +190,13 @@ class TestSIREN:
         check_backward(model, x, key)
 
     def test_n_layers_one(self, x, key):
-        check_n_layers_one(SIREN, key, x)
+        check_n_layers_one(SIRENet, key, x)
 
     def test_invalid_n_layers(self):
-        check_invalid_n_layers(SIREN)
+        check_invalid_n_layers(SIRENet)
 
     def test_first_layer_init_bounds(self, x, key):
-        model = SIREN(out_features=OUT_DIM, hidden_features=HIDDEN, n_layers=N_LAYERS)
+        model = SIRENet(out_features=OUT_DIM, hidden_features=HIDDEN, n_layers=N_LAYERS)
         variables, _ = init_and_forward(model, x, key)
         first_kernel = variables['params']['first_layer']['kernel']
         bound = 1.0 / IN_DIM
@@ -203,20 +205,20 @@ class TestSIREN:
         )
 
     def test_different_omegas(self, x, key):
-        model = SIREN(out_features=OUT_DIM, hidden_features=HIDDEN,
-                      n_layers=N_LAYERS, first_omega=30.0, hidden_omega=30.0)
+        model = SIRENet(out_features=OUT_DIM, hidden_features=HIDDEN,
+                        n_layers=N_LAYERS, first_omega=30.0, hidden_omega=30.0)
         check_forward(model, x, key)
 
     def test_bias_is_zero(self, x, key):
-        model = SIREN(out_features=OUT_DIM, hidden_features=HIDDEN, n_layers=N_LAYERS)
+        model = SIRENet(out_features=OUT_DIM, hidden_features=HIDDEN, n_layers=N_LAYERS)
         variables, _ = init_and_forward(model, x, key)
         first_bias = variables['params']['first_layer']['bias']
         assert jnp.all(first_bias == 0.0), "SIREN first layer bias should be zero"
 
     def test_bias_override(self, x, key):
-        model = SIREN(out_features=OUT_DIM, hidden_features=HIDDEN,
-                      n_layers=N_LAYERS, bias_initializer="normal",
-                      bias_initializer_kwargs={"std": 0.1})
+        model = SIRENet(out_features=OUT_DIM, hidden_features=HIDDEN,
+                        n_layers=N_LAYERS, bias_initializer="normal",
+                        bias_initializer_kwargs={"stddev": 0.1})
         variables, out = init_and_forward(model, x, key)
         assert jnp.all(jnp.isfinite(out))
         first_bias = variables['params']['first_layer']['bias']
@@ -266,7 +268,7 @@ class TestFINERNet:
     def test_bias_override(self, x, key):
         model = FINERNet(out_features=OUT_DIM, hidden_features=HIDDEN,
                          n_layers=N_LAYERS, bias_initializer="normal",
-                         bias_initializer_kwargs={"std": 0.01})
+                         bias_initializer_kwargs={"stddev": 0.01})
         variables, out = init_and_forward(model, x, key)
         assert jnp.all(jnp.isfinite(out))
 
@@ -565,7 +567,7 @@ class TestEmbeddings:
     def test_net_with_gaussian_embedding_forward(self, key):
         from core.embeddings import get_embedding
         x = jax.random.normal(key, (BATCH, IN_DIM))
-        net = SIREN(
+        net = SIRENet(
             out_features=OUT_DIM,
             hidden_features=HIDDEN,
             n_layers=N_LAYERS,
@@ -581,7 +583,7 @@ class TestEmbeddings:
     def test_net_with_combined_embedding_forward(self, key):
         from core.embeddings import get_embedding
         x = jax.random.normal(key, (BATCH, 3))  # lat, lon, time
-        net = SIREN(
+        net = SIRENet(
             out_features=OUT_DIM,
             hidden_features=HIDDEN,
             n_layers=N_LAYERS,
@@ -603,7 +605,7 @@ class TestEmbeddings:
     def test_net_with_combined_embedding_backward(self, key):
         from core.embeddings import get_embedding
         x = jax.random.normal(key, (BATCH, 3))
-        net = SIREN(
+        net = SIRENet(
             out_features=OUT_DIM,
             hidden_features=HIDDEN,
             n_layers=N_LAYERS,
@@ -698,7 +700,7 @@ class TestCrossCutting:
         model = model_cls(
             out_features=OUT_DIM, hidden_features=HIDDEN, n_layers=N_LAYERS,
             output_bias_initializer="normal",
-            output_bias_initializer_kwargs={"std": 0.1},
+            output_bias_initializer_kwargs={"stddev": 0.1},
             **kwargs,
         )
         variables = model.init(key, x)
@@ -730,7 +732,7 @@ class TestRegistry:
         assert out.shape == (BATCH, OUT_DIM)
 
     def test_get_mlp_unknown_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             get_mlp("NONEXISTENT", out_features=2, hidden_features=32, n_layers=2)
 
     def test_get_mlp_unknown_kwargs_warns(self):

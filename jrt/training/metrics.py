@@ -6,36 +6,36 @@ experiments. Experiment `metrics.py` files hold only experiment-specific
 glue (label-name maps, `build_metrics_fns` wiring) and should import from
 here rather than re-implementing these.
 
-Per-batch metrics share the signature (logits, labels) -> scalar so they
-slot directly into the Trainer's metrics_fns dict.
+Two registries, two contracts:
+
+PER-BATCH metrics (``METRICS``) share the signature (logits, labels) -> scalar
+so they slot directly into the Trainer's metrics_fns dict and are averaged
+across batches:
 
     logits : jax.Array  shape (B, n_classes)   raw model output
     labels : jax.Array  shape (B,)             int32 class indices
 
-Metrics
--------
+FULL-SET metrics (``FULL_SET_METRICS``) take the WHOLE split's accumulated
+``(logits, labels)`` as NumPy arrays and return a scalar. They cannot be
+averaged per batch — they integrate a ranking/curve over all samples — so they
+are computed once over the accumulated predictions (in evaluate.py / the
+eval-plots callback), NOT inside the Trainer's per-step metrics_fns.
+
+Per-batch metrics
+-----------------
 cross_entropy    Softmax CE — training loss and patience metric
 accuracy         Overall top-1 accuracy
 binary_accuracy  Thresholded binary accuracy (e.g. class 0 vs. class > 0)
 mae_class        Mean absolute error in class units — ordinal distance
 
-Full-set metrics (NOT in metrics_fns — too noisy on a single batch; computed
-over accumulated val/test predictions)
------------------------------------------------------
-quadratic_weighted_kappa  Cohen's kappa with quadratic class-distance
-                          weights, from a confusion matrix — ordinal
-                          agreement, penalises far misses more than near ones
-expected_calibration_error  ECE from softmax probabilities — occupancy-weighted
-                          confidence-vs-accuracy gap
-maximum_calibration_error  MCE — the worst single bin's gap (high-stakes,
-                          noisier than ECE)
-
-Post-hoc calibration
---------------------
-fit_temperature / apply_temperature  temperature scaling (Guo et al. 2017) —
-                          fit a single T>0 on a held-out split, apply to the
-                          eval split; recalibrates confidence without changing
-                          the argmax
+Full-set metrics
+----------------
+mAP              Macro one-vs-rest average precision over classes — an
+                 imbalance-robust headline that surfaces rare classes (Cat 4/5)
+                 that accuracy/QWK hide
+pr_auc           Binary detection average precision (TC vs. background) — the
+                 PR-curve area, the right detection scalar under heavy imbalance
+                 where ROC/AUC flatters
 """
 
 from __future__ import annotations
@@ -143,8 +143,6 @@ def mae_class(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
 # matching the shared Registry contract (as used by losses/optimizers). The
 # experiment's build_metrics_fns selects which of these to report from the
 # trainer.metrics config list; only the training 'loss' itself is hardcoded.
-# The full-set metrics below (QWK/ECE/MCE) are NOT registered here — they are
-# computed over accumulated predictions in evaluation callbacks, not per batch.
 
 METRICS = Registry("metric")
 
@@ -182,243 +180,183 @@ def list_metrics() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Full-set metrics (computed over accumulated predictions — too noisy/
-# ill-defined on a single training batch to live in metrics_fns)
+# Full-set metrics (computed once over the accumulated split, NumPy)
 # ---------------------------------------------------------------------------
+# Unlike the per-batch metrics above, these integrate a precision-recall curve
+# over the whole evaluation set and cannot be averaged across batches. They are
+# called by evaluate.py / the eval-plots callback over the accumulated
+# (logits, labels). Signature: (logits (N, C) float, labels (N,) int) -> float.
 
-def quadratic_weighted_kappa(cm: np.ndarray) -> float:
-    """Cohen's kappa with quadratic class-distance weights.
 
-    Operates on a confusion matrix (no recompute from raw preds/labels).
-    Rewards predictions that are ordinally close to the truth and penalises
-    far misses more heavily than a flat-accuracy metric would.
+def _softmax_np(logits: np.ndarray) -> np.ndarray:
+    z = logits - logits.max(axis=-1, keepdims=True)
+    e = np.exp(z)
+    return e / e.sum(axis=-1, keepdims=True)
+
+
+def _pr_points(scores: np.ndarray, y_true: np.ndarray):
+    """Cumulative (precision, recall) over samples sorted by descending score.
+
+    The single source of truth for BOTH the average-precision scalar and the
+    plotted PR curve — so the figure can never disagree with the number.
+
+    Returns ``(precision, recall, n_pos)`` where precision/recall are length-N
+    arrays at successive thresholds and n_pos is the positive count.
+    """
+    y_true = np.asarray(y_true).astype(bool)
+    n_pos  = int(y_true.sum())
+    order  = np.argsort(-np.asarray(scores), kind='stable')
+    y      = y_true[order]
+    tp     = np.cumsum(y)
+    fp     = np.cumsum(~y)
+    precision = tp / np.maximum(tp + fp, 1)
+    recall    = tp / n_pos if n_pos else np.zeros_like(tp, dtype=float)
+    return precision, recall, n_pos
+
+
+def _average_precision(scores: np.ndarray, y_true: np.ndarray) -> float:
+    """Binary average precision = area under the precision-recall curve.
+
+    AP = Σ_k (R_k − R_{k−1}) · P_k over samples sorted by descending score —
+    the interpolation-free PR-AUC used by ``sklearn.average_precision_score``.
 
     Parameters
     ----------
-    cm : np.ndarray (n_classes, n_classes)
-        ``cm[i, j]`` = count of true class i predicted as j.
-
-    Returns
-    -------
-    float
-        ~[-1, 1]. 1 = perfect agreement, 0 = chance-level agreement
-        (given the observed marginals), negative = worse than chance.
-        Returns 0.0 for degenerate confusion matrices (empty, or all mass
-        in a single class so the expected-agreement denominator is zero).
+    scores : np.ndarray (N,)  higher = more positive
+    y_true : np.ndarray (N,)  bool / {0,1}
     """
-    cm = np.asarray(cm, dtype=np.float64)
-    n  = cm.shape[0]
-    total = cm.sum()
-    if total == 0 or n <= 1:
-        return 0.0
-
-    O = cm / total
-    row_marginal = O.sum(axis=1)
-    col_marginal = O.sum(axis=0)
-    E = np.outer(row_marginal, col_marginal)
-
-    idx = np.arange(n)
-    w   = (idx[:, None] - idx[None, :]) ** 2 / (n - 1) ** 2
-
-    num = np.sum(w * O)
-    den = np.sum(w * E)
-    if den == 0.0:
-        return 0.0
-    return float(1.0 - num / den)
+    precision, recall, n_pos = _pr_points(scores, y_true)
+    if n_pos == 0:
+        return 0.0                     # AP undefined with no positives
+    recall_prev = np.concatenate(([0.0], recall[:-1]))
+    return float(np.sum((recall - recall_prev) * precision))
 
 
-def expected_calibration_error(
-    probs:  np.ndarray,
-    labels: np.ndarray,
-    n_bins: int = 15,
-) -> float:
-    """Expected Calibration Error (ECE) from softmax probabilities.
+def precision_recall_curve(scores: np.ndarray, y_true: np.ndarray) -> dict:
+    """Plottable PR curve for a binary problem, with its AP and base rate.
 
-    Bins samples by prediction confidence (max softmax prob) into
-    ``n_bins`` equal-width bins over [0, 1] and compares each bin's
-    accuracy to its mean confidence, weighted by bin occupancy. A
-    well-calibrated model has confidence ≈ accuracy in every bin, so
-    ECE ≈ 0; a confident-but-wrong model gives a high ECE.
+    Same sorted-by-score points whose area ``_average_precision`` integrates,
+    plus a leading (precision=1, recall=0) anchor for a clean curve start.
 
-    Parameters
-    ----------
-    probs : np.ndarray (N, n_classes)
-        Softmax class probabilities.
-    labels : np.ndarray (N, ) int
-        True class indices.
-    n_bins : int
-        Number of equal-width confidence bins (default 15).
-
-    Returns
-    -------
-    float
-        In [0, 1]. Empty bins contribute 0. Returns 0.0 for N == 0.
+    Returns ``{'precision', 'recall', 'ap', 'base_rate'}`` — base_rate is the
+    positive prevalence (the PR no-skill baseline).
     """
-    probs  = np.asarray(probs)
+    precision, recall, n_pos = _pr_points(scores, y_true)
+    n = len(np.asarray(y_true))
+    if n_pos == 0:
+        return {'precision': np.array([1.0, 0.0]), 'recall': np.array([0.0, 1.0]),
+                'ap': 0.0, 'base_rate': 0.0}
+    recall_prev = np.concatenate(([0.0], recall[:-1]))
+    ap = float(np.sum((recall - recall_prev) * precision))
+    return {
+        'precision': np.concatenate(([1.0], precision)),
+        'recall':    np.concatenate(([0.0], recall)),
+        'ap':        ap,
+        'base_rate': n_pos / n,
+    }
+
+
+def average_precision(logits: np.ndarray, labels: np.ndarray) -> float:
+    """Macro one-vs-rest mean average precision (mAP) over the present classes.
+
+    Softmaxes the logits, computes per-class AP (class c probability vs. the
+    binary "is class c" target), and averages over classes that actually occur
+    in ``labels`` (absent classes are skipped — AP is undefined for them).
+    """
+    probs  = _softmax_np(np.asarray(logits, dtype=np.float64))
     labels = np.asarray(labels)
-    n = labels.shape[0]
-    if n == 0:
-        return 0.0
-
-    confidences = probs.max(axis=-1)
-    predictions = probs.argmax(axis=-1)
-    correct     = (predictions == labels).astype(np.float64)
-
-    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
-    ece = 0.0
-    for b in range(n_bins):
-        lo, hi = bin_edges[b], bin_edges[b + 1]
-        if b == n_bins - 1:
-            in_bin = (confidences >= lo) & (confidences <= hi)
-        else:
-            in_bin = (confidences >= lo) & (confidences < hi)
-        n_b = int(in_bin.sum())
-        if n_b == 0:
-            continue
-        acc_b  = correct[in_bin].mean()
-        conf_b = confidences[in_bin].mean()
-        ece   += (n_b / n) * abs(acc_b - conf_b)
-
-    return float(ece)
+    aps = [
+        _average_precision(probs[:, c], labels == c)
+        for c in range(probs.shape[1]) if np.any(labels == c)
+    ]
+    return float(np.mean(aps)) if aps else 0.0
 
 
-def maximum_calibration_error(
-    probs:  np.ndarray,
-    labels: np.ndarray,
-    n_bins: int = 15,
-) -> float:
-    """Maximum Calibration Error (MCE) from softmax probabilities.
+def binary_pr_auc(logits: np.ndarray, labels: np.ndarray,
+                  threshold: int = 1) -> float:
+    """Binary detection average precision (PR-AUC), class < thr vs. >= thr.
 
-    Same equal-width confidence binning as
-    :func:`expected_calibration_error`, but reports the **worst** bin's
-    |accuracy − confidence| gap rather than the occupancy-weighted average
-    (Guo et al. 2017). Useful for high-stakes settings where any single
-    badly-calibrated confidence band matters; noisier than ECE since a
-    sparsely-populated bin can dominate.
-
-    Parameters
-    ----------
-    probs : np.ndarray (N, n_classes)
-        Softmax class probabilities.
-    labels : np.ndarray (N,) int
-        True class indices.
-    n_bins : int
-        Number of equal-width confidence bins (default 15).
-
-    Returns
-    -------
-    float
-        In [0, 1]. The max gap over non-empty bins. Returns 0.0 for N == 0.
+    The positive score is the total softmax mass on classes ``>= threshold``
+    (default 1 → "any storm" vs. background). PR-AUC is the imbalance-robust
+    detection summary; ROC-AUC is misleading when negatives dominate.
     """
-    probs  = np.asarray(probs)
+    probs = _softmax_np(np.asarray(logits, dtype=np.float64))
+    p_pos = probs[:, threshold:].sum(axis=1)
+    return _average_precision(p_pos, np.asarray(labels) >= threshold)
+
+
+def binary_pr_curve(logits: np.ndarray, labels: np.ndarray,
+                    threshold: int = 1) -> dict:
+    """PR curve for binary TC-vs-background detection (class < thr vs. >= thr).
+
+    Returns the dict from ``precision_recall_curve`` (precision/recall/ap/
+    base_rate); ``ap`` equals ``binary_pr_auc`` exactly (shared code path).
+    """
+    probs = _softmax_np(np.asarray(logits, dtype=np.float64))
+    p_pos = probs[:, threshold:].sum(axis=1)
+    return precision_recall_curve(p_pos, np.asarray(labels) >= threshold)
+
+
+def per_class_pr_curves(logits: np.ndarray, labels: np.ndarray) -> dict:
+    """One-vs-rest PR curve per PRESENT class.
+
+    Returns ``{class_index: precision_recall_curve(...)}`` for each class that
+    occurs in ``labels``; the per-class ``ap`` values are exactly the terms
+    averaged into ``mAP`` (average_precision).
+    """
+    probs  = _softmax_np(np.asarray(logits, dtype=np.float64))
     labels = np.asarray(labels)
-    n = labels.shape[0]
-    if n == 0:
-        return 0.0
-
-    confidences = probs.max(axis=-1)
-    predictions = probs.argmax(axis=-1)
-    correct     = (predictions == labels).astype(np.float64)
-
-    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
-    mce = 0.0
-    for b in range(n_bins):
-        lo, hi = bin_edges[b], bin_edges[b + 1]
-        if b == n_bins - 1:
-            in_bin = (confidences >= lo) & (confidences <= hi)
-        else:
-            in_bin = (confidences >= lo) & (confidences < hi)
-        if not in_bin.any():
-            continue
-        gap = abs(correct[in_bin].mean() - confidences[in_bin].mean())
-        mce = max(mce, float(gap))
-
-    return mce
+    return {
+        c: precision_recall_curve(probs[:, c], labels == c)
+        for c in range(probs.shape[1]) if np.any(labels == c)
+    }
 
 
-# ---------------------------------------------------------------------------
-# Post-hoc calibration — temperature scaling (Guo et al. 2017)
-# ---------------------------------------------------------------------------
+FULL_SET_METRICS = Registry("full_set_metric")
 
-def fit_temperature(
-    logits:   np.ndarray,
-    labels:   np.ndarray,
-    u_bounds: tuple[float, float] = (1e-2, 20.0),
-    n_iter:   int = 60,
-) -> float:
-    """Fit a single temperature T>0 by minimising NLL of softmax(logits / T).
 
-    Temperature scaling (Guo et al. 2017, "On Calibration of Modern Neural
-    Networks"): a one-parameter post-hoc calibrator. Dividing logits by T
-    softens (T>1) or sharpens (T<1) the softmax without changing the argmax,
-    so accuracy and any argmax-derived metric are unaffected — only the
-    confidence calibration (e.g. ECE) changes. Fit on a held-out split (e.g.
-    validation), then apply to the evaluation split.
+@FULL_SET_METRICS.register(
+    "mAP",
+    description="Macro one-vs-rest average precision over classes (full-set, "
+                "imbalance-robust; surfaces rare classes)")
+def _map_metric():
+    return average_precision
 
-    The mean NLL is convex in the inverse temperature u = 1/T (log-sum-exp
-    composed with a linear map in u, minus a linear term), so this minimises
-    over u with an exact ternary search — no learning-rate tuning, fully
-    deterministic.
+
+@FULL_SET_METRICS.register(
+    "pr_auc",
+    description="Binary TC-vs-background detection average precision / PR-AUC "
+                "(full-set)")
+def _pr_auc_metric(threshold: int = 1):
+    if threshold == 1:
+        return binary_pr_auc
+    return lambda logits, labels: binary_pr_auc(logits, labels, threshold)
+
+
+# Default full-set metrics reported by evaluate.py / the eval-plots callback.
+DEFAULT_FULL_SET_METRICS: tuple[str, ...] = ('mAP', 'pr_auc')
+
+
+def compute_full_set_metrics(
+    logits, labels, names: tuple[str, ...] = DEFAULT_FULL_SET_METRICS,
+) -> dict[str, float]:
+    """Evaluate the named full-set metrics over an accumulated split.
 
     Parameters
     ----------
-    logits : np.ndarray (N, n_classes)
-        Raw (pre-softmax) model outputs on the fit split.
-    labels : np.ndarray (N, ) int
-        True class indices.
-    u_bounds : (float, float)
-        Search bracket for the inverse temperature u = 1/T. The default
-        (0.01, 20.0) covers T in [0.05, 100].
-    n_iter : int
-        Ternary-search iterations (each shrinks the bracket by 2/3).
+    logits : array (N, n_classes)
+    labels : array (N,) int
+    names : tuple of registered full-set metric names.
 
     Returns
     -------
-    float
-        Fitted temperature T. Returns 1.0 for empty input (no-op).
+    dict[str, float]
     """
-    logits = np.asarray(logits, dtype=np.float64)
+    logits = np.asarray(logits)
     labels = np.asarray(labels)
-    n = labels.shape[0]
-    if n == 0:
-        return 1.0
-
-    rows = np.arange(n)
-
-    def nll(u: float) -> float:
-        z = logits * u
-        z = z - z.max(axis=-1, keepdims=True)          # stabilise
-        logsumexp = np.log(np.exp(z).sum(axis=-1))
-        true_logit = z[rows, labels]
-        return float(np.mean(logsumexp - true_logit))
-
-    lo, hi = u_bounds
-    for _ in range(n_iter):
-        m1 = lo + (hi - lo) / 3.0
-        m2 = hi - (hi - lo) / 3.0
-        if nll(m1) < nll(m2):
-            hi = m2
-        else:
-            lo = m1
-    u = 0.5 * (lo + hi)
-    return float(1.0 / u)
+    return {n: float(FULL_SET_METRICS.get(n)(logits, labels)) for n in names}
 
 
-def apply_temperature(logits: np.ndarray, temperature: float) -> np.ndarray:
-    """Scale logits by a fitted temperature: ``logits / temperature``.
-
-    Pairs with :func:`fit_temperature`. Softmax of the result is the
-    calibrated probability distribution; the argmax is unchanged.
-
-    Parameters
-    ----------
-    logits : np.ndarray (N, n_classes)
-    temperature : float
-        Positive scalar from :func:`fit_temperature`.
-
-    Returns
-    -------
-    np.ndarray
-        Temperature-scaled logits, same shape as the input.
-    """
-    return np.asarray(logits) / temperature
+def list_full_set_metrics() -> list[str]:
+    """Sorted names of the registered full-set metrics."""
+    return FULL_SET_METRICS.names()

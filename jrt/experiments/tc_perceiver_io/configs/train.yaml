@@ -1,0 +1,335 @@
+# =============================================================================
+# TC Classifier — training configuration
+# =============================================================================
+
+# Experiment-wide shared values — propagated to data: and model: by train.py.
+seed: 3678
+
+# Coordinate encoding used for station positions and query token construction.
+# Changing this affects both the data preprocessing pipeline and the model, so
+# it lives here rather than being duplicated in data: and model:.
+#
+# The model is coordinate-agnostic (Senseiver single projection over
+# [obs; mask; Fourier(coords)]); this only sets the datamodule's coordinate
+# convention.
+# unit_circle  station_coords = [x, y] storm-centred local map
+#              (norm_dist·sin(bearing), norm_dist·cos(bearing)), each in [-1, 1];
+#              query_coords = [0, 0] = storm position
+# domain       station_coords = [norm_lat_rad, norm_lon_rad] absolute position;
+#              query_coords = same encoding
+location_encoding:      unit_circle
+
+
+# -----------------------------------------------------------------------------
+# Data
+# -----------------------------------------------------------------------------
+data:
+
+  # --- Source files ---
+  ibtracs_path:           E:/sparse_obs/ibtracs/ibtracs_full.npz
+  multi_storm_path:       E:/sparse_obs/ibtracs/ibtracs_multi_storm_times.npz
+  ibtracs_sid_meta_path:  E:/sparse_obs/ibtracs/ibtracs_sid_meta.npz
+  insitu_obs_path:        E:/sparse_obs/insitu-land/insitu_land_clean.npz
+  insitu_meta_path:       E:/sparse_obs/insitu-land/insitu_land_station_meta.npz
+
+  # --- Prediction target ---
+  # Selects what the model predicts, resolved against data/targets.TARGET_SCHEMA.
+  # Drives the label, head size (n_classes), default loss, metrics, and class
+  # names — so switching targets is a config change, not a code change.
+  # 'organization' = the 9-class ordinal organization scale (default).
+  # Continuous (regression) targets are reserved, not yet wired.
+  target:                 organisation
+
+  # --- Train/val/test split ---
+  # Splits are by ISO_TIME calendar YEAR (not the IBTrACS SEASON column), so the
+  # TC and insitu/background streams stay year-aligned. Multi-storm timesteps are
+  # excluded from train/val/test (when multi_storm_path is set) and
+  # test.hard_test selects them as a separate held-out evaluation set.
+  #
+  # 'year'        — explicit disjoint year lists per split (below).
+  # 'year_random' — pooled train+val years + a disjoint test year range; the
+  #                 pooled rows are split into train/val by a seeded fraction
+  #                 (row level, mild train/val leakage; test stays clean):
+  #   split:
+  #     strategy: year_random
+  #     train_val: {years: [2005, ..., 2024]}
+  #     test:      {years: [2025], hard_test: multi_storm}
+  #     val:       {fraction: 0.2, seed: 42}
+  split:
+    strategy: year
+    train:
+      years: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014,
+              2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022]
+    val:
+      years: [2023, 2024]
+    test:
+      years: [2025]
+      hard_test: multi_storm
+
+  # --- Station filtering ---
+  reliability_levels:     [always_active, mostly_active, sporadic, sparse, unusable]
+  radius_km:              1000.0       # exclude stations outside this radius of the query point
+  time_window_hours:      0.1         # temporal tolerance when matching obs to a TC timestamp
+
+  # --- Observed variables ---
+  # Order matters — must match model.n_obs_features.
+  # wind_east/wind_north are DERIVED: TCDataset decomposes wind_speed +
+  # wind_from_direction (meteorological FROM convention) into (u, v)
+  # components — no 0/360 seam, low-speed direction noise shrunk by
+  # magnitude, calm (speed 0, direction missing) → exact (0, 0).
+  obs_vars:
+    - air_pressure_at_sea_level
+    - air_temperature
+    - dew_point_temperature
+    - wind_east
+    - wind_north
+
+  # --- Observation normalisation ---
+  # minmax_01   → [0, 1]    using per-variable [min, max]
+  # minmax_11   → [-1, 1]   using per-variable [min, max]   ← recommended
+  # standardise → z-score   using per-variable [mean, std]
+  obs_normalisation:      minmax_11
+
+  # Physical bounds [min, max] for minmax_* or [mean, std] for standardise.
+  # Units must match the raw obs (Pa, K, m/s, degrees).
+  obs_bounds:
+    air_pressure_at_sea_level: [87000.0, 105000.0]   # Pa  (870–1084 hPa) in the case of the Caribbean in set 1050 but  1084 is the max of land insitu
+    air_temperature:           [193.0,   333.0]        # K   (-80 °C to +60 °C)
+    dew_point_temperature:     [193.0,   308.0]        # K   (-80 °C to +35 °C)
+    wind_east:                 [-115.0,  115.0]         # m/s, signed symmetric — 0 m/s maps to 0
+    wind_north:                [-115.0,  115.0]         # m/s (max observed speed ~224 kt)
+
+  # --- Token padding / truncation ---
+  # All stations within radius_km are candidates; samples with more than
+  # max_stations are trimmed (see station_selection); fewer are zero-padded.
+  max_stations:           20          # cap on station tokens; pad below, trim above
+  min_stations:           2          # samples with fewer real stations are discarded
+
+  # Which stations to keep when a sample has more than max_stations candidates:
+  #   nearest  deterministic, closest by distance (ALWAYS used for val/test)
+  #   random   TRAIN-ONLY augmentation — each draw of a TC row gets a different
+  #            random station subset, so the finite TC set can't be memorised.
+  #            Only bites when n_available > max_stations (widen radius_km to
+  #            grow the candidate pool — see the n_available sweep).
+  station_selection:      nearest
+
+  # --- Batch construction ---
+  # batch_size is NOT set here — it flows down from trainer.batch_size automatically.
+  # See trainer.batch_size below.
+  tc_fraction:            0.1         # fraction of each batch drawn as TC samples (rest = background)
+
+  # --- Class weighting (within-TC imbalance) ---
+  # Per-class loss weights computed at setup from the train split's realized
+  # class counts and injected as loss_kwargs.class_weights (stored back in the
+  # manifest). An explicit trainer.loss_kwargs.class_weights takes precedence.
+  # Background (class 0, absent from the TC count table) stays weight 1.0.
+  # Schemes: none | inverse_freq | sqrt_inverse_freq | effective_number | median_freq
+  class_weight_scheme:    none
+  class_weight_beta:      0.999       # effective_number only
+
+  # --- Domain / field of view ---
+  fov_lat:                [0.0,  30.0]
+  fov_lon:                [-100.0, -45.0]
+  background_buffer_hours: 3.0        # timestamps within this window of any TC obs are excluded
+                                      # from the background pool
+
+  # --- Coordinate encoding ---
+  # Set at top level — propagated here by train.py. Do not set in this block.
+
+
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
+model:
+
+  # Perceiver IO over sparse station observations. The model is coordinate
+  # agnostic (a single projection of [obs; mask; Fourier(coords)]); the learned
+  # latent array is the encode query, so there is no query token to position.
+
+  # --- Latent / attention sizing ---
+  embed_dim:            128           # latent + token width D (divisible by num_heads)
+  num_heads:            4
+  num_latents:          16           # N — number of learned latent vectors (the
+                                      # index dim the model processes; decoupled
+                                      # from the station count M)
+  num_process_layers:   2             # L — latent self-attention blocks in the Processor
+
+  # Recurrent / cross-layer weight tying (Senseiver-style): one Processor block
+  # applied num_process_layers times instead of L independent blocks — same
+  # depth, one block's worth of parameters. false (default) = independent blocks.
+  processor_weight_sharing: false
+
+  # --- Decoder ---
+  # 'attention' — a single learned output query cross-attends the latents, then
+  #               value-proj + MLP -> logits (Perceiver IO default; more expressive).
+  # 'avgproj'   — mean-pool the latents -> one linear -> logits.
+  decode_mode:          attention
+
+  # --- FFN ---
+  mlp_ratio:            4.0           # FFN hidden dim = mlp_ratio × embed_dim
+  mlp_activation:       gelu
+  mlp_initializer:      xavier_uniform
+
+  # --- Regularisation ---
+  # Perceiver found dropout degraded performance; default off. Bump to ablate.
+  dropout_rate:         0.0
+  attn_dropout_rate:    0.0
+
+  # --- Coordinate embedding ---
+  fourier_dim:          64            # GaussianFourierEmbedding output dim — must be even
+  fourier_scale:        1.0           # frequency spread; HP-tuned over log-uniform [0.1, 10.0]
+
+  # --- Missing observation handling ---
+  # Missing obs are filled with 0. true (recommended): concatenate obs_mask as
+  # its own channel in the shared token projection, so a missing feature is
+  # distinguishable from a real observation equal to 0. false drops the mask
+  # channel (missing == observed-zero — ablation only).
+  missingness_indicator: true
+
+  # --- Output ---
+  n_obs_features:       5             # must equal len(data.obs_vars)
+  n_classes:            9             # ordinal organization scale (ibtracs.CLASS_NAMES):
+                                      # 0 Background, 1 Disturbance, 2 Depression,
+                                      # 3 Storm, 4–8 Saffir-Simpson Category 1–5
+                                      # (synced to data.target by train.py)
+
+
+# -----------------------------------------------------------------------------
+# Trainer
+# -----------------------------------------------------------------------------
+trainer:
+
+  # Single source of truth for batch size.
+  # train.py propagates this value to the data loader — do not set it in data:.
+  batch_size:           128
+
+  # --- Optimiser ---
+  optimizer:            adamw
+  optimizer_kwargs:
+    weight_decay:       1.0e-4
+
+  # --- Learning rate schedule ---
+  # Linear warmup from init_value to peak_value over warmup_steps, then cosine
+  # decay to end_value over decay_steps. decay_steps is the TOTAL schedule length
+  # (warmup included, optax convention); after it the LR sits at end_value.
+  # Leave decay_steps null and train.py fills it with num_epochs*steps_per_epoch
+  # so the anneal spans the whole run; set an integer to override.
+  scheduler:            warmup_cosine
+  scheduler_kwargs:
+    init_value:         0.0
+    peak_value:         1.0e-4
+    warmup_steps:       50
+    decay_steps:        null          # auto = num_epochs * steps_per_epoch (train.py)
+    end_value:          1.0e-6
+
+  # --- Training loop ---
+  num_epochs:           1
+  num_steps:            .inf          # no step-count cap; epoch limit governs stopping
+
+  # Steps per training epoch (random TC sampling mode).
+  # TC samples are drawn with replacement; background is always fresh.
+  # For a smoke test keep this small (200-500).
+  # For a full run use 2000-5000 depending on desired training time per epoch.
+  # Remove or set to null to fall back to sequential mode (one pass through TC data).
+  steps_per_epoch:     2000
+
+  # --- Loss ---
+  # Training objective, selected from training/losses.py LOSSES registry.
+  # 'cross_entropy' is composable via loss_kwargs:
+  #   focal_gamma:   focal modulation (Lin et al. 2017), down-weights easy samples
+  #   class_weights: length-9 per-class weights for imbalance (inverse-freq /
+  #                  effective-number / median-freq) — index 0 = background
+  # Setting both gives the class-balanced focal loss.
+  loss:                 cross_entropy
+  loss_kwargs:          {}
+    # focal_gamma:      2.0
+    # emd_lambda:       0.1          # squared-EMD regulariser; emd_omega/emd_mu tune it
+    # class_weights:    [1.0, ...]   # explicit 9 values; else use data.class_weight_scheme
+
+  # --- Reported metrics ---
+  # Only the training 'loss' is hardcoded; every reported metric is selected by
+  # name from the METRICS registry (training/metrics.py): cross_entropy /
+  # accuracy / binary_accuracy / mae_class. cross_entropy is the unweighted
+  # comparability anchor (and the patience metric below) — keep it listed.
+  # Plain top-1 accuracy is demoted (misleading under class imbalance); add it
+  # here only if you want it reported. Full-set QWK/ECE are logged separately.
+  metrics:              [cross_entropy, binary_accuracy, mae_class]
+
+  # --- Early stopping ---
+  patience:             15            # epochs without improvement before halting
+  patience_metric:      val/cross_entropy
+  patience_direction:   lower_is_better
+
+  # --- Gradient clipping ---
+  max_grad_norm:        1.0
+
+  # --- Profiling ---
+  # true = trace the first profile_steps training steps with the JAX
+  # profiler, written to <run_dir>/logs/profile and handed to the logger:
+  # wandb backend uploads it as a run artifact ('profile-trace');
+  # tensorboard/null leave it on disk and print the path. Viewing always
+  # uses TensorBoard's Profile plugin (WandB stores but cannot render XLA
+  # traces). The first traced step includes jit compilation; read later
+  # steps for steady-state timing (e.g. is the GPU idle on the loader?).
+  profile:              false
+  profile_steps:        5
+
+  # --- Run directory ---
+  # Relative paths resolve against the experiment directory (tc_perceiver_io/,
+  # two levels above train/train.py); absolute paths are used as-is.
+  #
+  # run_group: train.py auto-creates the next run_NN under it (max existing + 1),
+  # so forgetting to bump a number can never clobber an earlier run. Pass
+  # `--name <slug>` to append the run's purpose → run_NN-<slug>, e.g.
+  #   runs/tc_classifier/run_06-tcfrac0.3-cw-effnum
+  # To pin a fixed directory instead, set `run_dir:` (it takes precedence).
+  run_group:            runs/tc_classifier
+  # run_dir:            runs/tc_classifier/run_05   # uncomment to pin
+
+  # --- Logging ---
+  log_backend:          wandb
+
+  # How often to write train/<loss> to WandB during the step loop.
+  # Validation metrics are always logged once per epoch regardless of this value.
+  log_every_n_steps:        10
+
+  # How often to log attention entropy during the step loop.
+  # Uses global_step as the x-axis so it aligns with train/<loss> in WandB.
+  # Defaults to log_every_n_steps if not set.
+  attn_log_every_n_steps:   10
+
+  # How often to render and log the attention figure (epoch-level):
+  # the Processor latent self-attention grid (val/attn_processor_grid, a
+  # layers×heads grid of N×N matrices) from the fixed VAL probe batch.
+  # Expensive (matplotlib render + WandB upload) — keep infrequent.
+  # 0 = disabled.  Appears in WandB under Media → Images.
+  attn_fig_every_n_epochs:  5
+
+  # How often to log per-layer gradient histograms (grad_flow/<tree path>)
+  # from a fixed TRAIN probe batch — also logged once at init (step 0).
+  # Train-only diagnostic. 0 = disabled.
+  grad_hist_every_n_epochs: 5
+
+  # How often to run full val inference and log confusion matrix + per-class F1.
+  # Each call iterates the entire val loader — keep infrequent for long runs.
+  # Set to 1 to log every epoch (good for short smoke-test runs).
+  # 0 = disabled.  Appears in WandB under Media → Images.
+  eval_plots_every_n_epochs: 1
+
+  # Diagnostics row (WandB Media → diagnostics/*): weight, gradient, and
+  # activation distribution figures, logged once at init (start reference) and
+  # once on the best params after training. Cheap (one probe batch each).
+  diagnostics:              true
+  # Loss-landscape figure (Li et al. 2018) at end of training — a grid_size²
+  # forward-pass sweep over two random param directions. 0 = skip (it is the
+  # one expensive diagnostic); 21 ≈ 441 forward passes on the train probe.
+  diagnostics_loss_landscape_grid: 21
+
+  # WandB project / run metadata.
+  log_kwargs:
+    project:  sparse_obs_encoding
+    name:     perceiver-io-unit-circle-run5
+    offline:  false
+    tags:     [unit_circle, perceiver_io]
+
+  # seed is injected from the top-level seed by train.py — do not set here.

@@ -68,7 +68,7 @@ class TestRegistry:
         assert callable(act)
 
     def test_duplicate_registration_raises(self):
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(ValueError, match="already registered"):
             @register_activation("RELU")
             class _Dup:
                 def __call__(self, x):
@@ -80,7 +80,7 @@ class TestRegistry:
         assert jnp.allclose(act_upper(x_real), act_lower(x_real))
 
     def test_unknown_name_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             get_activation("NONEXISTENT_XYZ")
 
     def test_error_message_lists_available(self):

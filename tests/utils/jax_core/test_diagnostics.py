@@ -296,6 +296,17 @@ class TestPlotSmoke:
         assert fig is not None
         plt.close(fig)
 
+    @patch("matplotlib.pyplot.show")
+    def test_plot_dists_wraps_to_grid(self, mock_show):
+        # Many layers must wrap into a <=4-column grid, not one wide strip.
+        val_dict = {f"Layer {i}": jnp.linspace(-1, 1, 50) for i in range(9)}
+        fig = _plot_dists(val_dict, max_cols=4)
+        rows, cols = fig.axes[0].get_subplotspec().get_gridspec().get_geometry()
+        assert cols == 4 and rows == 3          # 9 panels → 3×4 grid
+        assert len(fig.axes) == 12              # incl. 3 hidden filler cells
+        assert sum(ax.get_visible() for ax in fig.axes) == 9
+        plt.close(fig)
+
     def test_plot_loss_landscape_returns_figure(self, model_and_params, make_loss_fn):
         _, params = model_and_params
         fig = plot_loss_landscape(params, make_loss_fn, grid_size=5)

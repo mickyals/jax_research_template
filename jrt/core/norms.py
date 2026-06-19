@@ -1,125 +1,22 @@
-import warnings
-#from typing import Optional
-
 import jax
-import jax.numpy as jnp
 import flax.linen as nn
 
-NORMS: dict[str, dict] = {}
+from utils.registry import Registry
 
-
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-def register_norm(name: str, description: str = ""):
-    """Register a normalisation module by name.
-
-    Parameters
-    ----------
-    name : str
-        Name used for lookup. Stored uppercase.
-    description : str, optional
-        Short description shown in ``list_norms()``.
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If a norm with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_norm("MY_NORM", description="Custom norm")
-    ... class MyNorm(nn.Module):
-    ...     def __call__(self, x: jax.Array, train: bool = True) -> jax.Array:
-    ...         return x
-    """
-    name_upper = name.upper()
-
-    def decorator(cls):
-        if name_upper in NORMS:
-            raise ValueError(f"Norm with name '{name_upper}' already exists.")
-        NORMS[name_upper] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-
-def get_norm(name: str, **kwargs):
-    """Retrieve and instantiate a registered normalisation module by name.
-
-    Uses ``__dataclass_fields__`` for reliable kwarg inspection since
-    Flax modules are dataclasses.
-
-    Parameters
-    ----------
-    name : str
-        Name of the registered norm (case-insensitive).
-    **kwargs
-        Arguments forwarded to the norm constructor. Unknown kwargs
-        trigger a UserWarning and are dropped.
-
-    Returns
-    -------
-    nn.Module
-        An instantiated Flax Linen normalisation module.
-
-    Raises
-    ------
-    ValueError
-        If no norm with the given name exists.
-
-    Example
-    -------
-    >>> norm = get_norm("BATCH_NORM")
-    >>> norm = get_norm("GROUP_NORM", num_groups=8)
-    >>> norm = get_norm("LAYER_NORM", use_bias=False)
-    """
-    name = name.upper()
-    if name not in NORMS:
-        available = ", ".join(sorted(NORMS.keys()))
-        raise ValueError(
-            f"Norm '{name}' does not exist. Available: {available}"
-        )
-
-    cls = NORMS[name]["cls"]
-
-    if kwargs:
-        try:
-            valid = set(cls.__dataclass_fields__.keys())
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_norm('{name}'): unknown kwargs {unknown} "
-                    f"will be ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except AttributeError:
-            pass
-
-    return cls(**kwargs)
+# Normalisation-module registry on the shared utils.registry.Registry (r16).
+# The module-level register_norm / get_norm / list_norms names are kept as thin
+# aliases so existing call sites (core.__init__, nets.conv, tests) are
+# unchanged. Registry.get filters kwargs via inspect.signature, which for a
+# Flax nn.Module (a dataclass) resolves to its fields — verified equivalent to
+# the old __dataclass_fields__ check.
+NORMS = Registry("Norm")
+register_norm = NORMS.register
+get_norm      = NORMS.get
 
 
 def list_norms() -> dict[str, str]:
-    """Return a sorted dictionary of all registered norm names and descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_norms()
-    {'BATCH_NORM': 'Batch normalisation', 'GROUP_NORM': 'Group normalisation', ...}
-    """
-    return {name: info["description"] for name, info in sorted(NORMS.items())}
+    """Sorted ``{name: description}`` of all registered norms."""
+    return dict(sorted(NORMS.describe().items()))
 
 
 # ---------------------------------------------------------------------------
@@ -288,8 +185,8 @@ class InstanceNorm(nn.Module):
 
     Notes
     -----
-    Implemented via nn.GroupNorm with num_groups=None and group_size=1,
-    which is the idiomatic Flax way to achieve per-channel normalisation.
+    Thin wrapper over flax.linen.InstanceNorm (r16; previously hand-rolled via
+    GroupNorm(group_size=1)). Same per-sample, per-channel normalisation.
 
     Example
     -------
@@ -301,16 +198,14 @@ class InstanceNorm(nn.Module):
     epsilon: float = 1e-6
 
     def setup(self):
-        self.gn = nn.GroupNorm(
-            num_groups=None,
-            group_size=1,
+        self.norm = nn.InstanceNorm(
             epsilon=self.epsilon,
             use_scale=self.use_scale,
             use_bias=self.use_bias,
         )
 
     def __call__(self, x: jax.Array, train: bool = True) -> jax.Array:
-        return self.gn(x)
+        return self.norm(x)
 
 
 @register_norm("RMS_NORM", description="RMS normalisation (no mean centering)")
@@ -321,8 +216,8 @@ class RMSNorm(nn.Module):
     centering. Used in modern transformer variants (LLaMA, Gemma etc.)
     as a cheaper alternative to LayerNorm.
 
-    Not natively available in Flax linen as of the current version.
-    This is a minimal manual implementation sufficient for standard use.
+    Thin wrapper over flax.linen.RMSNorm (r16; previously hand-rolled). The
+    learnable scale lives under the ``norm`` submodule (``params['norm']['scale']``).
 
     Parameters
     ----------
@@ -338,10 +233,6 @@ class RMSNorm(nn.Module):
     RMSNorm has no bias term by design -- the absence of mean centering
     makes a bias redundant. use_bias is not supported.
 
-    The feature dimension (last axis of x) is inferred at first call
-    and fixed thereafter. Do not reuse this module with inputs of
-    different feature dimensions.
-
     Example
     -------
     >>> norm = get_norm("RMS_NORM")
@@ -350,11 +241,8 @@ class RMSNorm(nn.Module):
     use_scale: bool = True
     epsilon: float = 1e-6
 
-    @nn.compact
+    def setup(self):
+        self.norm = nn.RMSNorm(epsilon=self.epsilon, use_scale=self.use_scale)
+
     def __call__(self, x: jax.Array, train: bool = True) -> jax.Array:
-        rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + self.epsilon)
-        x_norm = x / rms
-        if self.use_scale:
-            scale = self.param('scale', nn.initializers.ones, (x.shape[-1],))
-            x_norm = x_norm * scale
-        return x_norm
+        return self.norm(x)

@@ -1,6 +1,6 @@
-import inspect
-import warnings
 import math
+import inspect
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -8,143 +8,18 @@ import flax.linen as nn
 
 from utils.jax_core.helpers import create_rng
 
-EMBEDDINGS: dict[str, dict] = {}
+from utils.registry import Registry
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-def register_embedding(name: str, description: str = ""):
-    """Register an embedding module by name.
-
-    Parameters
-    ----------
-    name : str
-        Name used for lookup. Stored uppercase.
-    description : str, optional
-        Short description shown in ``list_embeddings()``.
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If an embedding with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_embedding("MY_EMBED", description="Custom embedding")
-    ... class MyEmbedding(nn.Module):
-    ...     @nn.compact
-    ...     def __call__(self, x: jax.Array) -> jax.Array:
-    ...         return x
-    """
-    name_upper = name.upper()
-
-    def decorator(cls):
-        if name_upper in EMBEDDINGS:
-            raise ValueError(
-                f"Embedding with name '{name_upper}' already exists."
-            )
-        EMBEDDINGS[name_upper] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-
-def get_embedding(name: str, **kwargs):
-    """Retrieve and instantiate a registered embedding by name.
-
-    Inspects the constructor signature and emits a UserWarning for any
-    kwargs not accepted by the embedding class. Unknown kwargs are dropped
-    rather than forwarded to prevent a TypeError at instantiation.
-
-    In Flax Linen, instantiating a module does not run any computation --
-    call ``module.init(key, *inputs)`` to initialize parameters and
-    ``module.apply(variables, *inputs)`` to run a forward pass.
-
-    Parameters
-    ----------
-    name : str
-        Name of the registered embedding (case-insensitive).
-    **kwargs
-        Arguments forwarded to the embedding constructor (hyperparameters
-        only). Unknown kwargs trigger a UserWarning and are dropped.
-
-    Returns
-    -------
-    nn.Module
-        An instantiated Flax Linen embedding module.
-
-    Raises
-    ------
-    ValueError
-        If no embedding with the given name exists.
-
-    Example
-    -------
-    >>> embed = get_embedding("GAUSSIAN_POSITIONAL",
-    ...                        input_dim=2, mapping_dim=64, scale=10.0)
-    >>> variables = embed.init(jax.random.PRNGKey(0), jnp.ones((8, 2)))
-    >>> out = embed.apply(variables, jnp.ones((8, 2)))
-    >>> out.shape
-    (8, 64)
-    """
-    name = name.upper()
-    if name not in EMBEDDINGS:
-        available = ", ".join(sorted(EMBEDDINGS.keys()))
-        raise ValueError(
-            f"Embedding '{name}' does not exist. Available: {available}"
-        )
-
-    cls = EMBEDDINGS[name]["cls"]
-
-    if kwargs:
-        try:
-            sig = inspect.signature(cls.__init__)
-            valid = {
-                k for k, p in sig.parameters.items()
-                if k != "self"
-                and p.kind not in (
-                    inspect.Parameter.VAR_POSITIONAL,
-                    inspect.Parameter.VAR_KEYWORD,
-                )
-            }
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_embedding('{name}'): unknown kwargs {unknown} "
-                    f"will be ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except (ValueError, TypeError):
-            pass
-
-    return cls(**kwargs)
+EMBEDDINGS = Registry("Embedding")
+register_embedding = EMBEDDINGS.register
+get_embedding = EMBEDDINGS.get
 
 
 def list_embeddings() -> dict[str, str]:
-    """Return a sorted dictionary of all registered embedding names and descriptions.
+    """Sorted ``{name: description}`` of all registered entries (r16)."""
+    return dict(sorted(EMBEDDINGS.describe().items()))
 
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_embeddings()
-    {'DFS': 'Double Fourier Sphere embedding', ...}
-    """
-    return {
-        name: info["description"]
-        for name, info in sorted(EMBEDDINGS.items())
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -1105,3 +980,166 @@ class LearnedPosEncoding2D(nn.Module):
             f"does not match embed_dim={self.embed_dim}."
         )
         return x + self.pos_embed
+
+
+# ---------------------------------------------------------------------------
+# Embedding composition helpers
+#
+# Adapters that make the embeddings above composable in front of an MLP's
+# first dense layer. Used by core.nets.mlp (the `embedding` field on _BaseMLP).
+# ---------------------------------------------------------------------------
+
+def _call_embedding(embedding: nn.Module, x: jnp.ndarray,
+                    train: bool) -> jnp.ndarray:
+    """Call an embedding module, forwarding train only if it accepts it.
+
+    Deterministic embeddings (all current core.embeddings) define
+    __call__(self, x) and do not receive train. Future trainable or
+    stochastic embeddings that define __call__(self, x, train) will
+    receive it automatically.
+
+    Parameters
+    ----------
+    embedding : nn.Module
+        Embedding module to call.
+    x : jnp.ndarray
+        Input array.
+    train : bool
+        Training flag forwarded only if the embedding accepts it.
+
+    Returns
+    -------
+    jnp.ndarray
+        Embedding output.
+    """
+    sig = inspect.signature(embedding.__call__)
+    if 'train' in sig.parameters:
+        return embedding(x, train=train)
+    return embedding(x)
+
+
+class LatLonEmbeddingWrapper(nn.Module):
+    """Wraps a spherical embedding that takes (lat, lon) into a single x input.
+
+    Adapts embeddings from core.embeddings that expect separate lat and lon
+    arrays (e.g. SphericalGridEmbedding, DFS, SphericalHarmonicsEmbedding)
+    to accept a single concatenated input array, making them composable
+    with CombinedEmbedding and the embedding field on _BaseMLP.
+
+    Parameters
+    ----------
+    embedding : nn.Module
+        Spherical embedding with signature (lat, lon) -> jnp.ndarray.
+
+    Notes
+    -----
+    Expects x of shape (N, 2) where x[:, 0] is lat and x[:, 1] is lon,
+    both in radians.
+
+    Example
+    -------
+    >>> from core.embeddings import get_embedding
+    >>> from core.nets.mlp import SIRENet
+    >>> embed = LatLonEmbeddingWrapper(
+    ...     embedding=get_embedding("SPHERE_GRID", scale=8, r_min=0.01)
+    ... )
+    >>> net = SIRENet(out_features=1, hidden_features=256, n_layers=5,
+    ...               embedding=embed)
+    """
+    embedding: nn.Module
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        return self.embedding(x[:, 0], x[:, 1])
+
+
+class CombinedEmbedding(nn.Module):
+    """Splits input into spatial and temporal components, embeds each,
+    and concatenates the results before the first dense layer.
+
+    The input x is expected to have spatial coords in columns
+    0..spatial_dim-1 and temporal/other coords in the remaining columns.
+    Either or both embeddings may be None, in which case those coords
+    are passed through raw.
+
+    Parameters
+    ----------
+    spatial_dim : int
+        Number of spatial input dimensions used to split x.
+        x must have at least spatial_dim columns.
+    spatial_embedding : nn.Module, optional
+        Applied to x[:, :spatial_dim]. Use LatLonEmbeddingWrapper
+        for spherical embeddings that take (lat, lon) separately.
+        If None, spatial coords are concatenated raw.
+    time_embedding : nn.Module, optional
+        Applied to x[:, spatial_dim:]. If None, temporal coords
+        are concatenated raw. If the auxiliary values are already
+        normalized scalars, leave this as None and they will be
+        concatenated directly.
+
+    Notes
+    -----
+    Output dimension is inferred automatically by Flax at first call.
+    The first dense layer sees spatial_out + time_out features, where
+    each is the embedding output dim or the raw input dim if no embedding.
+
+    x must satisfy x.shape[1] >= spatial_dim. If x.shape[1] == spatial_dim,
+    the time slice is empty and time_embedding is ignored.
+
+    If a sub-embedding accepts a train argument (e.g. a future trainable
+    embedding), it will receive the train flag automatically via
+    _call_embedding. Deterministic embeddings are unaffected.
+
+    Example
+    -------
+    >>> from core.embeddings import get_embedding
+    >>> from core.nets.mlp import SIRENet
+    >>>
+    >>> # lat/lon through spherical embedding, time through Fourier features
+    >>> net = SIRENet(
+    ...     out_features=1,
+    ...     hidden_features=256,
+    ...     n_layers=5,
+    ...     embedding=CombinedEmbedding(
+    ...         spatial_dim=2,
+    ...         spatial_embedding=LatLonEmbeddingWrapper(
+    ...             embedding=get_embedding("SPHERE_GRID", scale=8, r_min=0.01)
+    ...         ),
+    ...         time_embedding=get_embedding(
+    ...             "GENERAL_POSITIONAL", input_dim=1, mapping_dim=32, scale=2.0
+    ...         ),
+    ...     ),
+    ... )
+    >>>
+    >>> # lat/lon embedded, normalised pressure passed raw
+    >>> net = SIRENet(
+    ...     out_features=1,
+    ...     hidden_features=256,
+    ...     n_layers=5,
+    ...     embedding=CombinedEmbedding(
+    ...         spatial_dim=2,
+    ...         spatial_embedding=LatLonEmbeddingWrapper(
+    ...             embedding=get_embedding("SPHERE_GRID", scale=8, r_min=0.01)
+    ...         ),
+    ...         # time_embedding=None -- normalised pressure concatenated raw
+    ...     ),
+    ... )
+    """
+    spatial_dim: int
+    spatial_embedding: Optional[nn.Module] = None
+    time_embedding: Optional[nn.Module] = None
+
+    def __call__(self, x: jnp.ndarray, train: bool = True) -> jnp.ndarray:
+        if x.shape[1] < self.spatial_dim:
+            raise ValueError(
+                f"Input has {x.shape[1]} features but spatial_dim={self.spatial_dim}."
+            )
+        x_spatial = x[:, :self.spatial_dim]
+        x_time    = x[:, self.spatial_dim:]
+
+        if self.spatial_embedding is not None:
+            x_spatial = _call_embedding(self.spatial_embedding, x_spatial, train)
+
+        if self.time_embedding is not None and x_time.shape[1] > 0:
+            x_time = _call_embedding(self.time_embedding, x_time, train)
+
+        return jnp.concatenate([x_spatial, x_time], axis=-1)

@@ -12,16 +12,14 @@ from core.initializations import (
     SirenInit,
     FinerInit,
     FinerBiasInit,
-    XavierUniformInit,
-    XavierNormalInit,
-    LeCunNormalInit,
-    NormalInit,
-    UniformInit,
     IdentityInit,
-    OrthogonalInit,
     GaborInit,
     WireInit,
 )
+
+# Standard inits (XAVIER_*, LECUN_NORMAL, NORMAL, UNIFORM, ORTHOGONAL, ZEROS)
+# are delegated to flax.linen.initializers (r16) and exercised via the registry
+# by name -- no concrete classes to import for those.
 
 
 # ---------------------------------------------------------------------------
@@ -60,20 +58,20 @@ class TestRegistry:
         assert callable(init)
 
     def test_duplicate_registration_raises(self):
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(ValueError, match="already registered"):
             @register_initializer("SIREN")
             class _Dup:
                 pass
 
     def test_case_insensitive_lookup(self, key, shape_2d):
-        i1 = get_initializer("XAVIER_UNIFORM", gain=1.0)
-        i2 = get_initializer("xavier_uniform", gain=1.0)
+        i1 = get_initializer("XAVIER_UNIFORM")
+        i2 = get_initializer("xavier_uniform")
         w1 = i1(key, shape_2d, jnp.float32)
         w2 = i2(key, shape_2d, jnp.float32)
         assert jnp.allclose(w1, w2)
 
     def test_unknown_name_raises(self):
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="is not registered"):
             get_initializer("NONEXISTENT_XYZ")
 
     def test_error_lists_available(self):
@@ -116,13 +114,14 @@ class TestInitializerContract:
         ("FINER",         {"fan_in": 256, "is_first": True}),
         ("FINER",         {"fan_in": 256, "is_first": False, "omega": 30.}),
         ("FINER_BIAS",    {"k": 1.0}),
-        ("XAVIER_UNIFORM",{"gain": 1.0}),
-        ("XAVIER_NORMAL", {"gain": 1.0}),
-        ("LECUN_NORMAL",  {"scale": 1.0}),
-        ("NORMAL",        {"mean": 0., "std": 0.1}),
-        ("UNIFORM",       {"a": -0.1, "b": 0.1}),
-        ("ORTHOGONAL",    {"gain": 1.0}),
+        ("XAVIER_UNIFORM",{}),
+        ("XAVIER_NORMAL", {}),
+        ("LECUN_NORMAL",  {}),
+        ("NORMAL",        {"stddev": 0.1}),
+        ("UNIFORM",       {"scale": 0.2}),
+        ("ORTHOGONAL",    {"scale": 1.0}),
         ("GABOR",         {"std_scale": 1.0}),
+        ("ZEROS",         {}),
     ])
     def test_output_shape(self, key, shape_2d, name, kwargs):
         init = get_initializer(name, **kwargs)
@@ -133,8 +132,8 @@ class TestInitializerContract:
         ("SIREN",         {"fan_in": 256, "is_first": False}),
         ("FINER",         {"fan_in": 256, "is_first": False}),
         ("FINER_BIAS",    {"k": 1.0}),
-        ("XAVIER_UNIFORM",{"gain": 1.0}),
-        ("XAVIER_NORMAL", {"gain": 1.0}),
+        ("XAVIER_UNIFORM",{}),
+        ("XAVIER_NORMAL", {}),
         ("LECUN_NORMAL",  {}),
         ("NORMAL",        {}),
         ("UNIFORM",       {}),
@@ -148,7 +147,7 @@ class TestInitializerContract:
 
     @pytest.mark.parametrize("name,kwargs", [
         ("SIREN",         {"fan_in": 256, "is_first": False}),
-        ("XAVIER_UNIFORM",{"gain": 1.0}),
+        ("XAVIER_UNIFORM",{}),
         ("NORMAL",        {}),
         ("LECUN_NORMAL",  {}),
     ])
@@ -160,7 +159,7 @@ class TestInitializerContract:
 
     @pytest.mark.parametrize("name,kwargs", [
         ("SIREN",         {"fan_in": 256, "is_first": False}),
-        ("XAVIER_UNIFORM",{"gain": 1.0}),
+        ("XAVIER_UNIFORM",{}),
         ("NORMAL",        {}),
     ])
     def test_same_key_reproducible(self, key, shape_2d, name, kwargs):
@@ -257,108 +256,99 @@ class TestFinerBiasInit:
 
 
 # ---------------------------------------------------------------------------
-# Xavier initializers
+# Xavier / Glorot initializers (flax-backed)
 # ---------------------------------------------------------------------------
 
-class TestXavierUniformInit:
+class TestXavierUniform:
 
     def test_output_shape(self, key, shape_2d):
-        init = XavierUniformInit(gain=1.0)
-        w = init(key, shape_2d, jnp.float32)
+        w = get_initializer("XAVIER_UNIFORM")(key, shape_2d, jnp.float32)
         assert w.shape == shape_2d
 
-    def test_gain_affects_output(self, key, shape_2d):
-        init1 = XavierUniformInit(gain=1.0)
-        init2 = XavierUniformInit(gain=0.1)
-        w1 = init1(key, shape_2d, jnp.float32)
-        w2 = init2(key, shape_2d, jnp.float32)
-        # smaller gain -> smaller magnitude weights
-        assert jnp.abs(w2).max() < jnp.abs(w1).max()
-
-    def test_output_finite(self, key, shape_2d):
-        init = XavierUniformInit()
-        w = init(key, shape_2d, jnp.float32)
-        assert jnp.all(jnp.isfinite(w))
-
-
-class TestXavierNormalInit:
-
-    def test_output_shape(self, key, shape_2d):
-        init = XavierNormalInit(gain=1.0)
-        w = init(key, shape_2d, jnp.float32)
-        assert w.shape == shape_2d
-
-    def test_gain_affects_output(self, key, shape_2d):
+    def test_within_glorot_bound(self, key, shape_2d):
+        # flax glorot-uniform draws in [-sqrt(6/(fan_in+fan_out)), +bound].
         fan_in, fan_out = shape_2d
-        gain1, gain2 = 1.0, 0.1
-        w1 = XavierUniformInit(gain=gain1)(key, shape_2d, jnp.float32)
-        w2 = XavierUniformInit(gain=gain2)(key, shape_2d, jnp.float32)
-        # theoretical bound scales linearly with gain
-        bound1 = gain1 * math.sqrt(6.0 / (fan_in + fan_out))
-        bound2 = gain2 * math.sqrt(6.0 / (fan_in + fan_out))
-        assert jnp.all(jnp.abs(w1) <= bound1 + 1e-6)
-        assert jnp.all(jnp.abs(w2) <= bound2 + 1e-6)
+        bound = math.sqrt(6.0 / (fan_in + fan_out))
+        w = get_initializer("XAVIER_UNIFORM")(key, shape_2d, jnp.float32)
+        assert jnp.all(jnp.abs(w) <= bound + 1e-6)
 
     def test_output_finite(self, key, shape_2d):
-        init = XavierNormalInit()
-        w = init(key, shape_2d, jnp.float32)
+        w = get_initializer("XAVIER_UNIFORM")(key, shape_2d, jnp.float32)
+        assert jnp.all(jnp.isfinite(w))
+
+
+class TestXavierNormal:
+
+    def test_output_shape(self, key, shape_2d):
+        w = get_initializer("XAVIER_NORMAL")(key, shape_2d, jnp.float32)
+        assert w.shape == shape_2d
+
+    def test_std_matches_glorot(self, key, shape_2d):
+        # truncated-normal is variance-corrected, so realized std ~ glorot std.
+        fan_in, fan_out = shape_2d
+        target = math.sqrt(2.0 / (fan_in + fan_out))
+        w = get_initializer("XAVIER_NORMAL")(key, shape_2d, jnp.float32)
+        assert abs(float(w.std()) - target) / target < 0.1
+
+    def test_output_finite(self, key, shape_2d):
+        w = get_initializer("XAVIER_NORMAL")(key, shape_2d, jnp.float32)
         assert jnp.all(jnp.isfinite(w))
 
 
 # ---------------------------------------------------------------------------
-# LeCunNormalInit
+# LeCun normal (flax-backed)
 # ---------------------------------------------------------------------------
 
-class TestLeCunNormalInit:
+class TestLecunNormal:
 
     def test_output_shape(self, key, shape_2d):
-        init = LeCunNormalInit()
-        w = init(key, shape_2d, jnp.float32)
+        w = get_initializer("LECUN_NORMAL")(key, shape_2d, jnp.float32)
         assert w.shape == shape_2d
 
-    def test_scale_affects_std(self, key, shape_2d):
-        init1 = LeCunNormalInit(scale=1.0)
-        init2 = LeCunNormalInit(scale=2.0)
-        w1 = init1(key, shape_2d, jnp.float32)
-        w2 = init2(key, shape_2d, jnp.float32)
-        assert w2.std() > w1.std()
+    def test_std_matches_fan_in(self, key, shape_2d):
+        # lecun-normal targets std = 1 / sqrt(fan_in).
+        fan_in = shape_2d[0]
+        target = 1.0 / math.sqrt(fan_in)
+        w = get_initializer("LECUN_NORMAL")(key, shape_2d, jnp.float32)
+        assert abs(float(w.std()) - target) / target < 0.1
 
     def test_output_finite(self, key, shape_2d):
-        w = LeCunNormalInit()(key, shape_2d, jnp.float32)
+        w = get_initializer("LECUN_NORMAL")(key, shape_2d, jnp.float32)
         assert jnp.all(jnp.isfinite(w))
 
 
 # ---------------------------------------------------------------------------
-# NormalInit / UniformInit
+# Normal / Uniform (flax-backed)
 # ---------------------------------------------------------------------------
 
-class TestNormalInit:
+class TestNormal:
 
     def test_output_shape(self, key, shape_2d):
-        w = NormalInit()(key, shape_2d, jnp.float32)
+        w = get_initializer("NORMAL")(key, shape_2d, jnp.float32)
         assert w.shape == shape_2d
 
-    def test_std_affects_spread(self, key, shape_2d):
-        w1 = NormalInit(std=0.01)(key, shape_2d, jnp.float32)
-        w2 = NormalInit(std=1.0)(key, shape_2d, jnp.float32)
+    def test_stddev_affects_spread(self, key, shape_2d):
+        w1 = get_initializer("NORMAL", stddev=0.01)(key, shape_2d, jnp.float32)
+        w2 = get_initializer("NORMAL", stddev=1.0)(key, shape_2d, jnp.float32)
         assert w2.std() > w1.std()
 
-    def test_mean_shifts_output(self, key, shape_2d):
-        w = NormalInit(mean=5.0, std=0.01)(key, shape_2d, jnp.float32)
-        assert abs(float(w.mean()) - 5.0) < 0.1
+    def test_stddev_approximately_correct(self, key, shape_2d):
+        w = get_initializer("NORMAL", stddev=0.5)(key, shape_2d, jnp.float32)
+        assert abs(float(w.std()) - 0.5) / 0.5 < 0.1
 
 
-class TestUniformInit:
+class TestUniform:
 
     def test_output_shape(self, key, shape_2d):
-        w = UniformInit()(key, shape_2d, jnp.float32)
+        w = get_initializer("UNIFORM")(key, shape_2d, jnp.float32)
         assert w.shape == shape_2d
 
     def test_bounds_respected(self, key, shape_2d):
-        a, b = -0.5, 0.5
-        w = UniformInit(a=a, b=b)(key, shape_2d, jnp.float32)
-        assert jnp.all(w >= a)
-        assert jnp.all(w <= b)
+        # flax uniform draws in [0, scale).
+        scale = 0.5
+        w = get_initializer("UNIFORM", scale=scale)(key, shape_2d, jnp.float32)
+        assert jnp.all(w >= 0.0)
+        assert jnp.all(w <= scale)
 
 
 # ---------------------------------------------------------------------------
@@ -377,26 +367,26 @@ class TestIdentityInit:
 
 
 # ---------------------------------------------------------------------------
-# OrthogonalInit
+# Orthogonal (flax-backed; gain -> scale)
 # ---------------------------------------------------------------------------
 
-class TestOrthogonalInit:
+class TestOrthogonal:
 
     def test_output_shape(self, key, shape_2d):
-        w = OrthogonalInit()(key, shape_2d, jnp.float32)
+        w = get_initializer("ORTHOGONAL")(key, shape_2d, jnp.float32)
         assert w.shape == shape_2d
 
     def test_rectangular_rows_orthonormal(self, key):
         # fat matrix (fan_out > fan_in) -- rows are orthonormal
         shape = (64, 128)
-        w = OrthogonalInit(gain=1.0)(key, shape, jnp.float32)
+        w = get_initializer("ORTHOGONAL", scale=1.0)(key, shape, jnp.float32)
         assert w.shape == shape
         gram = w @ w.T  # (64, 64)
         assert jnp.allclose(gram, jnp.eye(shape[0]), atol=1e-5)
 
-    def test_gain_scales_output(self, key, shape_square):
-        w1 = OrthogonalInit(gain=1.0)(key, shape_square, jnp.float32)
-        w2 = OrthogonalInit(gain=2.0)(key, shape_square, jnp.float32)
+    def test_scale_scales_output(self, key, shape_square):
+        w1 = get_initializer("ORTHOGONAL", scale=1.0)(key, shape_square, jnp.float32)
+        w2 = get_initializer("ORTHOGONAL", scale=2.0)(key, shape_square, jnp.float32)
         assert jnp.allclose(jnp.abs(w2), jnp.abs(w1) * 2.0, atol=1e-5)
 
 

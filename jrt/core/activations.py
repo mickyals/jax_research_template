@@ -1,134 +1,22 @@
-import inspect
-import warnings
-
 import jax
 import jax.numpy as jnp
 import jax.nn as nn
 
-ACTIVATIONS: dict[str, dict] = {}
+from utils.registry import Registry
 
-
-def register_activation(name: str, description: str = ""):
-    """Register an activation function by name.
-
-    Parameters
-    ----------
-    name : str
-        Uppercase name used for lookup.
-    description : str, optional
-        Short description of the activation.
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If an activation with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_activation("MY_ACT", description="Custom activation")
-    ... class MyActivation:
-    ...     def __call__(self, x: jax.Array) -> jax.Array:
-    ...         return x
-    """
-    name = name.upper()
-
-    def decorator(cls):
-        if name in ACTIVATIONS:
-            raise ValueError(f"Activation with name {name} already exists.")
-        ACTIVATIONS[name] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-def get_activation(name: str, **kwargs):
-    """Get an activation function by name.
-
-    Inspects the constructor signature and warns about any kwargs that are
-    not accepted by the requested activation class. Unknown kwargs are then
-    dropped rather than forwarded, preventing a TypeError at instantiation.
-
-    Parameters
-    ----------
-    name : str
-        Name of the registered activation (case-insensitive).
-    **kwargs
-        Arguments forwarded to the activation constructor. Unknown kwargs
-        trigger a UserWarning and are silently dropped.
-
-    Returns
-    -------
-    callable
-        An instantiated activation function.
-
-    Raises
-    ------
-    ValueError
-        If no activation with the given name exists.
-
-    Example
-    -------
-    >>> act = get_activation("SINE", omega=30)
-    >>> act(jnp.array([0.0, 1.0]))
-
-    >>> # Unknown kwarg -- warns and drops omega, returns ReLU()
-    >>> act = get_activation("RELU", omega=30)
-    UserWarning: get_activation('RELU'): unknown kwargs {'omega'} will be
-    ignored. Valid kwargs: none.
-    """
-    name = name.upper()
-    if name not in ACTIVATIONS:
-        available = ", ".join(sorted(ACTIVATIONS.keys()))
-        raise ValueError(
-            f"Activation '{name}' does not exist. Available: {available}"
-        )
-
-    cls = ACTIVATIONS[name]["cls"]
-
-    if kwargs:
-        try:
-            sig = inspect.signature(cls.__init__)
-            # exclude self, *args, **kwargs -- only named parameters count
-            valid = {
-                k for k, p in sig.parameters.items()
-                if k != "self"
-                and p.kind not in (
-                    inspect.Parameter.VAR_POSITIONAL,
-                    inspect.Parameter.VAR_KEYWORD,
-                )
-            }
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_activation('{name}'): unknown kwargs {unknown} "
-                    f"will be ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except (ValueError, TypeError):
-            pass
-
-    return cls(**kwargs)
+# Activation registry on the shared utils.registry.Registry (r16). Module-level
+# register_activation / get_activation / list_activations are kept as thin
+# aliases so existing call sites are unchanged. Registry.get filters kwargs via
+# inspect.signature(cls), which for a plain class introspects __init__ (a class
+# with no __init__ exposes no params, so unknown kwargs warn + drop as before).
+ACTIVATIONS = Registry("Activation")
+register_activation = ACTIVATIONS.register
+get_activation      = ACTIVATIONS.get
 
 
 def list_activations() -> dict[str, str]:
-    """Return a dict of all registered activation names and descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_activations()
-    {'RELU': 'ReLU activation', 'SINE': 'Sine activation', ...}
-    """
-    return {name: info["description"] for name, info in sorted(ACTIVATIONS.items())}
+    """Sorted ``{name: description}`` of all registered activations."""
+    return dict(sorted(ACTIVATIONS.describe().items()))
 
 
 def _generate_alpha(x: jax.Array) -> jax.Array:

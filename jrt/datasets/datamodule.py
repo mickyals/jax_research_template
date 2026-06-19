@@ -35,7 +35,7 @@ Uses utils.jax_core.helpers.standardise and helpers.minmax_norm.
 This is a generic, domain-agnostic array DataModule (the template default for
 tabular / array experiments). On-the-fly sample-assembly experiments subclass
 BaseDataModule directly with their own setup/loaders (e.g.
-experiments.sparse_obs_encoder.data.datamodule.TCDataModule).
+experiments.tc_perceiver_io.data.datamodule.TCDataModule).
 
 Config schema  (YAML  data:  block)
 ------------------------------------
@@ -369,7 +369,7 @@ class BaseDataModule(ABC):
     expose ``train_arrays`` / ``val_arrays`` / ``test_arrays`` for inspection and
     tests, but those belong to the array path — they are NOT part of this
     contract. On-the-fly samplers (e.g.
-    experiments.sparse_obs_encoder.data.datamodule.TCDataModule) implement only
+    experiments.tc_perceiver_io.data.datamodule.TCDataModule) implement only
     the loaders, with no arrays to stub out.
     """
 
@@ -605,7 +605,7 @@ class DataModule(BaseDataModule):
 # This module ships no built-in dataset factories — keeping it free of any
 # dependency on specific experiments. A dataset source registers itself with
 # @register_dataset("NAME") in its own module (e.g.
-# experiments/sparse_obs_encoder/data/sources/ibtracs.py registers
+# experiments/tc_perceiver_io/data/sources/ibtracs.py registers
 # "IBTRACS"); importing that module before DataModule.from_config() makes the
 # name available.
 # ---------------------------------------------------------------------------

@@ -10,8 +10,10 @@ dependencies:
 
   - pip:
       # Core ML framework
-      - jax>=0.10
-      - jaxlib>=0.10
+      # GPU by default — all deployment environments are Linux. jax[cuda13]
+      # pulls the matching jaxlib + CUDA 13 plugin. On a Windows/CPU-only box
+      # (no CUDA wheels for Windows) swap this line for plain `jax>=0.10`.
+      - jax[cuda13]>=0.10
       - flax>=0.12
       - optax>=0.2
       - orbax-checkpoint>=0.11
@@ -46,7 +48,7 @@ dependencies:
       # - wandb>=0.16
       # - torch>=2.0        # TensorBoardLogger only
 
-      # GPU: jaxlib above installs CPU build. For GPU support:
+      # JAX install variants (default above is jax[cuda13], Linux GPU):
       #   pip install --upgrade "jax[cuda12]"  # CUDA 12.x
-      #   pip install --upgrade "jax[cuda11]"  # CUDA 11.x
+      #   pip install --upgrade "jax"          # CPU only (e.g. Windows laptop)
       # See https://jax.readthedocs.io/en/latest/installation.html

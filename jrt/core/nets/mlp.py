@@ -1,314 +1,25 @@
 # core/nets/mlp.py
-import math
-import inspect
 from typing import Optional, Callable
 
-import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
 from core import get_activation
 from core import get_initializer
+from core.initializations import inr_first_init, inr_hidden_init
+from core.embeddings import _call_embedding
+
+from utils.registry import Registry
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-NETS: dict[str, dict] = {}
-
-
-def register_mlp(name: str, description: str = ""):
-    """Register an MLP net class by name.
-
-    Parameters
-    ----------
-    name : str
-        Name used for lookup. Stored uppercase.
-    description : str, optional
-        Short description shown in ``list_mlps()``.
-
-    Returns
-    -------
-    callable
-        Class decorator.
-
-    Raises
-    ------
-    ValueError
-        If a net with the same name is already registered.
-
-    Example
-    -------
-    >>> @register_mlp("MY_NET", description="Custom net")
-    ... class MyNet(_BaseMLP):
-    ...     pass
-    """
-    name_upper = name.upper()
-
-    def decorator(cls):
-        if name_upper in NETS:
-            raise ValueError(f"Net with name '{name_upper}' already exists.")
-        NETS[name_upper] = {"cls": cls, "description": description}
-        return cls
-
-    return decorator
-
-
-def get_mlp(name: str, **kwargs):
-    """Retrieve and instantiate a registered net by name.
-
-    Uses ``__dataclass_fields__`` for reliable kwarg inspection since
-    Flax modules are dataclasses.
-
-    Parameters
-    ----------
-    name : str
-        Name of the registered net (case-insensitive).
-    **kwargs
-        Arguments forwarded to the net constructor. Unknown kwargs
-        trigger a UserWarning and are dropped.
-
-    Returns
-    -------
-    nn.Module
-        An instantiated Flax Linen net module.
-
-    Raises
-    ------
-    ValueError
-        If no net with the given name exists.
-
-    Example
-    -------
-    >>> net = get_mlp("SIREN", out_features=2, hidden_features=64, n_layers=3)
-    >>> variables = net.init(jax.random.PRNGKey(0), jnp.ones((8, 2)))
-    """
-    import warnings
-
-    name = name.upper()
-    if name not in NETS:
-        available = ", ".join(sorted(NETS.keys()))
-        raise ValueError(f"Net '{name}' does not exist. Available: {available}")
-
-    cls = NETS[name]["cls"]
-
-    if kwargs:
-        try:
-            valid = set(cls.__dataclass_fields__.keys())
-            unknown = set(kwargs.keys()) - valid
-            if unknown:
-                warnings.warn(
-                    f"get_mlp('{name}'): unknown kwargs {unknown} will be "
-                    f"ignored. Valid kwargs: {valid or 'none'}.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            kwargs = {k: v for k, v in kwargs.items() if k in valid}
-        except AttributeError:
-            pass
-
-    return cls(**kwargs)
+NETS = Registry("Net")
+register_mlp = NETS.register
+get_mlp = NETS.get
 
 
 def list_mlps() -> dict[str, str]:
-    """Return a sorted dictionary of all registered net names and descriptions.
-
-    Returns
-    -------
-    dict[str, str]
-
-    Example
-    -------
-    >>> list_mlps()
-    {'FINER': 'FINER adaptive frequency SIREN', 'MLP': 'General MLP', ...}
-    """
-    return {name: info["description"] for name, info in sorted(NETS.items())}
-
-
-# ---------------------------------------------------------------------------
-# INR init helpers
-# ---------------------------------------------------------------------------
-
-def _uniform_first_init(key: jax.Array, shape: tuple, dtype=jnp.float32) -> jax.Array:
-    """First-layer init for SIREN and FINER: U(-1/fan_in, 1/fan_in)."""
-    fan_in = shape[0]
-    bound = 1.0 / fan_in
-    return jax.random.uniform(key, shape, dtype, minval=-bound, maxval=bound)
-
-
-def _uniform_inr_hidden_init(omega: float) -> Callable:
-    """Hidden-layer init shared by SIREN and FINER.
-
-    U(-sqrt(6/fan_in)/omega, sqrt(6/fan_in)/omega).
-    """
-    def init(key: jax.Array, shape: tuple, dtype=jnp.float32) -> jax.Array:
-        fan_in = shape[0]
-        bound = math.sqrt(6.0 / fan_in) / omega
-        return jax.random.uniform(key, shape, dtype, minval=-bound, maxval=bound)
-    return init
-
-
-# ---------------------------------------------------------------------------
-# Embedding helpers
-# ---------------------------------------------------------------------------
-
-def _call_embedding(embedding: nn.Module, x: jnp.ndarray,
-                    train: bool) -> jnp.ndarray:
-    """Call an embedding module, forwarding train only if it accepts it.
-
-    Deterministic embeddings (all current core.embeddings) define
-    __call__(self, x) and do not receive train. Future trainable or
-    stochastic embeddings that define __call__(self, x, train) will
-    receive it automatically.
-
-    Parameters
-    ----------
-    embedding : nn.Module
-        Embedding module to call.
-    x : jnp.ndarray
-        Input array.
-    train : bool
-        Training flag forwarded only if the embedding accepts it.
-
-    Returns
-    -------
-    jnp.ndarray
-        Embedding output.
-    """
-    sig = inspect.signature(embedding.__call__)
-    if 'train' in sig.parameters:
-        return embedding(x, train=train)
-    return embedding(x)
-
-
-# ---------------------------------------------------------------------------
-# Embedding wrappers
-# ---------------------------------------------------------------------------
-
-class LatLonEmbeddingWrapper(nn.Module):
-    """Wraps a spherical embedding that takes (lat, lon) into a single x input.
-
-    Adapts embeddings from core.embeddings that expect separate lat and lon
-    arrays (e.g. SphericalGridEmbedding, DFS, SphericalHarmonicsEmbedding)
-    to accept a single concatenated input array, making them composable
-    with CombinedEmbedding and the embedding field on _BaseMLP.
-
-    Parameters
-    ----------
-    embedding : nn.Module
-        Spherical embedding with signature (lat, lon) -> jnp.ndarray.
-
-    Notes
-    -----
-    Expects x of shape (N, 2) where x[:, 0] is lat and x[:, 1] is lon,
-    both in radians.
-
-    Example
-    -------
-    >>> from core.embeddings import get_embedding
-    >>> embed = LatLonEmbeddingWrapper(
-    ...     embedding=get_embedding("SPHERE_GRID", scale=8, r_min=0.01)
-    ... )
-    >>> net = SIREN(out_features=1, hidden_features=256, n_layers=5,
-    ...             embedding=embed)
-    """
-    embedding: nn.Module
-
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        return self.embedding(x[:, 0], x[:, 1])
-
-
-class CombinedEmbedding(nn.Module):
-    """Splits input into spatial and temporal components, embeds each,
-    and concatenates the results before the first dense layer.
-
-    The input x is expected to have spatial coords in columns
-    0..spatial_dim-1 and temporal/other coords in the remaining columns.
-    Either or both embeddings may be None, in which case those coords
-    are passed through raw.
-
-    Parameters
-    ----------
-    spatial_dim : int
-        Number of spatial input dimensions used to split x.
-        x must have at least spatial_dim columns.
-    spatial_embedding : nn.Module, optional
-        Applied to x[:, :spatial_dim]. Use LatLonEmbeddingWrapper
-        for spherical embeddings that take (lat, lon) separately.
-        If None, spatial coords are concatenated raw.
-    time_embedding : nn.Module, optional
-        Applied to x[:, spatial_dim:]. If None, temporal coords
-        are concatenated raw. If the auxiliary values are already
-        normalized scalars, leave this as None and they will be
-        concatenated directly.
-
-    Notes
-    -----
-    Output dimension is inferred automatically by Flax at first call.
-    The first dense layer sees spatial_out + time_out features, where
-    each is the embedding output dim or the raw input dim if no embedding.
-
-    x must satisfy x.shape[1] >= spatial_dim. If x.shape[1] == spatial_dim,
-    the time slice is empty and time_embedding is ignored.
-
-    If a sub-embedding accepts a train argument (e.g. a future trainable
-    embedding), it will receive the train flag automatically via
-    _call_embedding. Deterministic embeddings are unaffected.
-
-    Example
-    -------
-    >>> from core.embeddings import get_embedding
-    >>>
-    >>> # lat/lon through spherical embedding, time through Fourier features
-    >>> net = SIREN(
-    ...     out_features=1,
-    ...     hidden_features=256,
-    ...     n_layers=5,
-    ...     embedding=CombinedEmbedding(
-    ...         spatial_dim=2,
-    ...         spatial_embedding=LatLonEmbeddingWrapper(
-    ...             embedding=get_embedding("SPHERE_GRID", scale=8, r_min=0.01)
-    ...         ),
-    ...         time_embedding=get_embedding(
-    ...             "GENERAL_POSITIONAL", input_dim=1, mapping_dim=32, scale=2.0
-    ...         ),
-    ...     ),
-    ... )
-    >>>
-    >>> # lat/lon embedded, normalised pressure passed raw
-    >>> net = SIREN(
-    ...     out_features=1,
-    ...     hidden_features=256,
-    ...     n_layers=5,
-    ...     embedding=CombinedEmbedding(
-    ...         spatial_dim=2,
-    ...         spatial_embedding=LatLonEmbeddingWrapper(
-    ...             embedding=get_embedding("SPHERE_GRID", scale=8, r_min=0.01)
-    ...         ),
-    ...         # time_embedding=None -- normalised pressure concatenated raw
-    ...     ),
-    ... )
-    """
-    spatial_dim: int
-    spatial_embedding: Optional[nn.Module] = None
-    time_embedding: Optional[nn.Module] = None
-
-    def __call__(self, x: jnp.ndarray, train: bool = True) -> jnp.ndarray:
-        if x.shape[1] < self.spatial_dim:
-            raise ValueError(
-                f"Input has {x.shape[1]} features but spatial_dim={self.spatial_dim}."
-            )
-        x_spatial = x[:, :self.spatial_dim]
-        x_time    = x[:, self.spatial_dim:]
-
-        if self.spatial_embedding is not None:
-            x_spatial = _call_embedding(self.spatial_embedding, x_spatial, train)
-
-        if self.time_embedding is not None and x_time.shape[1] > 0:
-            x_time = _call_embedding(self.time_embedding, x_time, train)
-
-        return jnp.concatenate([x_spatial, x_time], axis=-1)
+    """Sorted ``{name: description}`` of all registered entries (r16)."""
+    return dict(sorted(NETS.describe().items()))
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +281,7 @@ class MLP(_BaseMLP):
 # ---------------------------------------------------------------------------
 
 @register_mlp("SIREN", description="Sinusoidal representation network (Sitzmann et al. 2020)")
-class SIREN(_BaseMLP):
+class SIRENet(_BaseMLP):
     """Sinusoidal representation network (Sitzmann et al. 2020).
 
     Parameters
@@ -601,7 +312,7 @@ class SIREN(_BaseMLP):
 
     Example
     -------
-    >>> net = SIREN(out_features=1, hidden_features=256, n_layers=5)
+    >>> net = SIRENet(out_features=1, hidden_features=256, n_layers=5)
     >>> variables = net.init(jax.random.PRNGKey(0), jnp.ones((8, 3)))
     >>> out = net.apply(variables, jnp.ones((8, 3)), train=False)
     """
@@ -615,10 +326,10 @@ class SIREN(_BaseMLP):
         return get_activation("SINE", omega=self.first_omega)
 
     def _make_kernel_init(self):
-        return _uniform_inr_hidden_init(self.hidden_omega)
+        return inr_hidden_init(self.hidden_omega)
 
     def _make_first_kernel_init(self):
-        return _uniform_first_init
+        return inr_first_init
 
 
 # ---------------------------------------------------------------------------
@@ -677,10 +388,10 @@ class FINERNet(_BaseMLP):
         return get_activation("FINER", omega=self.first_omega)
 
     def _make_kernel_init(self):
-        return _uniform_inr_hidden_init(self.hidden_omega)
+        return inr_hidden_init(self.hidden_omega)
 
     def _make_first_kernel_init(self):
-        return _uniform_first_init
+        return inr_first_init
 
     def _make_bias_init(self):
         if self.bias_initializer == "finer_bias":
@@ -845,12 +556,11 @@ class WireFINERNet(_BaseMLP):
     out_features : int
     hidden_features : int
     n_layers : int
-    omega_0 : float
-        Default 20.
     sigma_0 : float
         Default 10.
     omega_finer : float
-        Default 5.
+        Default 5. Sets the (variable) oscillation frequency; the real FINER
+        WIRE form has no separate omega_0.
     use_bias : bool
         Default True.
     bias_initializer : str
@@ -872,12 +582,11 @@ class WireFINERNet(_BaseMLP):
     >>> variables = net.init(jax.random.PRNGKey(0), jnp.ones((8, 3)))
     >>> out = net.apply(variables, jnp.ones((8, 3)), train=False)
     """
-    omega_0: float = 20.0
     sigma_0: float = 10.0
     omega_finer: float = 5.0
 
     def _make_act(self):
-        return get_activation("WIRE_FINER_REAL", omega_0=self.omega_0,
+        return get_activation("WIRE_FINER_REAL",
                               sigma_0=self.sigma_0, omega_finer=self.omega_finer)
 
     def _make_kernel_init(self):

@@ -63,8 +63,12 @@ def trace_profile(trace_dir: str | Path, enabled: bool = True):
 
 def _plot_dists(val_dict: dict[str, jnp.ndarray], color: str = "C0",
                 xlabel: str | None = None, stat: str = "count",
-                use_kde: bool = True) -> plt.Figure:
-    """Plot histograms for a dict of named 1D arrays.
+                use_kde: bool = True, max_cols: int = 4) -> plt.Figure:
+    """Plot histograms for a dict of named 1D arrays, wrapped into a grid.
+
+    Panels are laid out in a grid of at most ``max_cols`` columns (default 4)
+    rather than a single long horizontal strip, so a model with many layers
+    stays reviewable instead of producing an unreadably wide image.
 
     Parameters
     ----------
@@ -78,24 +82,35 @@ def _plot_dists(val_dict: dict[str, jnp.ndarray], color: str = "C0",
         Seaborn histplot stat parameter ('count', 'density', etc.).
     use_kde : bool
         Whether to overlay a KDE curve (skipped when variance is near zero).
+    max_cols : int
+        Maximum panels per row before wrapping to the next row. Default 4.
 
     Returns
     -------
     matplotlib.figure.Figure
     """
-    columns = len(val_dict)
-    fig, ax = plt.subplots(1, columns, figsize=(columns * 3.5, 2.5))
-    if columns == 1:
-        ax = [ax]
-    for idx, key in enumerate(sorted(val_dict.keys())):
+    keys   = sorted(val_dict.keys())
+    n      = len(keys)
+    n_cols = max(1, min(max_cols, n))
+    n_rows = max(1, int(np.ceil(n / n_cols)))
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols, figsize=(n_cols * 3.5, n_rows * 2.5), squeeze=False,
+    )
+    axes_flat = axes.flatten()
+    for idx, key in enumerate(keys):
+        ax   = axes_flat[idx]
         vals = val_dict[key]
         has_variance = float(vals.max() - vals.min()) > 1e-8
-        sns.histplot(vals, ax=ax[idx], color=color, bins=50,
+        sns.histplot(vals, ax=ax, color=color, bins=50,
                      stat=stat, kde=use_kde and has_variance)
-        ax[idx].set_title(key)
+        ax.set_title(key)
         if xlabel is not None:
-            ax[idx].set_xlabel(xlabel)
-    fig.subplots_adjust(wspace=0.4)
+            ax.set_xlabel(xlabel)
+    # Hide any unused trailing cells in the final row.
+    for j in range(n, len(axes_flat)):
+        axes_flat[j].set_visible(False)
+    fig.subplots_adjust(wspace=0.4, hspace=0.6)
     return fig
 
 
