@@ -20,6 +20,15 @@ This is a binary + ordinal classification problem over **9 classes**, ordered by
 
 **InsituLand** (`insitu_land_clean.npz` + `insitu_land_station_meta.npz`) — land surface hourly observations from Copernicus C3S for 552 stations in the Caribbean / Gulf domain (LAT 0–30°N, LON 100–45°W). 74.7M observation rows.
 
+> **Faster startup (recommended for repeated runs).** Loading the 19.5 GB `insitu_land_clean.npz` and sorting its 74.7M rows by time is an ~8-minute one-time cost on *every* run (it's what sits between the `run_dir` line and the data summary). Convert it **once** to a pre-sorted, memory-mappable directory, then point `data.insitu_obs_path` at that directory — subsequent loads `mmap` the already-sorted columns and start in seconds:
+> ```bash
+> PYTHONPATH=jrt python -m experiments.tc_perceiver_io.data.sources.insitu_land \
+>     E:/sparse_obs/insitu-land/insitu_land_clean.npz \
+>     E:/sparse_obs/insitu-land/insitu_land_clean_sorted
+> # then in the config: insitu_obs_path: .../insitu_land_clean_sorted
+> ```
+> `InsituLandDataset` auto-detects the directory vs. the `.npz` and falls back to the slow load+sort path when given the raw file.
+
 **Observed variables** (per station per timestamp):
 - `air_pressure_at_sea_level` (Pa)
 - `air_temperature` (K)
@@ -557,8 +566,10 @@ Key fields in `train.yaml`:
 | `data.min_stations` | 1 | Samples with fewer stations are dropped |
 | `data.location_encoding` | `unit_circle` | `unit_circle` or `domain`; model is coordinate-agnostic, so this lives in the data block only |
 | `data.obs_normalisation` | `minmax_11` | `minmax_01` / `minmax_11` / `standardise` |
-| `data.class_weight_scheme` | `none` | `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` / `median_freq` — computes `class_weights` at setup from train-split counts (stored in manifest); overridden by an explicit `trainer.loss_kwargs.class_weights` |
+| `data.class_weight_scheme` | `none` | `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` / `median_freq` — computes `class_weights` at setup from train-split counts incl. **background (label 0 = TC-free pool size)**, stored in manifest; overridden by an explicit `trainer.loss_kwargs.class_weights`. When active, the **train** loader drops `tc_fraction` oversampling and samples at natural prevalence so the two correctors don't stack (val/test keep `tc_fraction`); `effective_number` recommended so the ~millions:10K ratio doesn't blow up rare-class weights |
 | `data.class_weight_beta` | `0.999` | effective-number β (that scheme only) |
+| `data.bg_refresh_every` | `1` | Random-mode train loader: steps between background-buffer refreshes. `1` = assemble fresh backgrounds every step. Larger values reuse pre-assembled backgrounds to cut per-step assembly cost when batches are background-heavy (e.g. natural prevalence) — assembly drops to ~`bg_buffer_size / bg_refresh_every` draws/step |
+| `data.bg_buffer_size` | `null` | Size of the reusable background buffer each step samples its backgrounds from. `null` = background count per batch (floored there). Pair a larger buffer with `bg_refresh_every` to retain diversity while reusing draws |
 | `model.missingness_indicator` | `true` | `true` = concatenate `obs_mask` as its own channel in `token_proj` (missing obs filled 0), disambiguating "missing" from a real obs equal to 0; `false` = aliased behaviour (ablation) |
 | `model.embed_dim` | 128 | Latent + token dimensionality D |
 | `model.num_heads` | 4 | Attention heads (`embed_dim` must be divisible) |

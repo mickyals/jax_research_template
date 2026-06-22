@@ -263,3 +263,61 @@ class TestFilterYears:
     def test_n_stations_after_filter(self, ds):
         sub = ds.filter_years([2019])
         assert sub.n_stations == ds.n_stations
+
+
+# ---------------------------------------------------------------------------
+# Pre-sorted / memory-mapped directory layout (fast loader)
+# ---------------------------------------------------------------------------
+
+class TestSortedDirRoundtrip:
+
+    def _sorted_ds(self, paths, tmp_path):
+        obs_path, meta_path, *_ = paths
+        out = InsituLandDataset.prepare_sorted(obs_path, tmp_path / 'sorted')
+        return InsituLandDataset(out, meta_path), out
+
+    def test_prepare_sorted_writes_manifest(self, paths, tmp_path):
+        _, out = self._sorted_ds(paths, tmp_path)
+        assert (out / 'manifest.json').exists()
+        assert (out / '_obs_station_int.npy').exists()
+        assert (out / 'report_timestamp.npy').exists()
+
+    def test_columns_are_memory_mapped(self, paths, tmp_path):
+        ds_sorted, _ = self._sorted_ds(paths, tmp_path)
+        # mmap_mode='r' loads return np.memmap instances.
+        assert isinstance(ds_sorted._obs['report_timestamp'], np.memmap)
+
+    def test_timestamps_match_npz_path(self, paths, tmp_path):
+        obs_path, meta_path, *_ = paths
+        ds_npz    = InsituLandDataset(obs_path, meta_path)
+        ds_sorted, _ = self._sorted_ds(paths, tmp_path)
+        np.testing.assert_array_equal(
+            np.asarray(ds_sorted.timestamps), np.asarray(ds_npz.timestamps))
+        assert ds_sorted.n_stations == ds_npz.n_stations
+
+    def test_query_matches_npz_path(self, paths, tmp_path):
+        obs_path, meta_path, base_ns, hour_ns = paths
+        ds_npz    = InsituLandDataset(obs_path, meta_path)
+        ds_sorted, _ = self._sorted_ds(paths, tmp_path)
+        a = ds_npz.get_obs_near(15.0, -75.0, base_ns, 300.0, hour_ns, DEFAULT_OBS_VARS)
+        b = ds_sorted.get_obs_near(15.0, -75.0, base_ns, 300.0, hour_ns, DEFAULT_OBS_VARS)
+        # Same stations, same distances — identical query result.
+        np.testing.assert_array_equal(
+            a['primary_station_id'].to_numpy().astype(str),
+            b['primary_station_id'].to_numpy().astype(str))
+        np.testing.assert_allclose(a['distance_km'].to_numpy(),
+                                   b['distance_km'].to_numpy(), rtol=1e-5)
+
+    def test_filter_reliability_on_sorted_dir(self, paths, tmp_path):
+        ds_sorted, _ = self._sorted_ds(paths, tmp_path)
+        sub = ds_sorted.filter_reliability(['always_active'])
+        assert isinstance(sub, InsituLandDataset)
+        assert sub.n_stations <= ds_sorted.n_stations
+
+
+class TestFilterReliabilityShortCircuit:
+
+    def test_all_levels_returns_self(self, ds):
+        from experiments.tc_perceiver_io.data.sources.insitu_land import RELIABILITY_LEVELS
+        # Listing every level keeps all stations → identity short-circuit.
+        assert ds.filter_reliability(list(RELIABILITY_LEVELS)) is ds
