@@ -23,10 +23,17 @@ Batch format
 
 Class balance
 -------------
-tc_fraction controls the TC share per batch (default 0.5). Set it below
-0.5 to oversample background and counteract the natural bias toward storm
-samples in the IBTrACS data (~10 K TC rows vs millions of background
-timestamps).
+tc_fraction controls the TC share per batch (default 0.5). Set it above
+0.5 to oversample storms and counteract the natural bias toward background
+in the data (~10 K TC rows vs millions of background timestamps).
+
+tc_fraction oversampling and a class-balancing loss (data.class_weight_scheme)
+attack the same imbalance, so running both stacks the corrections. When a
+weighting scheme is active, the TRAIN loader drops the oversampling and reverts
+to natural prevalence — background is recorded as label 0 in the split manifest
+(its pool size) and the per-class weights do the balancing. val/test keep the
+configured tc_fraction so eval composition stays stable. See _train_tc_fraction
+and setup().
 """
 
 from __future__ import annotations
@@ -175,9 +182,11 @@ class TCLoader:
     **Random mode** (``steps_per_epoch=N`` — training)
         Draws TC samples uniformly at random *with replacement* for exactly
         ``steps_per_epoch`` gradient steps.  TC events are reused across
-        steps; each reuse receives a fresh background sample.  Background
-        samples are drawn fresh every step (uniform position + random
-        pool timestamp), giving maximum diversity.
+        steps.  Backgrounds come from a reusable buffer (see
+        ``bg_refresh_every`` / ``bg_buffer_size``): by default it is refreshed
+        every step (maximum diversity), but raising the interval reuses a pool
+        of pre-assembled backgrounds across steps to cut per-step assembly cost
+        when batches are background-heavy.
 
     Station selection up to max_stations is controlled by ``station_selection``:
     'nearest' (default, deterministic — always used for val/test so eval is
@@ -204,7 +213,18 @@ class TCLoader:
         iteration — positions via Latin Hypercube, timestamps fixed-seed
         from the synoptic pool — assembled once and reused every epoch,
         so eval differences are purely model change. If False (train),
-        backgrounds are drawn fresh each step.
+        backgrounds come from the refreshable buffer below.
+    bg_refresh_every : int
+        Random mode only. Steps between full refreshes of the background
+        buffer. Default 1 = assemble fresh backgrounds every step. Larger
+        values reuse pre-assembled backgrounds across steps, cutting per-step
+        assembly cost (~bg_buffer_size / bg_refresh_every draws per step
+        instead of bg_half) at the cost of some background diversity.
+    bg_buffer_size : int or None
+        Random mode only. Size of the reusable background buffer to sample
+        each step's bg_half from. None (default) = bg_half (with
+        bg_refresh_every=1 this is exactly fresh-every-step). Floored at
+        bg_half so a batch can be filled without replacement.
     """
 
     # fold_in constant separating the frozen-background key stream from
@@ -223,13 +243,32 @@ class TCLoader:
         steps_per_epoch:    Optional[int] = None,
         freeze_backgrounds: bool  = False,
         station_selection:  str   = 'nearest',
+        bg_refresh_every:   int   = 1,
+        bg_buffer_size:     Optional[int] = None,
     ) -> None:
         if not (0.0 < tc_fraction < 1.0):
             raise ValueError(f"tc_fraction must be in (0, 1), got {tc_fraction}")
+        if bg_refresh_every < 1:
+            raise ValueError(
+                f"bg_refresh_every must be >= 1, got {bg_refresh_every}")
         self._dataset            = dataset
         self._batch_size         = batch_size
         self._tc_half            = max(1, round(batch_size * tc_fraction))
         self._bg_half            = batch_size - self._tc_half
+        # Reusable train-background buffer (random mode only). Each step samples
+        # _bg_half backgrounds from a buffer of _bg_buffer_size pre-assembled
+        # samples, refreshed every _bg_refresh_every steps, instead of
+        # assembling _bg_half fresh samples every step. The defaults
+        # (refresh_every=1, buffer=_bg_half) reproduce fresh-every-step exactly.
+        # A larger buffer + interval trades some background diversity for far
+        # less per-step assembly cost — assembly drops from _bg_half draws/step
+        # to ~_bg_buffer_size/_bg_refresh_every. Eval is unaffected (it uses
+        # frozen backgrounds in sequential mode, never this path).
+        self._bg_refresh_every   = bg_refresh_every
+        self._bg_buffer_size     = (
+            max(self._bg_half, int(bg_buffer_size)) if bg_buffer_size
+            else self._bg_half
+        )
         self._shuffle            = shuffle
         self._base_seed          = seed
         self._fov_lat            = fov_lat
@@ -258,21 +297,22 @@ class TCLoader:
         return pool
 
     def _draw_background(
-        self, rng: np.random.Generator
+        self, rng: np.random.Generator, n: Optional[int] = None,
     ) -> tuple[list[dict], bool]:
-        """Draw self._bg_half fresh background samples. Returns (buf, success).
+        """Draw n fresh background samples (default self._bg_half).
 
-        Position policy: uniform in the FOV box; timestamp drawn randomly
-        from the synoptic background pool.
+        Returns (buf, success). Position policy: uniform in the FOV box;
+        timestamp drawn randomly from the synoptic background pool.
         """
+        count    = self._bg_half if n is None else n
         pool     = self._background_pool()
         bg_buf   = []
         bg_tries = 0
-        while len(bg_buf) < self._bg_half:
+        while len(bg_buf) < count:
             bg_tries += 1
-            if bg_tries > self._bg_half * 50:
+            if bg_tries > count * 50:
                 warnings.warn(
-                    f"Could not draw {self._bg_half} background samples "
+                    f"Could not draw {count} background samples "
                     f"after {bg_tries} attempts.",
                     UserWarning,
                     stacklevel=2,
@@ -361,8 +401,16 @@ class TCLoader:
             yield from self._iter_sequential(rng)
 
     def _iter_random(self, rng: np.random.Generator) -> Iterator[dict]:
-        """Random mode: draw TC samples with replacement for steps_per_epoch steps."""
+        """Random mode: draw TC samples with replacement for steps_per_epoch steps.
+
+        Backgrounds come from a reusable buffer refreshed every
+        _bg_refresh_every steps (see __init__): each step samples _bg_half from
+        a buffer of _bg_buffer_size pre-assembled samples rather than assembling
+        _bg_half fresh ones every step. With the defaults (refresh_every=1,
+        buffer=_bg_half) this is exactly fresh-every-step.
+        """
         n_tc = len(self._dataset)
+        bg_buffer: list[dict] = []
         step = 0
         while step < self._steps_per_epoch:
             # Draw tc_half TC samples randomly with replacement.
@@ -376,10 +424,20 @@ class TCLoader:
                 if sample is not None:
                     tc_buf.append(sample)
 
-            # Draw fresh background samples.
-            bg_buf, ok = self._draw_background(rng)
-            if not ok:
-                continue   # retry this step — background pool temporarily dry
+            # Refresh the background buffer on the cadence, then sample this
+            # step's backgrounds from it (without replacement when the buffer is
+            # large enough, so a single batch has no duplicate backgrounds).
+            if step % self._bg_refresh_every == 0:
+                bg_buffer, ok = self._draw_background(rng, n=self._bg_buffer_size)
+                if not ok:
+                    continue   # retry this step — background pool temporarily dry
+            if not bg_buffer:
+                continue
+            sel    = rng.choice(
+                len(bg_buffer), size=self._bg_half,
+                replace=len(bg_buffer) < self._bg_half,
+            )
+            bg_buf = [bg_buffer[i] for i in sel]
 
             yield _collate(tc_buf + bg_buf)
             step += 1
@@ -481,6 +539,18 @@ class TCDataModule(BaseDataModule):
                                         data/targets.TARGET_SCHEMA
     """
 
+    # Whether a class-balancing loss is active (data.class_weight_scheme !=
+    # 'none'). Set in setup(); the default keeps stub instances that bypass
+    # setup (e.g. tests) on the configured tc_fraction. When True, the train
+    # loader stops oversampling TC — see _train_tc_fraction.
+    _cw_active: bool = False
+
+    # Train-background buffer defaults (set in setup()); the class defaults keep
+    # stub instances that bypass setup on fresh-every-step behaviour. See
+    # TCLoader for semantics.
+    _bg_refresh_every: int = 1
+    _bg_buffer_size: Optional[int] = None
+
     @classmethod
     def from_config(cls, config: dict) -> TCDataModule:
         dm = cls()
@@ -508,6 +578,17 @@ class TCDataModule(BaseDataModule):
 
         self._batch_size         = int(config.get('batch_size', 64))
         self._tc_fraction        = float(config.get('tc_fraction', 0.5))
+        # A class-balancing loss and tc_fraction oversampling both correct the
+        # same imbalance; running both stacks the corrections. When weighting is
+        # on, the train loader reverts to natural prevalence and the weights do
+        # the balancing — see _train_tc_fraction.
+        self._cw_active          = str(config.get('class_weight_scheme', 'none')) != 'none'
+        # Reusable train-background buffer (random mode). Defaults reproduce
+        # fresh-every-step assembly; raise bg_refresh_every (+ optionally
+        # bg_buffer_size) to cut per-step background-assembly cost when the
+        # batch is background-heavy (e.g. natural prevalence). See TCLoader.
+        self._bg_refresh_every   = int(config.get('bg_refresh_every', 1))
+        self._bg_buffer_size     = config.get('bg_buffer_size')
         # Train-only station-selection policy ('nearest' | 'random'); val/test
         # always use 'nearest' (deterministic eval). See TCLoader.
         self._station_selection  = str(config.get('station_selection', 'nearest'))
@@ -544,6 +625,13 @@ class TCDataModule(BaseDataModule):
                 exclude_multi_times=multi_times,
                 buffer_hours=buf_hours,
             )
+            # Background (label 0) is a real class but never appears as an
+            # IBTrACS row, so resolve_splits leaves its count at 0. Record its
+            # natural prevalence — the size of the TC-free synoptic pool — so
+            # class-balancing weights treat background as the (dominant) class
+            # it is, rather than holding it neutral at 1.0.
+            if split_name in self._manifest:
+                self._manifest[split_name]['class_counts']['0'] = int(len(bg_pool))
             ds = TCDataset(
                 ibtracs=ib,
                 insitu=ins,
@@ -561,6 +649,32 @@ class TCDataModule(BaseDataModule):
     # Loaders
     # ------------------------------------------------------------------
 
+    def _train_tc_fraction(self) -> float:
+        """TC fraction per batch for the TRAIN loader.
+
+        When a class-balancing loss is active (data.class_weight_scheme !=
+        'none') the per-class weights carry the imbalance correction, so the
+        sampler must not *also* oversample TC — otherwise the two corrections
+        stack. The train batch then reverts to the natural TC:background
+        prevalence (from the train manifest's class counts) and the weights do
+        the balancing. The TCLoader's max(1, ...) floor still guarantees at
+        least one TC sample per batch.
+
+        val/test always use the configured tc_fraction so eval composition
+        stays stable and comparable across runs (see val_loader/test_loader).
+
+        Falls back to the configured tc_fraction when weighting is off, or when
+        the natural fraction is undefined (no background or no TC in the split).
+        """
+        if not self._cw_active:
+            return self._tc_fraction
+        counts = self._manifest['train']['class_counts']
+        n_bg = int(counts.get('0', 0))
+        n_tc = sum(int(v) for k, v in counts.items() if k != '0')
+        if n_bg == 0 or n_tc == 0:
+            return self._tc_fraction
+        return n_tc / (n_tc + n_bg)
+
     def train_loader(
         self,
         batch_size:      Optional[int] = None,
@@ -571,7 +685,7 @@ class TCDataModule(BaseDataModule):
         return TCLoader(
             self._train_ds,
             batch_size or self._batch_size,
-            tc_fraction        = self._tc_fraction,
+            tc_fraction        = self._train_tc_fraction(),
             shuffle            = shuffle,
             seed               = seed,
             fov_lat            = self._fov_lat,
@@ -579,6 +693,8 @@ class TCDataModule(BaseDataModule):
             steps_per_epoch    = steps_per_epoch,
             freeze_backgrounds = False,
             station_selection  = self._station_selection,   # train-only random views
+            bg_refresh_every   = self._bg_refresh_every,
+            bg_buffer_size     = self._bg_buffer_size,
         )
 
     def val_loader(
@@ -706,8 +822,6 @@ class TCDataModule(BaseDataModule):
             Also assemble a subset of TC samples per split and print
             station-count statistics (see station_diagnostics). Default True.
         """
-        tc_half = max(1, round(self._batch_size * self._tc_fraction))
-
         print()
         print("─" * 58)
         print(f"Data  ({self._input_spec.location_encoding} · {self._input_spec.normalisation})")
@@ -733,6 +847,11 @@ class TCDataModule(BaseDataModule):
                 len(ds.background_timestamps)
                 if ds.background_timestamps is not None else 0
             )
+            # Train reverts to natural prevalence when class weighting is on;
+            # val/test always use the configured tc_fraction (see
+            # _train_tc_fraction).
+            frac    = self._train_tc_fraction() if name == 'train' else self._tc_fraction
+            tc_half = max(1, round(self._batch_size * frac))
             if name == 'train' and steps_per_epoch is not None:
                 # Random mode — epoch length is exact and controlled by config
                 steps_str = f"{steps_per_epoch:>9,} "
@@ -744,11 +863,19 @@ class TCDataModule(BaseDataModule):
             f"random ({steps_per_epoch:,} steps/ep)"
             if steps_per_epoch is not None else "sequential (1 pass)"
         )
+        tc_frac_str = f"tc_fraction={self._tc_fraction}"
+        if self._cw_active:
+            # Train sampler is bypassed in favour of natural prevalence; the
+            # class-balancing loss carries the imbalance correction.
+            tc_frac_str += (
+                f" (train→{self._train_tc_fraction():.4g}, natural prevalence: "
+                f"class weights active)"
+            )
         print(
             f"  train mode: {mode_str}  |  "
             f"batch_size={self._batch_size}  "
             f"max_stations={self._max_stations}  "
-            f"tc_fraction={self._tc_fraction}"
+            f"{tc_frac_str}"
         )
         if diagnostics:
             print(f"  {'─'*6}  {'─'*20}  {'─'*20}  {'─'*6}")

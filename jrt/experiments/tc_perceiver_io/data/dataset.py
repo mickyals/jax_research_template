@@ -9,7 +9,7 @@ observations within radius_km at the query time.
 
 Sample dict
 -----------
-    query_coords   : np.float32 (2,)      encoded query position (see below)
+    query_coords   : np.float32 (2, )      encoded query position (see below)
     station_obs    : np.float32 (N, F)    obs values, normalised, NaN→0
     station_coords : np.float32 (N, 2)    encoded station positions (see below)
     station_mask   : np.bool_   (N,)      True = real station, False = padding

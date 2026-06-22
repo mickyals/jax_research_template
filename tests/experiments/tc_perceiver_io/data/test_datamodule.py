@@ -330,7 +330,7 @@ class TestTCLoader:
 class TestTCLoaderRandomMode:
     """TCLoader with steps_per_epoch set (random sampling with replacement)."""
 
-    def _make_random_loader(self, tmp_path, steps: int) -> TCLoader:
+    def _make_random_loader(self, tmp_path, steps: int, **bg_kwargs) -> TCLoader:
         base_ns = 1_567_296_000_000_000_000
         ib_p, ms_p, tc_times = _make_ibtracs(tmp_path, seasons=(2019,), n_per_season=6)
         obs_p, meta_p, insitu_times = _make_insitu(tmp_path, base_ns, n_hours=50)
@@ -350,7 +350,7 @@ class TestTCLoaderRandomMode:
         )
         return TCLoader(
             ds, batch_size=4, tc_fraction=0.5,
-            seed=0, steps_per_epoch=steps,
+            seed=0, steps_per_epoch=steps, **bg_kwargs,
         )
 
     def test_len_returns_steps_per_epoch(self, tmp_path):
@@ -387,6 +387,50 @@ class TestTCLoaderRandomMode:
         # Both epochs should produce exactly steps_per_epoch batches.
         assert len(epoch1) == 3
         assert len(epoch2) == 3
+
+    # -- Refreshable background buffer (F2: cut per-step assembly cost) -------
+
+    def test_buffer_defaults_to_fresh_every_step(self, tmp_path):
+        loader = self._make_random_loader(tmp_path, steps=3)
+        assert loader._bg_refresh_every == 1
+        assert loader._bg_buffer_size == loader._bg_half
+
+    def test_invalid_refresh_every_raises(self, tmp_path):
+        with pytest.raises(ValueError, match='bg_refresh_every'):
+            self._make_random_loader(tmp_path, steps=3, bg_refresh_every=0)
+
+    def test_buffer_size_floored_at_bg_half(self, tmp_path):
+        # Request a buffer smaller than bg_half — it is floored so a batch can
+        # be filled without replacement.
+        loader = self._make_random_loader(tmp_path, steps=3, bg_buffer_size=1)
+        assert loader._bg_buffer_size == loader._bg_half
+
+    def test_batches_well_formed_with_buffer(self, tmp_path):
+        loader = self._make_random_loader(
+            tmp_path, steps=6, bg_refresh_every=3, bg_buffer_size=8)
+        batches = list(loader)
+        assert len(batches) == 6
+        for b in batches:
+            assert b['y'].shape[0] == 4   # tc_half(2) + bg_half(2)
+
+    def test_refresh_interval_reduces_draw_calls(self, tmp_path):
+        """With refresh_every>1 the background pool is assembled on a cadence,
+        not every step — the whole point of the buffer (F2). Counts *successful*
+        refreshes so the assertion is robust to dry-pool retries in the tiny
+        fixture (a failed draw re-attempts the same step)."""
+        loader = self._make_random_loader(
+            tmp_path, steps=6, bg_refresh_every=3, bg_buffer_size=8)
+        ok_draws = {'n': 0}
+        orig = loader._draw_background
+        def _counting(rng, n=None):
+            buf, ok = orig(rng, n=n)
+            ok_draws['n'] += int(ok)
+            return buf, ok
+        loader._draw_background = _counting
+        list(loader)
+        # 6 steps, refresh every 3 → exactly 2 successful refreshes (steps 0 and
+        # 3), vs 6 if it assembled fresh every step.
+        assert ok_draws['n'] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +582,8 @@ class TestTCDataModuleSummary:
             'min_stations': 1,
             'batch_size':   4,
             'tc_fraction':  0.5,
+            'bg_refresh_every': 25,
+            'bg_buffer_size':   128,
             'split': {
                 'strategy': 'year',
                 'train': {'years': [2019]},
@@ -548,9 +594,79 @@ class TestTCDataModuleSummary:
         dm = TCDataModule.from_config(cfg)
         # InputSpec is the single source of truth for the input configuration.
         assert dm.input_spec.location_encoding == 'domain'
+        # Background-buffer config is read in setup() and reaches the train loader.
+        assert dm._bg_refresh_every == 25
+        assert dm._bg_buffer_size   == 128
+        assert dm.train_loader()._bg_refresh_every == 25
         assert dm.input_spec.normalisation     == 'minmax_01'
         assert dm._max_stations                == 8
         assert dm._min_stations                == 1
+
+
+# ---------------------------------------------------------------------------
+# Class-balance sampling: background as a counted class
+# ---------------------------------------------------------------------------
+
+class TestClassWeightSampling:
+    """A class-balancing loss and tc_fraction oversampling correct the same
+    imbalance; when weighting is on, the train loader reverts to natural
+    prevalence and background is recorded as label 0 in the manifest."""
+
+    def _stub_dm(self, tc_fraction=0.5, counts=None):
+        from experiments.tc_perceiver_io.data.datamodule import TCDataModule
+        dm = TCDataModule()
+        dm._tc_fraction = tc_fraction
+        dm._manifest = {'train': {'class_counts': counts if counts is not None else {}}}
+        return dm
+
+    def test_cw_active_defaults_false_without_setup(self):
+        # Stub instances bypass setup(); the class default keeps them on the
+        # configured tc_fraction so summary()/train_loader don't blow up.
+        assert self._stub_dm()._cw_active is False
+
+    def test_weighting_off_uses_configured_fraction(self):
+        dm = self._stub_dm(counts={'0': 990_000, '1': 10_000})
+        dm._cw_active = False
+        assert dm._train_tc_fraction() == 0.5
+
+    def test_weighting_on_uses_natural_prevalence(self):
+        dm = self._stub_dm(counts={'0': 990_000, '1': 2_000, '2': 6_000, '3': 2_000})
+        dm._cw_active = True
+        # 10_000 TC rows out of 1_000_000 total.
+        assert dm._train_tc_fraction() == pytest.approx(0.01)
+
+    def test_weighting_on_falls_back_without_background(self):
+        dm = self._stub_dm(counts={'0': 0, '1': 2_000})
+        dm._cw_active = True
+        assert dm._train_tc_fraction() == 0.5
+
+    def test_setup_records_background_count_when_weighting_on(self, tmp_path):
+        from experiments.tc_perceiver_io.data.datamodule import TCDataModule
+        ib_p, ms_p, tc_times = _make_ibtracs(tmp_path, seasons=(2019, 2021, 2023))
+        obs_p, meta_p, _     = _make_insitu(tmp_path, tc_times[0], n_hours=60)
+        cfg = {
+            'ibtracs_path':     str(ib_p),
+            'multi_storm_path': str(ms_p),
+            'insitu_obs_path':  str(obs_p),
+            'insitu_meta_path': str(meta_p),
+            'max_stations': 8, 'min_stations': 1, 'batch_size': 4,
+            'tc_fraction':  0.5,
+            'class_weight_scheme': 'effective_number',
+            'split': {
+                'strategy': 'year',
+                'train': {'years': [2019]},
+                'val':   {'years': [2021]},
+                'test':  {'years': [2023]},
+            },
+        }
+        dm = TCDataModule.from_config(cfg)
+        assert dm._cw_active is True
+        # Background (label 0) count equals the train split's pool size — no
+        # longer structurally 0, so class_weights_from_counts treats it as a
+        # real class instead of holding it neutral at 1.0.
+        bg = dm._train_ds.background_timestamps
+        expected = 0 if bg is None else len(bg)
+        assert dm.manifest()['train']['class_counts']['0'] == expected
 
 
 # ---------------------------------------------------------------------------

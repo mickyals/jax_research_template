@@ -21,12 +21,18 @@ Two files on disk:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from utils.geoscience.geodesic import haversine_np
+
+# Marker file + format tag for the pre-sorted, memory-mappable obs layout
+# produced by ``InsituLandDataset.prepare_sorted`` (see __init__ fast path).
+_SORTED_MANIFEST = 'manifest.json'
+_SORTED_FORMAT   = 'insitu_sorted_v1'
 
 
 # ---------------------------------------------------------------------------
@@ -66,10 +72,17 @@ RELIABILITY_LEVELS: list[str] = [
 class InsituLandDataset:
     """Land-surface station observations with spatial + temporal queries.
 
+    ``obs_path`` may be either:
+      * the original ``insitu_land_clean.npz`` — loaded and argsort-by-time on
+        construction (the 74 M-row sort is the slow startup cost), or
+      * a directory produced by :meth:`prepare_sorted` — already sorted, with
+        one ``.npy`` per column, **memory-mapped** on load (near-instant; pages
+        in from disk on demand). Convert once, then point the config at the dir.
+
     Parameters
     ----------
     obs_path : str or Path
-        Path to insitu_land_clean.npz.
+        Path to insitu_land_clean.npz OR a prepare_sorted() directory.
     meta_path : str or Path
         Path to insitu_land_station_meta.npz.
     """
@@ -78,25 +91,84 @@ class InsituLandDataset:
         self.obs_path  = Path(obs_path)
         self.meta_path = Path(meta_path)
 
-        obs_raw  = np.load(self.obs_path,  allow_pickle=True)
         meta_raw = np.load(self.meta_path, allow_pickle=True)
-
         # Station metadata (552 rows) — keep as-is
         self._meta: dict[str, np.ndarray] = {k: meta_raw[k] for k in meta_raw.files}
 
-        # Build station-ID integer index from obs before sorting.
-        # np.unique(return_inverse=True) maps every string ID to an int in O(N log N).
-        raw_ids = obs_raw['primary_station_id']
-        self._unique_ids, inv = np.unique(raw_ids, return_inverse=True)
-        # inv is int64 indices into _unique_ids — (74M,)
+        if self.obs_path.is_dir() and (self.obs_path / _SORTED_MANIFEST).exists():
+            self._obs, self._obs_station_int, self._unique_ids = \
+                self._load_sorted_dir(self.obs_path)
+        else:
+            self._obs, self._obs_station_int, self._unique_ids = \
+                self._load_npz_and_sort(self.obs_path)
 
-        # Sort all obs arrays by timestamp once.
-        sort_order = np.argsort(obs_raw['report_timestamp'])
-        self._obs: dict[str, np.ndarray] = {
-            k: obs_raw[k][sort_order] for k in obs_raw.files
-        }
-        self._obs_station_int: np.ndarray = inv[sort_order].astype(np.int32)
         self._timestamps: np.ndarray = self._obs['report_timestamp']   # sorted int64
+
+    # ------------------------------------------------------------------
+    # Loaders (slow npz / fast pre-sorted mmap) + offline converter
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_npz_and_sort(obs_path: Path):
+        """Load the original .npz and sort every column by report_timestamp.
+
+        The argsort over 74 M rows + full re-index is the slow startup path;
+        prepare_sorted() pays it once offline so future loads can mmap.
+        """
+        obs_raw = np.load(obs_path, allow_pickle=True)
+        # Station-ID integer index (string -> int) before sorting.
+        unique_ids, inv = np.unique(obs_raw['primary_station_id'],
+                                    return_inverse=True)
+        sort_order = np.argsort(obs_raw['report_timestamp'])
+        obs = {k: obs_raw[k][sort_order] for k in obs_raw.files}
+        return obs, inv[sort_order].astype(np.int32), unique_ids
+
+    @staticmethod
+    def _load_sorted_dir(d: Path):
+        """Memory-map a prepare_sorted() directory — no load/sort, O(1) startup."""
+        manifest = json.loads((d / _SORTED_MANIFEST).read_text())
+        if manifest.get('format') != _SORTED_FORMAT:
+            raise ValueError(
+                f"{d} is not a {_SORTED_FORMAT} obs directory "
+                f"(found format={manifest.get('format')!r})."
+            )
+        obs = {k: np.load(d / f'{k}.npy', mmap_mode='r')
+               for k in manifest['columns']}
+        station_int = np.load(d / '_obs_station_int.npy', mmap_mode='r')
+        unique_ids  = np.load(d / '_unique_ids.npy')         # small — keep in RAM
+        return obs, station_int, unique_ids
+
+    @classmethod
+    def prepare_sorted(cls, obs_npz_path: str | Path,
+                       out_dir: str | Path) -> Path:
+        """Convert insitu_land_clean.npz → a sorted, memory-mappable directory.
+
+        Run ONCE (it pays the load + argsort the slow path does on every
+        construction), then set the config's insitu_obs_path to ``out_dir`` so
+        every subsequent run mmaps the pre-sorted columns instead. Object/string
+        columns are cast to fixed-width unicode so they too can be mmapped.
+
+        Returns the output directory path.
+        """
+        obs_raw = np.load(Path(obs_npz_path), allow_pickle=True)
+        cols    = list(obs_raw.files)
+        unique_ids, inv = np.unique(obs_raw['primary_station_id'],
+                                    return_inverse=True)
+        order   = np.argsort(obs_raw['report_timestamp'])
+
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        for k in cols:
+            arr = np.asarray(obs_raw[k])[order]
+            if arr.dtype == object:           # object strings aren't mmappable
+                arr = arr.astype(np.str_)
+            np.save(out / f'{k}.npy', arr)
+        np.save(out / '_obs_station_int.npy', inv[order].astype(np.int32))
+        np.save(out / '_unique_ids.npy', np.asarray(unique_ids).astype(np.str_))
+        (out / _SORTED_MANIFEST).write_text(json.dumps(
+            {'format': _SORTED_FORMAT, 'columns': cols, 'n_rows': int(order.size)}
+        ))
+        return out
 
     # ------------------------------------------------------------------
     # Internal factory used by filter_reliability and split
@@ -151,6 +223,12 @@ class InsituLandDataset:
 
         # Map valid string IDs → their integer indices (fast — 552 unique IDs max)
         valid_ints = np.where(np.isin(self._unique_ids, list(valid_ids)))[0]
+
+        # All stations kept (e.g. reliability_levels lists every level): skip the
+        # 74 M-row boolean index + copy entirely — return self. This keeps the
+        # mmap fast path lazy when no reliability filtering actually applies.
+        if valid_ints.size == self._unique_ids.size:
+            return self
 
         # Filter 74 M-row obs array using integer comparisons (fast)
         obs_mask = np.isin(self._obs_station_int, valid_ints)
@@ -319,3 +397,28 @@ def _timestamps_to_years(timestamps_ns: np.ndarray) -> np.ndarray:
 def _empty_df(obs_vars: list[str]) -> pd.DataFrame:
     cols = ['latitude', 'longitude', 'primary_station_id', 'distance_km'] + obs_vars
     return pd.DataFrame(columns=cols)
+
+
+# ---------------------------------------------------------------------------
+# CLI — one-time conversion to the fast pre-sorted/mmap layout
+# ---------------------------------------------------------------------------
+# Usage (run once; then set data.insitu_obs_path to OUT_DIR):
+#   PYTHONPATH=jrt python -m experiments.tc_perceiver_io.data.sources.insitu_land \
+#       E:/sparse_obs/insitu-land/insitu_land_clean.npz \
+#       E:/sparse_obs/insitu-land/insitu_land_clean_sorted
+
+if __name__ == '__main__':
+    import argparse
+    import time
+
+    parser = argparse.ArgumentParser(
+        description="Convert insitu_land_clean.npz to the sorted, memory-mappable "
+                    "directory layout (skips the per-run argsort; near-instant load).")
+    parser.add_argument('obs_npz', help="Path to insitu_land_clean.npz")
+    parser.add_argument('out_dir', help="Output directory for the sorted columns")
+    args = parser.parse_args()
+
+    t0 = time.time()
+    print(f"Converting {args.obs_npz} → {args.out_dir} ...", flush=True)
+    out = InsituLandDataset.prepare_sorted(args.obs_npz, args.out_dir)
+    print(f"Done in {time.time() - t0:.0f}s. Point data.insitu_obs_path at:\n  {out}")
