@@ -20,14 +20,15 @@ This is a binary + ordinal classification problem over **9 classes**, ordered by
 
 **InsituLand** (`insitu_land_clean.npz` + `insitu_land_station_meta.npz`) — land surface hourly observations from Copernicus C3S for 552 stations in the Caribbean / Gulf domain (LAT 0–30°N, LON 100–45°W). 74.7M observation rows.
 
-> **Faster startup (recommended for repeated runs).** Loading the 19.5 GB `insitu_land_clean.npz` and sorting its 74.7M rows by time is an ~8-minute one-time cost on *every* run (it's what sits between the `run_dir` line and the data summary). Convert it **once** to a pre-sorted, memory-mappable directory, then point `data.insitu_obs_path` at that directory — subsequent loads `mmap` the already-sorted columns and start in seconds:
+> **Faster startup (automatic).** Loading the 19.5 GB `insitu_land_clean.npz` and sorting its 74.7M rows by time is an ~8-minute cost (it's what sits between the `run_dir` line and the data summary). With `data.cache_sorted_obs: true` (default), the **first** run takes that hit once and writes a sibling `<stem>_sorted/` directory of pre-sorted, memory-mappable columns; **every subsequent run auto-detects and `mmap`s it, starting in seconds** — no config change needed. Set `cache_sorted_obs: false` to disable (e.g. tight disk). You can also build the cache ahead of time:
 > ```bash
 > PYTHONPATH=jrt python -m experiments.tc_perceiver_io.data.sources.insitu_land \
 >     E:/sparse_obs/insitu-land/insitu_land_clean.npz \
 >     E:/sparse_obs/insitu-land/insitu_land_clean_sorted
-> # then in the config: insitu_obs_path: .../insitu_land_clean_sorted
 > ```
-> `InsituLandDataset` auto-detects the directory vs. the `.npz` and falls back to the slow load+sort path when given the raw file.
+> `InsituLandDataset` accepts either the `.npz` or a converted directory and falls back to the slow load+sort path when no cache exists.
+
+> **GPU selection.** On a multi-GPU box, JAX otherwise claims *every* visible device and preallocates memory on each. Pin training to one GPU with the top-level `gpu:` config field (or `--gpu N`, or a shell `CUDA_VISIBLE_DEVICES`, which wins) — it sets `CUDA_VISIBLE_DEVICES` before JAX initialises.
 
 **Observed variables** (per station per timestamp):
 - `air_pressure_at_sea_level` (Pa)
@@ -48,7 +49,7 @@ This is a binary + ordinal classification problem over **9 classes**, ordered by
 - Test: 2025
 - Hard test: multi-storm timestamps (870 times when ≥2 storms were active simultaneously) — held out entirely
 
-**Batching:** each batch is 1:1 balanced — half TC samples (storm centre as query), half background samples (domain point during non-TC periods). All stations within `radius_km` are used; when a sample has more than `max_stations`, the nearest `max_stations` by distance are kept (no random subsampling — the region is large and stations sparse, so the cap rarely binds, and deterministic selection keeps eval reproducible). Train backgrounds are fresh uniform draws each step; val/test loaders use ONE frozen background set (Latin-Hypercube positions + fixed-seed synoptic timestamps) reused every epoch, so eval differences are purely model change. Sequential (eval) epochs yield every valid TC sample — the final partial batch is flushed with proportionally fewer backgrounds.
+**Batching:** the TC share of each batch is `data.tc_fraction` — a single number for all splits, or a `{train, val, test}` mapping (the default config uses a low train fraction with balanced `0.5` val/test for honest, comparable eval metrics). The rest of the batch is background samples (a domain point clear of any storm). All stations within `radius_km` are candidates; when a sample has more than `max_stations`, `station_selection` decides which are kept — `nearest` (deterministic; always used for val/test) or `random` (a train-only view augmentation that only bites when the cap binds). Train backgrounds are fresh draws each step; val/test loaders use ONE frozen background set (Latin-Hypercube positions + fixed-seed synoptic timestamps) reused every epoch, so eval differences are purely model change. Sequential (eval) epochs yield every valid TC sample — the final partial batch is flushed with proportionally fewer backgrounds. Background cleanliness is governed by `data.background_sampling` (see the Data-pipeline notes below).
 
 ---
 
@@ -540,14 +541,14 @@ plt.show()
 | `val/loss` | Same objective evaluated on val |
 | `val/cross_entropy` | Validation CE — always reported for cross-run comparability; patience metric for early stopping |
 | `val/accuracy` | Top-1 accuracy over all 9 classes |
-| `val/binary_accuracy` | TC vs no-TC (class 0 vs class > 0). **Read against the background base rate, not 0.5:** with `tc_fraction = 0.1` the val mix is ~90% background, so an "always background" model already scores ≈0.90 with zero detection skill. Use `pr_auc` / the confusion matrix to judge real detection. |
+| `val/binary_accuracy` | TC vs no-TC (class 0 vs class > 0). **Read against the eval background base rate.** With the default balanced val (`tc_fraction.val = 0.5`) the base rate is ~0.5, so an "always background" model scores ≈0.5; set an imbalanced eval fraction and the base rate rises to ~(1 − tc_fraction) (≈0.90 at 0.1). Use `pr_auc` / the confusion matrix to judge real detection. |
 | `val/mae_class` | Mean \|predicted class − true class\| in class units |
 | `val/mAP` | Macro one-vs-rest mean average precision (full val set, every `eval_plots_every_n_epochs`) — imbalance-robust; surfaces rare classes (Cat 4/5) that accuracy hides |
 | `val/pr_auc` | Binary TC-vs-background detection average precision / PR-AUC (full val set) — the right detection summary under heavy imbalance (ROC/AUC flatters when negatives dominate). The PR **curve** behind this scalar is logged as the `val/pr_curve` figure (and `val/pr_curves_per_class` for the one-vs-rest curves behind `mAP`) |
 | `val/attn_entropy` | Mean entropy of the Read cross-attention — each latent's distribution over the M stations (`softmax(attn['read'])`, averaged over batch/heads/latents). A falling curve means latents are concentrating on fewer stations rather than attending uniformly. |
 
 **Interpretation:**
-- **`binary_accuracy` is base-rate-dominated.** A model that always predicts class 0 scores `binary_accuracy ≈ (1 − tc_fraction)` — ~0.90 at `tc_fraction = 0.1`, *not* 0.5 — while detecting nothing. So a high `binary_accuracy` can just mean "predicts background"; check it against the background fraction, and lean on `pr_auc`, the confusion matrix (is the TC row bleeding into class 0?), and `mae_class ≈ 3` (large for an always-background model) for real signal.
+- **`binary_accuracy` is base-rate-dependent.** A model that always predicts class 0 scores `binary_accuracy ≈ (1 − eval tc_fraction)` — ≈0.5 with the default balanced val/test (`tc_fraction 0.5`, which is exactly why eval is balanced), but ≈0.90 if you eval at `tc_fraction = 0.1` — while detecting nothing. So check it against the eval background fraction, and lean on `pr_auc`, the confusion matrix (is the TC row bleeding into class 0?), and `mae_class` for real signal.
 - `val/mAP` and `val/pr_auc` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py` / the eval-plots callback, via `training.metrics.compute_full_set_metrics`), not per-batch — they integrate a precision-recall curve over the whole split, so they cannot live in the per-batch `metrics_fns`. They live in the separate `FULL_SET_METRICS` registry. `mAP` is the imbalance-robust multiclass headline; `pr_auc` is the TC-vs-background detection scalar.
 - `val/attn_entropy` starts high (latents attend near-uniformly over the M stations) and is expected to fall as the model learns which stations matter; padded station columns are masked out of the Read attention so they do not contribute.
 
@@ -566,10 +567,17 @@ Key fields in `train.yaml`:
 | `data.min_stations` | 1 | Samples with fewer stations are dropped |
 | `data.location_encoding` | `unit_circle` | `unit_circle` or `domain`; model is coordinate-agnostic, so this lives in the data block only |
 | `data.obs_normalisation` | `minmax_11` | `minmax_01` / `minmax_11` / `standardise` |
-| `data.class_weight_scheme` | `none` | `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` / `median_freq` — computes `class_weights` at setup from train-split counts incl. **background (label 0 = TC-free pool size)**, stored in manifest; overridden by an explicit `trainer.loss_kwargs.class_weights`. When active, the **train** loader drops `tc_fraction` oversampling and samples at natural prevalence so the two correctors don't stack (val/test keep `tc_fraction`); `effective_number` recommended so the ~millions:10K ratio doesn't blow up rare-class weights |
-| `data.class_weight_beta` | `0.999` | effective-number β (that scheme only) |
+| `data.tc_fraction` | `0.5` | TC share of each batch. A single number (all splits) or a `{train, val, test}` mapping — typically a low train fraction with balanced `0.5` val/test for honest eval metrics; a split absent from the mapping defaults to `0.5` |
+| `data.station_selection` | `nearest` | When a sample exceeds `max_stations`: `nearest` (deterministic; always val/test) or `random` (train-only view augmentation; only bites when the cap binds) |
+| `data.class_weight_scheme` | `none` | `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` / `median_freq` — computes `class_weights` at setup from train-split counts incl. **background (label 0, count = `n_background`)**, stored in manifest; overridden by an explicit `trainer.loss_kwargs.class_weights`. When active, the **train** loader drops `tc_fraction` oversampling and samples at natural prevalence so the two correctors don't stack (val/test keep `tc_fraction`); `effective_number` recommended so the ~millions:10K ratio doesn't blow up rare-class weights |
+| `data.class_weight_beta` | `0.999` | effective-number β (that scheme only); higher = wider common/rare spread |
+| `data.class_weight_normalize` | `true` | Scale present-class weights to mean 1.0. Cosmetic for training (`cross_entropy_loss` reduces by the weight sum); `false` records the raw scheme values in the manifest |
+| `data.n_background` | `null` | Effective class-0 (background) **population** size folded into the weights so they span class 0..8 over the whole train set. Background is synthesised, so this is a hyperparameter; `null` → realized per-epoch count (`steps_per_epoch × bg_half`) |
 | `data.bg_refresh_every` | `1` | Random-mode train loader: steps between background-buffer refreshes. `1` = assemble fresh backgrounds every step. Larger values reuse pre-assembled backgrounds to cut per-step assembly cost when batches are background-heavy (e.g. natural prevalence) — assembly drops to ~`bg_buffer_size / bg_refresh_every` draws/step |
 | `data.bg_buffer_size` | `null` | Size of the reusable background buffer each step samples its backgrounds from. `null` = background count per batch (floored there). Pair a larger buffer with `bg_refresh_every` to retain diversity while reusing draws |
+| `data.background_sampling` | `time` | `time` = the pool excludes any synoptic timestamp within `background_buffer_hours` of ANY active TC basin-wide (shrinks in peak season). `spatial` = keep every grid timestamp and accept a draw iff no storm is within `background_exclusion_radius_km` at ±`background_buffer_hours` (decouples space; gates train draws AND the frozen eval set) |
+| `data.background_exclusion_radius_km` | `null` | `spatial` mode: storm-free radius required for a background draw. `null` → `radius_km` (strictest — no storm-affected station can enter the sample); smaller keeps more background but admits storm-adjacent stations |
+| `data.background_buffer_hours` | `6.0` | `time` mode: exclusion half-window around any TC obs. `spatial` mode: time tolerance for the storm-proximity check |
 | `model.missingness_indicator` | `true` | `true` = concatenate `obs_mask` as its own channel in `token_proj` (missing obs filled 0), disambiguating "missing" from a real obs equal to 0; `false` = aliased behaviour (ablation) |
 | `model.embed_dim` | 128 | Latent + token dimensionality D |
 | `model.num_heads` | 4 | Attention heads (`embed_dim` must be divisible) |
@@ -580,7 +588,7 @@ Key fields in `train.yaml`:
 | `model.fourier_dim` | 64 | `GaussianFourierEmbedding` output dim (must be even) |
 | `model.fourier_scale` | 1.0 | Std dev of frequency matrix; log-uniformly tuned in HP search [0.1, 10.0] |
 | `trainer.loss` | `cross_entropy` | Training objective from `training/losses.py` LOSSES registry; `val/cross_entropy` is always reported separately for cross-run comparability |
-| `trainer.loss_kwargs` | `{}` | Composable kwargs for `cross_entropy`: `focal_gamma` (focal loss), `emd_lambda`/`emd_omega`/`emd_mu` (squared-EMD regulariser), and/or explicit `class_weights` (length-11; overrides `data.class_weight_scheme`) |
+| `trainer.loss_kwargs` | `{}` | Composable kwargs for `cross_entropy`: `focal_gamma` (focal loss), `emd_lambda`/`emd_omega`/`emd_mu` (squared-EMD regulariser), and/or explicit `class_weights` (length-9, index 0 = background; overrides `data.class_weight_scheme`) |
 | `trainer.steps_per_epoch` | 500 | Random TC-sampling mode: gradient steps per epoch. Omit/`null` = sequential mode (one pass over TC data) |
 | `trainer.profile` | `false` | Trace the first `profile_steps` training steps (JAX profiler) → `<run_dir>/logs/profile`; WandB uploads it as an artifact, TensorBoard/Null leave it on disk |
 | `trainer.attn_fig_every_n_epochs` | 5 | Epoch cadence for the per-component attention figures `val/attn_read_map` + `val/attn_processor_grid` + `val/attn_decoder_query` (VAL probe batch); 0 = disabled |
@@ -596,7 +604,7 @@ For WandB: set `log_backend: wandb`, add `project` / `name` / `tags` under `log_
 
 ## Implementation notes
 
-**Single `token_proj` (Senseiver-style):** one `Dense((2F+K) → embed_dim)` projects every station token from the concatenation `[obs; mask; Fourier(coords)]`. Observations, missingness, and position therefore share one learned map and live in the same coordinate space — the right inductive bias for relative geometry. There is no query token: the model is coordinate-agnostic and the learned latent array is the encode query (`location_encoding` configures the datamodule only).
+**Single `token_proj`:** one `Dense((2F+K) → embed_dim)` projects every station token from the concatenation `[obs; mask; Fourier(coords)]`. Observations, missingness, and position therefore share one learned map and live in the same coordinate space — the right inductive bias for relative geometry. There is no query token: the model is coordinate-agnostic and the learned latent array is the encode query (`location_encoding` configures the datamodule only).
 
 **Learned latent array (ξ):** a `(num_latents, embed_dim)` parameter (truncated-normal init), broadcast over the batch and used as the Read cross-attention query. It replaces any explicit query/CLS token — the index dimension the Processor and Decoder operate over is the N latents, decoupled from the station count M.
 
@@ -609,5 +617,7 @@ For WandB: set `log_backend: wandb`, add `project` / `name` / `tags` under `log_
 **Multi-storm exclusion:** IBTrACS timestamps with ≥2 active storms are not used during training or validation — the model sees only unambiguous single-storm or background samples. These timestamps form the `hard_test` split for post-training analysis.
 
 **Synoptic background pool:** background timestamps are restricted to the 3-hourly synoptic grid (00/03/…/21 UTC, exact) that best-track rows sit on, so time-of-day can never become a class shortcut. A handful of off-grid best-track special rows (landfall/peak inserts) remain on the TC side — known, accepted asymmetry.
+
+**Background cleanliness (`data.background_sampling`):** how a `(point, time)` draw is judged storm-free. `time` (default) bakes a basin-wide exclusion into the pool — any synoptic timestamp within `background_buffer_hours` of *any* active TC is dropped; simple, but in peak season (a storm almost always active *somewhere*) the pool shrinks sharply. `spatial` keeps every grid timestamp and instead validates each draw geographically: a draw is background iff no storm is within `background_exclusion_radius_km` (null → `radius_km`) at ±`background_buffer_hours`, via a time-sorted IBTrACS proximity index on `TCDataset` (binary-search window + haversine — cheap, no 19 GB load). This decouples space from time so a point far from every active storm stays valid mid-season. Spatial validation gates both the random train draws and the frozen eval set (which over-draws to absorb rejections).
 
 **Sample metadata:** every batch carries a `meta` entry alongside `X`/`y` — SID (None for background), ISO time, raw query lat/lon, and station counts (`n_available` post-dedup candidates, `n_used` after the `max_stations` cap). It is never part of the model inputs (the `Trainer` drops it before its jitted steps); `evaluate.py` uses it for per-storm attribution and `TCDataModule.summary()` reports station-count diagnostics from it.

@@ -153,6 +153,7 @@ def tune(
         loss_kwargs["class_weights"] = class_weights_from_counts(
             counts, scheme=cw_scheme,
             beta=base_config["data"].get("class_weight_beta", 0.999),
+            normalize=base_config["data"].get("class_weight_normalize", True),
         ).tolist()
 
     metrics_fns = build_metrics_fns(
@@ -215,11 +216,16 @@ def _parse_args(argv=None):
                    help="Trials before pruning activates (default 5)")
     p.add_argument("--n_warmup_steps",   type=int, default=10,
                    help="Epochs per trial before pruning is checked (default 10)")
+    p.add_argument("--gpu",              type=str, default=None,
+                   help="GPU index to pin the search to (CUDA_VISIBLE_DEVICES; "
+                        "overrides config `gpu`). Stops JAX claiming every device.")
     return p.parse_args(argv)
 
 
 if __name__ == "__main__":
+    from experiments.tc_perceiver_io.train.train import _pin_gpu
     args = _parse_args()
+    _pin_gpu(args.gpu, args.config)      # before any JAX device op
     tune(
         config_path      = args.config,
         n_trials         = args.n_trials,

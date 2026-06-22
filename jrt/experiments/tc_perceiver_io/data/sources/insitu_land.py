@@ -73,11 +73,16 @@ class InsituLandDataset:
     """Land-surface station observations with spatial + temporal queries.
 
     ``obs_path`` may be either:
+      * a directory produced by :meth:`prepare_sorted` — already sorted, one
+        ``.npy`` per column, **memory-mapped** on load (near-instant; pages in
+        from disk on demand), or
       * the original ``insitu_land_clean.npz`` — loaded and argsort-by-time on
-        construction (the 74 M-row sort is the slow startup cost), or
-      * a directory produced by :meth:`prepare_sorted` — already sorted, with
-        one ``.npy`` per column, **memory-mapped** on load (near-instant; pages
-        in from disk on demand). Convert once, then point the config at the dir.
+        construction (the 74 M-row sort is the slow ~8-min startup cost).
+
+    Auto-cache: when given the ``.npz`` and ``cache_sorted=True``, the loader
+    first looks for a sibling ``<stem>_sorted/`` directory and mmaps it if
+    present; otherwise it takes the slow path once and **writes that sibling
+    cache** so every subsequent run is fast — no config change needed.
 
     Parameters
     ----------
@@ -85,9 +90,14 @@ class InsituLandDataset:
         Path to insitu_land_clean.npz OR a prepare_sorted() directory.
     meta_path : str or Path
         Path to insitu_land_station_meta.npz.
+    cache_sorted : bool
+        Build the sibling ``_sorted`` cache on a slow (.npz) load so later runs
+        mmap it. Default False (library-safe); the datamodule passes True from
+        ``data.cache_sorted_obs``.
     """
 
-    def __init__(self, obs_path: str | Path, meta_path: str | Path) -> None:
+    def __init__(self, obs_path: str | Path, meta_path: str | Path,
+                 cache_sorted: bool = False) -> None:
         self.obs_path  = Path(obs_path)
         self.meta_path = Path(meta_path)
 
@@ -95,12 +105,32 @@ class InsituLandDataset:
         # Station metadata (552 rows) — keep as-is
         self._meta: dict[str, np.ndarray] = {k: meta_raw[k] for k in meta_raw.files}
 
+        sibling = self.obs_path.with_name(self.obs_path.stem + '_sorted')
         if self.obs_path.is_dir() and (self.obs_path / _SORTED_MANIFEST).exists():
+            # Pointed straight at a converted directory.
             self._obs, self._obs_station_int, self._unique_ids = \
                 self._load_sorted_dir(self.obs_path)
+        elif (sibling / _SORTED_MANIFEST).exists():
+            # .npz given, but a sibling cache exists — use the fast path.
+            print(f"  [insitu] using sorted cache: {sibling}")
+            self._obs, self._obs_station_int, self._unique_ids = \
+                self._load_sorted_dir(sibling)
         else:
+            # Slow path: load + argsort the 74 M rows.
             self._obs, self._obs_station_int, self._unique_ids = \
                 self._load_npz_and_sort(self.obs_path)
+            if cache_sorted and not self.obs_path.is_dir():
+                print(f"  [insitu] no sorted cache found — building one-time "
+                      f"mmap cache at {sibling} (set data.cache_sorted_obs: "
+                      f"false to disable)...", flush=True)
+                try:
+                    self._write_sorted_dir(sibling, self._obs,
+                                           self._obs_station_int, self._unique_ids)
+                    print(f"  [insitu] cache built; future runs load in seconds.")
+                except OSError as e:
+                    import warnings
+                    warnings.warn(f"Could not write sorted cache to {sibling}: {e}",
+                                  UserWarning, stacklevel=2)
 
         self._timestamps: np.ndarray = self._obs['report_timestamp']   # sorted int64
 
@@ -138,37 +168,43 @@ class InsituLandDataset:
         unique_ids  = np.load(d / '_unique_ids.npy')         # small — keep in RAM
         return obs, station_int, unique_ids
 
+    @staticmethod
+    def _write_sorted_dir(out_dir: str | Path, obs_sorted: dict,
+                          obs_station_int: np.ndarray,
+                          unique_ids: np.ndarray) -> Path:
+        """Write already-sorted in-memory columns to the mmap-able layout.
+
+        Shared by the offline converter (prepare_sorted) and the __init__
+        auto-cache, so neither re-loads/re-sorts. Object/string columns are
+        cast to fixed-width unicode so they too can be memory-mapped.
+        """
+        out  = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        cols = list(obs_sorted.keys())
+        for k in cols:
+            arr = np.asarray(obs_sorted[k])
+            if arr.dtype == object:
+                arr = arr.astype(np.str_)
+            np.save(out / f'{k}.npy', arr)
+        np.save(out / '_obs_station_int.npy', np.asarray(obs_station_int).astype(np.int32))
+        np.save(out / '_unique_ids.npy', np.asarray(unique_ids).astype(np.str_))
+        (out / _SORTED_MANIFEST).write_text(json.dumps(
+            {'format': _SORTED_FORMAT, 'columns': cols, 'n_rows': int(len(obs_station_int))}
+        ))
+        return out
+
     @classmethod
     def prepare_sorted(cls, obs_npz_path: str | Path,
                        out_dir: str | Path) -> Path:
         """Convert insitu_land_clean.npz → a sorted, memory-mappable directory.
 
         Run ONCE (it pays the load + argsort the slow path does on every
-        construction), then set the config's insitu_obs_path to ``out_dir`` so
-        every subsequent run mmaps the pre-sorted columns instead. Object/string
-        columns are cast to fixed-width unicode so they too can be mmapped.
-
-        Returns the output directory path.
+        construction); afterwards either point the config at ``out_dir`` or
+        leave it at the .npz (a sibling ``<stem>_sorted`` cache is auto-detected
+        when ``data.cache_sorted_obs`` is on). Returns the output directory.
         """
-        obs_raw = np.load(Path(obs_npz_path), allow_pickle=True)
-        cols    = list(obs_raw.files)
-        unique_ids, inv = np.unique(obs_raw['primary_station_id'],
-                                    return_inverse=True)
-        order   = np.argsort(obs_raw['report_timestamp'])
-
-        out = Path(out_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        for k in cols:
-            arr = np.asarray(obs_raw[k])[order]
-            if arr.dtype == object:           # object strings aren't mmappable
-                arr = arr.astype(np.str_)
-            np.save(out / f'{k}.npy', arr)
-        np.save(out / '_obs_station_int.npy', inv[order].astype(np.int32))
-        np.save(out / '_unique_ids.npy', np.asarray(unique_ids).astype(np.str_))
-        (out / _SORTED_MANIFEST).write_text(json.dumps(
-            {'format': _SORTED_FORMAT, 'columns': cols, 'n_rows': int(order.size)}
-        ))
-        return out
+        obs, station_int, unique_ids = cls._load_npz_and_sort(Path(obs_npz_path))
+        return cls._write_sorted_dir(out_dir, obs, station_int, unique_ids)
 
     # ------------------------------------------------------------------
     # Internal factory used by filter_reliability and split

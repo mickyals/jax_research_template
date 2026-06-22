@@ -397,8 +397,8 @@ def evaluate(
     if checkpoint_dir is not None:
         config['trainer']['checkpoint_dir'] = str(checkpoint_dir)
 
-    # Coordinate convention (top-level) drives the datamodule encoding and the
-    # CLS position handling — must match training for the checkpoint to load.
+    # Coordinate convention (top-level) drives the datamodule encoding — must
+    # match training for the checkpoint to load.
     loc_enc = config.get('location_encoding',
                          config['data'].get('location_encoding', 'unit_circle'))
     config['data']['location_encoding'] = loc_enc

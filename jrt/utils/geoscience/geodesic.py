@@ -116,6 +116,35 @@ def haversine_np(
     return 2 * radius * np.arcsin(np.sqrt(a).clip(0.0, 1.0))
 
 
+def initial_bearing_np(
+    lat1_deg: np.ndarray,
+    lon1_deg: np.ndarray,
+    lat2_deg: np.ndarray,
+    lon2_deg: np.ndarray,
+) -> np.ndarray:
+    """Great-circle initial bearing (forward azimuth) from point 1 to point 2.
+
+    Closed-form spherical formula — degrees in ``[0, 360)``, 0 = north, 90 =
+    east. One-shot (no iteration), unlike ``vincenty_np``: for storm-centred
+    station maps at ≤1000 km the ellipsoidal correction is sub-degree, and it
+    matches the spherical ``haversine_np`` distance already used. Coincident
+    points return 0.
+
+    >>> round(float(initial_bearing_np(0.0, 0.0, 0.0, 1.0)), 1)
+    90.0
+    """
+    lat1_deg, lon1_deg, lat2_deg, lon2_deg = map(
+        np.asarray, (lat1_deg, lon1_deg, lat2_deg, lon2_deg)
+    )
+    lat1 = np.radians(lat1_deg)
+    lat2 = np.radians(lat2_deg)
+    dlon = np.radians(lon2_deg - lon1_deg)
+
+    x = np.sin(dlon) * np.cos(lat2)
+    y = np.cos(lat1) * np.sin(lat2) - np.sin(lat1) * np.cos(lat2) * np.cos(dlon)
+    return np.degrees(np.arctan2(x, y)) % 360.0
+
+
 @partial(jax.jit, static_argnames=("radius",))
 def haversine_jax(
     lat1_deg: jax.Array,

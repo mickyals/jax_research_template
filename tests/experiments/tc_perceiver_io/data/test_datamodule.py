@@ -782,3 +782,146 @@ class TestEvalDeterminism:
     def test_len_includes_flush_batch(self, tmp_path):
         loader = self._make_eval_loader(tmp_path, n_per_season=5)
         assert len(loader) == 3
+
+
+# ---------------------------------------------------------------------------
+# Per-split tc_fraction (train/val/test dict or scalar)
+# ---------------------------------------------------------------------------
+
+class TestPerSplitTcFraction:
+    """data.tc_fraction may be a scalar (all splits) or a {train,val,test} dict."""
+
+    def _dm(self):
+        from experiments.tc_perceiver_io.data.datamodule import TCDataModule
+        return TCDataModule()
+
+    def test_scalar_applies_to_all_splits(self):
+        dm = self._dm()
+        dm._tc_fraction = 0.3
+        for split in ('train', 'val', 'test'):
+            assert dm._tc_fraction_for(split) == 0.3
+
+    def test_dict_resolves_per_split(self):
+        dm = self._dm()
+        dm._tc_fraction = {'train': 0.1, 'val': 0.5, 'test': 0.5}
+        assert dm._tc_fraction_for('train') == 0.1
+        assert dm._tc_fraction_for('val')   == 0.5
+        assert dm._tc_fraction_for('test')  == 0.5
+
+    def test_dict_missing_split_defaults_half(self):
+        dm = self._dm()
+        dm._tc_fraction = {'train': 0.1}
+        assert dm._tc_fraction_for('val') == 0.5
+
+    def test_loaders_use_per_split_fraction(self, tmp_path):
+        from experiments.tc_perceiver_io.data.datamodule import TCDataModule
+        ib_p, ms_p, tc_times = _make_ibtracs(tmp_path, seasons=(2019, 2021, 2023))
+        obs_p, meta_p, _     = _make_insitu(tmp_path, tc_times[0], n_hours=60)
+        cfg = {
+            'ibtracs_path':     str(ib_p),
+            'multi_storm_path': str(ms_p),
+            'insitu_obs_path':  str(obs_p),
+            'insitu_meta_path': str(meta_p),
+            'max_stations': 8, 'min_stations': 1, 'batch_size': 4,
+            'tc_fraction': {'train': 0.1, 'val': 0.5, 'test': 0.5},
+            'split': {
+                'strategy': 'year',
+                'train': {'years': [2019]},
+                'val':   {'years': [2021]},
+                'test':  {'years': [2023]},
+            },
+        }
+        dm = TCDataModule.from_config(cfg)
+        # batch_size 4: train 0.1 → max(1, round(0.4)) = 1; val/test 0.5 → 2.
+        assert dm.train_loader()._tc_half == 1
+        assert dm.val_loader()._tc_half   == 2
+        assert dm.test_loader()._tc_half  == 2
+
+
+# ---------------------------------------------------------------------------
+# Spatial background sampling
+# ---------------------------------------------------------------------------
+
+class TestSpatialBackground:
+    """background_sampling='spatial' rejects draws with a storm too close,
+    instead of the basin-wide time-only pool exclusion ('time', the default)."""
+
+    _HOUR_NS = 3_600_000_000_000
+    # FOV pinned on the single fixture station/storm at (15, -75).
+    _FOV_LAT = (14.9, 15.1)
+    _FOV_LON = (-75.1, -74.9)
+
+    def _make_ds(self, tmp_path, bg_pool=None):
+        """Build (TCDataset, tc_times). bg_pool=None → use the storm times as the
+        background pool, so every draw coincides with an active storm in time."""
+        base_ns = 1_567_296_000_000_000_000
+        ib_p, ms_p, tc_times = _make_ibtracs(tmp_path, seasons=(2019,), n_per_season=6)
+        obs_p, meta_p, _ = _make_insitu(tmp_path, base_ns, n_hours=50)
+        ibtracs = IBTrACSDataset(ib_p, ms_p)
+        insitu  = InsituLandDataset(obs_p, meta_p)
+        if bg_pool is None:
+            bg_pool = np.asarray(tc_times, dtype=np.int64)
+        ds = TCDataset(
+            ibtracs=ibtracs, insitu=insitu,
+            radius_km=300.0, time_window_hours=3.0,
+            max_stations=4, min_stations=1,
+            background_timestamps=bg_pool,
+        )
+        return ds, tc_times
+
+    def _spatial_loader(self, ds):
+        return TCLoader(
+            ds, batch_size=4, tc_fraction=0.5, seed=0,
+            fov_lat=self._FOV_LAT, fov_lon=self._FOV_LON,
+            background_sampling='spatial',
+            storm_exclusion_radius_km=300.0,
+            storm_time_tol_ns=self._HOUR_NS,
+        )
+
+    def test_default_is_time_mode(self, tmp_path):
+        ds, _ = self._make_ds(tmp_path, bg_pool=np.array([0], dtype=np.int64))
+        loader = TCLoader(ds, batch_size=4, tc_fraction=0.5)
+        assert loader._background_sampling == 'time'
+
+    def test_spatial_requires_params(self, tmp_path):
+        ds, _ = self._make_ds(tmp_path, bg_pool=np.array([0], dtype=np.int64))
+        with pytest.raises(ValueError, match='spatial'):
+            TCLoader(ds, batch_size=4, tc_fraction=0.5,
+                     background_sampling='spatial')
+
+    def test_invalid_background_sampling_raises(self, tmp_path):
+        ds, _ = self._make_ds(tmp_path, bg_pool=np.array([0], dtype=np.int64))
+        with pytest.raises(ValueError, match='background_sampling'):
+            TCLoader(ds, batch_size=4, tc_fraction=0.5,
+                     background_sampling='nonsense')
+
+    def test_rejects_draws_when_storm_present(self, tmp_path):
+        # bg pool defaults to the storm timestamps; FOV on the storm → every draw
+        # is too close to an active storm, so spatial mode rejects them all.
+        ds, _ = self._make_ds(tmp_path)
+        buf, ok = self._spatial_loader(ds)._draw_background(np.random.default_rng(0))
+        assert ok is False
+        assert len(buf) == 0
+
+    def test_time_mode_accepts_same_draws(self, tmp_path):
+        # Same setup, but 'time' mode never consults storm proximity — the
+        # station exists at those timestamps so draws succeed.
+        ds, _ = self._make_ds(tmp_path)
+        loader = TCLoader(
+            ds, batch_size=4, tc_fraction=0.5, seed=0,
+            fov_lat=self._FOV_LAT, fov_lon=self._FOV_LON,
+            background_sampling='time')
+        buf, ok = loader._draw_background(np.random.default_rng(0))
+        assert ok is True
+        assert len(buf) == loader._bg_half
+
+    def test_spatial_accepts_draws_far_in_time(self, tmp_path):
+        # bg pool far in time from any storm → spatial check finds no storm at
+        # those times, so draws succeed (the pool is not over-pruned mid-season).
+        base_ns = 1_567_296_000_000_000_000
+        far_pool = np.array(
+            [base_ns + (40 + i) * self._HOUR_NS for i in range(8)], dtype=np.int64)
+        ds, _ = self._make_ds(tmp_path, bg_pool=far_pool)
+        buf, ok = self._spatial_loader(ds)._draw_background(np.random.default_rng(0))
+        assert ok is True
+        assert len(buf) == 4 // 2

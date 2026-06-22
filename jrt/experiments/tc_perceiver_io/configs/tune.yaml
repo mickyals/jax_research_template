@@ -167,11 +167,18 @@ data:
   # none | inverse_freq | sqrt_inverse_freq | effective_number | median_freq
   class_weight_scheme:    none
   class_weight_beta:      0.999
+  class_weight_normalize: true        # scale weights to mean 1.0 (cosmetic; see train.yaml)
 
   # --- Domain ---
   fov_lat:                [0.0,  30.0]
   fov_lon:                [-100.0, -45.0]
-  background_buffer_hours: 6.0
+
+  # --- Background (no-storm) sampling ---
+  # background_sampling unset → 'time' (default): the pool excludes any synoptic
+  # timestamp within background_buffer_hours of ANY active TC basin-wide. Set
+  # background_sampling: spatial (+ optional background_exclusion_radius_km) to
+  # validate draws by storm proximity instead — see train.yaml.
+  background_buffer_hours: 6.0        # time-mode: exclusion half-window around any TC obs
 
   # --- Coordinate encoding ---
   # Set at top level -- propagated here by tune.py. Do not set in this block.

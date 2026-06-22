@@ -17,6 +17,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
 from typing import Callable, Optional
@@ -465,6 +466,33 @@ def _print_token_summary(config: dict) -> None:
         print(f"  sequence    : up to {max_st} stations (padded)")
 
 
+def _background_count(data_cfg: dict, batch_size: int,
+                      steps_per_epoch: Optional[int], n_tc_total: int) -> int:
+    """Effective class-0 (background) sample count for class weighting.
+
+    Background is synthesised (random FOV point × pool timestamp), so unlike the
+    TC classes it has no fixed dataset count — its count for the effective-number
+    weighting is a hyperparameter. Resolution:
+      * explicit ``data.n_background`` wins;
+      * else the realized per-epoch sampling count ``steps_per_epoch × bg_half``
+        (random mode), which is what the model actually sees;
+      * else (sequential mode) the ratio-consistent count
+        ``n_tc_total × bg_half / tc_half`` so class 0 sits at the same TC:bg
+        ratio the loader produces.
+    """
+    n = data_cfg.get('n_background')
+    if n is not None:
+        return int(n)
+    tc_frac = data_cfg.get('tc_fraction', 0.5)
+    if isinstance(tc_frac, dict):
+        tc_frac = tc_frac.get('train', 0.5)
+    tc_half = max(1, round(batch_size * tc_frac))
+    bg_half = batch_size - tc_half
+    if steps_per_epoch:
+        return int(steps_per_epoch * bg_half)
+    return int(round(n_tc_total * bg_half / tc_half))
+
+
 def _resolve_run_dir(trainer_cfg: dict, experiment_dir: Path,
                      name: Optional[str] = None) -> Path:
     """Resolve the run directory, auto-incrementing under a run_group.
@@ -586,7 +614,7 @@ def train(config_path: str | Path, resume: bool = False,
     _resolve_schedule_steps(trainer_cfg)
 
     # location_encoding picks the coordinate convention for the datamodule's
-    # encoder. The model is coordinate-agnostic (Senseiver single projection of
+    # encoder. The model is coordinate-agnostic (a single projection of
     # whatever coords it is handed), so it is injected into the data block only.
     loc_enc = config.get('location_encoding', 'unit_circle')
     config['data']['location_encoding']  = loc_enc
@@ -669,17 +697,26 @@ def train(config_path: str | Path, resume: bool = False,
         n_classes = target_spec.n_classes
         counts = [int(manifest['train']['class_counts'].get(str(c), 0))
                   for c in range(n_classes)]
+        # Fold background (class 0) in as a real class with a count (its count is
+        # a hyperparameter — see _background_count) instead of pinning it at 1.0.
+        counts[0] = _background_count(
+            config['data'], trainer_cfg['batch_size'], steps_per_epoch,
+            n_tc_total=sum(counts))
         cw = class_weights_from_counts(
             counts,
-            scheme = cw_scheme,
-            beta   = config['data'].get('class_weight_beta', 0.999),
+            scheme    = cw_scheme,
+            beta      = config['data'].get('class_weight_beta', 0.999),
+            normalize = config['data'].get('class_weight_normalize', True),
         )
         loss_kwargs['class_weights'] = cw.tolist()
         manifest['train']['class_weights'] = {
-            'scheme':  cw_scheme,
-            'weights': cw.tolist(),
+            'scheme':           cw_scheme,
+            'n_background':     counts[0],
+            'effective_counts': counts,        # all 9, incl. folded-in background
+            'weights':          cw.tolist(),
         }
-        print(f"  class weighting [{cw_scheme}]: {np.round(cw, 3).tolist()}")
+        print(f"  class counts (incl. background) : {counts}")
+        print(f"  class weighting [{cw_scheme}]   : {np.round(cw, 3).tolist()}")
 
     metrics_fns = build_metrics_fns(
         loss        = trainer_cfg.get('loss', target_spec.loss),
@@ -817,6 +854,33 @@ def train(config_path: str | Path, resume: bool = False,
 # CLI
 # ---------------------------------------------------------------------------
 
+def _pin_gpu(cli_gpu: Optional[str], config_path: str | Path) -> None:
+    """Pin training to a single GPU via CUDA_VISIBLE_DEVICES.
+
+    JAX otherwise claims EVERY visible GPU and preallocates memory on each — not
+    what you want for single-device training on a shared multi-GPU box. The
+    device is resolved from ``--gpu``, else the config's top-level ``gpu`` field.
+    A ``CUDA_VISIBLE_DEVICES`` already set in the shell always wins.
+
+    Must run before the first JAX device op. JAX's GPU backend initialises
+    lazily (not at ``import jax``), so calling this at the top of ``__main__``,
+    before ``train()``, is sufficient. For an absolute guarantee, export
+    ``CUDA_VISIBLE_DEVICES`` in the shell instead.
+    """
+    if 'CUDA_VISIBLE_DEVICES' in os.environ:
+        return                                   # shell setting wins
+    gpu = cli_gpu
+    if gpu is None:
+        try:
+            with open(config_path, encoding='utf-8') as f:
+                gpu = yaml.safe_load(f).get('gpu')
+        except (OSError, yaml.YAMLError):
+            gpu = None
+    if gpu is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
+        print(f"  [device] CUDA_VISIBLE_DEVICES={gpu} (single-GPU pin)")
+
+
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Train TCPerceiverIO for tc_perceiver_io experiment."
@@ -825,6 +889,14 @@ def _parse_args(argv=None):
         "config",
         type=str,
         help="Path to YAML config file.",
+    )
+    parser.add_argument(
+        "--gpu",
+        type=str,
+        default=None,
+        help="GPU index to pin to (sets CUDA_VISIBLE_DEVICES; overrides the "
+             "config's top-level `gpu`). On a multi-GPU box this stops JAX from "
+             "grabbing and preallocating memory on every device.",
     )
     parser.add_argument(
         "--resume",
@@ -845,4 +917,5 @@ def _parse_args(argv=None):
 
 if __name__ == "__main__":
     args = _parse_args()
+    _pin_gpu(args.gpu, args.config)      # before any JAX device op
     train(args.config, resume=args.resume, name=args.name)

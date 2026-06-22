@@ -109,10 +109,38 @@
         "max_stations":           { "type": "integer", "minimum": 1 },
         "min_stations":           { "type": "integer", "minimum": 1 },
         "station_selection":      { "type": "string", "enum": ["nearest", "random"], "description": "How to pick max_stations when a sample has more candidates: 'nearest' (default, deterministic) or 'random' (train-only view augmentation; val/test always nearest). Only bites when n_available > max_stations." },
+        "cache_sorted_obs":       { "type": "boolean", "description": "On a slow .npz load, build (and reuse) a sibling <stem>_sorted/ memory-mappable cache so future runs start in seconds. Default true." },
         "batch_size":             { "type": "integer", "minimum": 2 },
-        "tc_fraction":            { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+        "tc_fraction": {
+          "description": "Fraction of each batch drawn as TC samples (rest = background). A single number applies to all splits, or a {train, val, test} object sets it per split (e.g. balanced 0.5 val/test for honest metrics while train sits lower). A split absent from the object defaults to 0.5.",
+          "oneOf": [
+            { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "train": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+                "val":   { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+                "test":  { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 }
+              }
+            }
+          ]
+        },
+        "background_sampling": {
+          "type": "string",
+          "enum": ["time", "spatial"],
+          "description": "How background (no-storm) samples are selected. 'time' (default): the pool excludes any synoptic timestamp within background_buffer_hours of ANY active TC basin-wide (shrinks sharply in peak season). 'spatial': every grid timestamp is kept and each draw is background iff no storm is within background_exclusion_radius_km of the point at ±background_buffer_hours."
+        },
+        "background_exclusion_radius_km": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0,
+          "description": "Spatial mode only: a background draw is rejected if a storm is within this radius of the point at the draw time. null/omit → radius_km (a storm within the station-collection radius would put storm-affected stations in the sample)."
+        },
         "class_weight_scheme":    { "type": "string", "enum": ["none", "inverse_freq", "sqrt_inverse_freq", "effective_number", "median_freq"], "description": "If not 'none', per-class loss weights are computed at setup from the train split's class counts and injected as loss_kwargs.class_weights (stored back in the manifest). An explicit trainer.loss_kwargs.class_weights overrides this." },
-        "class_weight_beta":      { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "description": "Effective-number hyperparameter (class_weight_scheme=effective_number only); near 1, e.g. 0.99/0.999/0.9999." },
+        "class_weight_beta":      { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "description": "Effective-number hyperparameter (class_weight_scheme=effective_number only); near 1, e.g. 0.99/0.999/0.9999. Higher = wider spread between common and rare classes." },
+        "class_weight_normalize": { "type": "boolean", "description": "Scale the present-class weights to mean 1.0 (default true). Cosmetic for training — cross_entropy_loss reduces by the weight sum, so this only rescales the printed/manifest weight vector, not the gradient. Set false to record the raw scheme values (e.g. raw Cui effective-number weights)." },
+        "n_background":           { "type": ["integer", "null"], "minimum": 1, "description": "Effective class-0 (background) sample count folded into class weighting. Background is synthesised (no fixed count), so this is a hyperparameter. null/omit → default to the realized per-epoch sampling count (steps_per_epoch x bg_half)." },
         "fov_lat":                { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
         "fov_lon":                { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
         "background_buffer_hours":{ "type": "number", "minimum": 0 },
@@ -191,6 +219,11 @@
       "type": "integer",
       "minimum": 0,
       "description": "Single seed for Trainer (model init, dropout) and TCLoader (shuffle)."
+    },
+
+    "gpu": {
+      "type": ["integer", "string"],
+      "description": "GPU index to pin training to (sets CUDA_VISIBLE_DEVICES before JAX inits). On multi-GPU boxes this stops JAX claiming + preallocating every device. --gpu overrides; a shell CUDA_VISIBLE_DEVICES wins."
     },
 
     "trainer": {

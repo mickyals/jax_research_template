@@ -23,17 +23,28 @@ Batch format
 
 Class balance
 -------------
-tc_fraction controls the TC share per batch (default 0.5). Set it above
-0.5 to oversample storms and counteract the natural bias toward background
-in the data (~10 K TC rows vs millions of background timestamps).
+tc_fraction controls the TC share per batch. It is either a scalar (all splits)
+or a {train, val, test} mapping resolved by _tc_fraction_for — typically a low
+train fraction with a balanced 0.5 val/test so eval metrics are honest and
+comparable. Raising it oversamples storms against the natural bias toward
+background (~10 K TC rows vs millions of background timestamps).
 
 tc_fraction oversampling and a class-balancing loss (data.class_weight_scheme)
 attack the same imbalance, so running both stacks the corrections. When a
 weighting scheme is active, the TRAIN loader drops the oversampling and reverts
 to natural prevalence — background is recorded as label 0 in the split manifest
-(its pool size) and the per-class weights do the balancing. val/test keep the
+(its pool size) and the per-class weights do the balancing. val/test keep their
 configured tc_fraction so eval composition stays stable. See _train_tc_fraction
 and setup().
+
+Background cleanliness
+----------------------
+data.background_sampling selects how a (point, time) draw is judged storm-free:
+'time' (default) bakes a basin-wide near-TC time exclusion into the pool (see
+_build_background_pool); 'spatial' keeps every synoptic grid timestamp and
+validates each draw by storm proximity (TCDataset.storm_within) — background iff
+no storm within background_exclusion_radius_km at ±background_buffer_hours. See
+TCLoader and setup().
 """
 
 from __future__ import annotations
@@ -75,12 +86,22 @@ def _build_background_pool(
     ibtracs:             IBTrACSDataset,
     exclude_multi_times: Optional[np.ndarray] = None,
     buffer_hours:        float = 6.0,
+    exclude_near_tc:     bool  = True,
 ) -> np.ndarray:
-    """Return synoptic-hour InsituLand timestamps clear of any active TC.
+    """Return synoptic-hour InsituLand timestamps for background draws.
 
     Only timestamps on the 3-hourly synoptic grid survive (see
-    SYNOPTIC_STEP_NS); within those, any timestamp within buffer_hours of
-    an IBTrACS observation (or in the multi-storm blackout set) is removed.
+    SYNOPTIC_STEP_NS); within those, the multi-storm blackout set is always
+    removed. The basin-wide near-TC time exclusion is OPTIONAL:
+
+      * ``exclude_near_tc=True`` (default, ``background_sampling='time'``) drops
+        any timestamp within buffer_hours of an IBTrACS observation — a
+        basin-wide, time-only exclusion. In peak season (a storm almost always
+        active *somewhere*) this shrinks the pool sharply.
+      * ``exclude_near_tc=False`` (``background_sampling='spatial'``) keeps every
+        grid timestamp; cleanliness is then decided per draw by spatial
+        proximity (TCDataset.storm_within) rather than basin-wide by time, so a
+        point far from every active storm stays a valid background even mid-season.
 
     Parameters
     ----------
@@ -89,19 +110,25 @@ def _build_background_pool(
     exclude_multi_times : int64 array, optional
         Additional timestamps to exclude (multi-storm blackout set).
     buffer_hours : float
-        Timestamps within this many hours of any IBTrACS ISO_TIME are excluded.
+        Timestamps within this many hours of any IBTrACS ISO_TIME are excluded
+        (only when ``exclude_near_tc`` is True).
+    exclude_near_tc : bool
+        Apply the basin-wide near-TC time exclusion (default True).
 
     Returns
     -------
     np.ndarray  int64 Unix-ns timestamps
     """
     all_ts = np.unique(insitu.timestamps)
-    tc_ts  = np.sort(ibtracs['ISO_TIME'])
-    buf_ns = int(buffer_hours * 3600 * 1e9)
 
-    lo = np.searchsorted(tc_ts, all_ts - buf_ns, side='left')
-    hi = np.searchsorted(tc_ts, all_ts + buf_ns, side='right')
-    near_tc = (hi - lo) > 0
+    if exclude_near_tc:
+        tc_ts  = np.sort(ibtracs['ISO_TIME'])
+        buf_ns = int(buffer_hours * 3600 * 1e9)
+        lo = np.searchsorted(tc_ts, all_ts - buf_ns, side='left')
+        hi = np.searchsorted(tc_ts, all_ts + buf_ns, side='right')
+        near_tc = (hi - lo) > 0
+    else:
+        near_tc = np.zeros(len(all_ts), dtype=bool)
 
     if exclude_multi_times is not None and len(exclude_multi_times) > 0:
         multi_set = set(int(t) for t in exclude_multi_times)
@@ -245,12 +272,24 @@ class TCLoader:
         station_selection:  str   = 'nearest',
         bg_refresh_every:   int   = 1,
         bg_buffer_size:     Optional[int] = None,
+        background_sampling:        str   = 'time',
+        storm_exclusion_radius_km:  Optional[float] = None,
+        storm_time_tol_ns:          Optional[int]   = None,
     ) -> None:
         if not (0.0 < tc_fraction < 1.0):
             raise ValueError(f"tc_fraction must be in (0, 1), got {tc_fraction}")
         if bg_refresh_every < 1:
             raise ValueError(
                 f"bg_refresh_every must be >= 1, got {bg_refresh_every}")
+        if background_sampling not in ('time', 'spatial'):
+            raise ValueError(
+                f"background_sampling must be 'time' or 'spatial', "
+                f"got {background_sampling!r}")
+        if background_sampling == 'spatial' and (
+                storm_exclusion_radius_km is None or storm_time_tol_ns is None):
+            raise ValueError(
+                "background_sampling='spatial' requires "
+                "storm_exclusion_radius_km and storm_time_tol_ns.")
         self._dataset            = dataset
         self._batch_size         = batch_size
         self._tc_half            = max(1, round(batch_size * tc_fraction))
@@ -280,6 +319,14 @@ class TCLoader:
         # augmentation). Applied to BOTH TC and background draws so the two
         # channels share the same selection statistics (no shortcut).
         self._station_selection  = station_selection
+        # Background sampling policy: 'time' (basin-wide near-TC time exclusion
+        # baked into the pool) or 'spatial' (a draw is background iff no storm is
+        # within storm_exclusion_radius_km at ±storm_time_tol_ns of the point/
+        # time — see TCDataset.storm_within). Spatial validation gates BOTH the
+        # random train draws and the frozen eval set.
+        self._background_sampling   = background_sampling
+        self._storm_excl_radius_km  = storm_exclusion_radius_km
+        self._storm_time_tol_ns     = storm_time_tol_ns
         self._frozen_bg: Optional[list[dict]] = None
         self._epoch              = 0
 
@@ -296,13 +343,26 @@ class TCLoader:
             )
         return pool
 
+    def _storm_blocks(self, lat: float, lon: float, ts: int) -> bool:
+        """True when spatial mode rejects this (point, time) — a storm is too
+        close. Always False in 'time' mode (the pool already did the exclusion)."""
+        if self._background_sampling != 'spatial':
+            return False
+        return self._dataset.storm_within(
+            lat, lon, ts,
+            radius_km   = self._storm_excl_radius_km,
+            time_tol_ns = self._storm_time_tol_ns,
+        )
+
     def _draw_background(
         self, rng: np.random.Generator, n: Optional[int] = None,
     ) -> tuple[list[dict], bool]:
         """Draw n fresh background samples (default self._bg_half).
 
         Returns (buf, success). Position policy: uniform in the FOV box;
-        timestamp drawn randomly from the synoptic background pool.
+        timestamp drawn randomly from the synoptic background pool. In spatial
+        mode a drawn (point, time) with a storm too close is rejected (a try,
+        not a sample) — see _storm_blocks.
         """
         count    = self._bg_half if n is None else n
         pool     = self._background_pool()
@@ -321,6 +381,8 @@ class TCLoader:
             lat = float(rng.uniform(self._fov_lat[0], self._fov_lat[1]))
             lon = float(rng.uniform(self._fov_lon[0], self._fov_lon[1]))
             ts  = int(rng.choice(pool))
+            if self._storm_blocks(lat, lon, ts):
+                continue
             bg  = self._dataset.get_background_sample(
                 lat, lon, ts,
                 station_selection=self._station_selection, rng=rng)
@@ -348,7 +410,10 @@ class TCLoader:
 
         key    = jax.random.fold_in(create_rng(self._base_seed),
                                     self._FROZEN_BG_FOLD)
-        n_draw = max(2 * n_needed, 16)                # over-draw for rejection
+        # Over-draw for rejection (< min_stations, and storm-too-close in
+        # spatial mode — which rejects more, so over-draw harder there).
+        overdraw = 4 if self._background_sampling == 'spatial' else 2
+        n_draw   = max(overdraw * n_needed, 16)
         lons, lats = lhs_sample_regional(
             key, n_draw, lon_bounds=self._fov_lon, lat_bounds=self._fov_lat,
         )
@@ -359,6 +424,8 @@ class TCLoader:
         for lat, lon, ts in zip(np.asarray(lats), np.asarray(lons), tss):
             if len(frozen) == n_needed:
                 break
+            if self._storm_blocks(float(lat), float(lon), int(ts)):
+                continue
             bg = self._dataset.get_background_sample(
                 float(lat), float(lon), int(ts),
             )
@@ -551,6 +618,12 @@ class TCDataModule(BaseDataModule):
     _bg_refresh_every: int = 1
     _bg_buffer_size: Optional[int] = None
 
+    # Background sampling policy defaults (set in setup()); class defaults keep
+    # stub instances that bypass setup on the legacy time-only behaviour.
+    _bg_sampling: str = 'time'
+    _bg_excl_radius_km: Optional[float] = None
+    _bg_time_tol_ns: int = 0
+
     @classmethod
     def from_config(cls, config: dict) -> TCDataModule:
         dm = cls()
@@ -577,7 +650,19 @@ class TCDataModule(BaseDataModule):
         self._input_spec         = resolve_input(config)
 
         self._batch_size         = int(config.get('batch_size', 64))
-        self._tc_fraction        = float(config.get('tc_fraction', 0.5))
+        # tc_fraction may be a scalar (all splits) or a {train, val, test} dict
+        # (e.g. natural-ish train + balanced val/test for honest eval metrics).
+        # Stored raw; _tc_fraction_for(split) resolves either form.
+        self._tc_fraction        = config.get('tc_fraction', 0.5)
+        # Background sampling policy (see _build_background_pool / TCLoader):
+        # 'time' (default) bakes a basin-wide near-TC time exclusion into the
+        # pool; 'spatial' keeps every grid timestamp and validates each draw by
+        # storm proximity (no storm within background_exclusion_radius_km — null
+        # → radius_km — at ±background_buffer_hours of the point/time).
+        self._bg_sampling        = str(config.get('background_sampling', 'time'))
+        _excl                    = config.get('background_exclusion_radius_km')
+        self._bg_excl_radius_km  = float(_excl) if _excl else radius_km
+        self._bg_time_tol_ns     = int(buf_hours * 3600 * 1e9)
         # A class-balancing loss and tc_fraction oversampling both correct the
         # same imbalance; running both stacks the corrections. When weighting is
         # on, the train loader reverts to natural prevalence and the weights do
@@ -604,7 +689,11 @@ class TCDataModule(BaseDataModule):
         self._target_spec        = resolve_target(config.get('target'))
 
         ibtracs_full = IBTrACSDataset(ibtracs_path, multi_path, sid_meta_path)
-        insitu_full  = InsituLandDataset(obs_path, meta_path)
+        # cache_sorted: on a slow .npz load, build (and reuse) a sibling
+        # mmap-able sorted cache so future runs start in seconds (default on).
+        insitu_full  = InsituLandDataset(
+            obs_path, meta_path,
+            cache_sorted=bool(config.get('cache_sorted_obs', True)))
         if reliability:
             insitu_full = insitu_full.filter_reliability(reliability)
 
@@ -624,6 +713,9 @@ class TCDataModule(BaseDataModule):
                 ibtracs=ib,
                 exclude_multi_times=multi_times,
                 buffer_hours=buf_hours,
+                # Spatial mode keeps every grid timestamp and validates draws by
+                # storm proximity instead of basin-wide time exclusion.
+                exclude_near_tc=(self._bg_sampling != 'spatial'),
             )
             # Background (label 0) is a real class but never appears as an
             # IBTrACS row, so resolve_splits leaves its count at 0. Record its
@@ -649,6 +741,19 @@ class TCDataModule(BaseDataModule):
     # Loaders
     # ------------------------------------------------------------------
 
+    def _tc_fraction_for(self, split: str) -> float:
+        """Resolve data.tc_fraction for one split.
+
+        Accepts a scalar (applies to every split) or a {train, val, test} dict;
+        a split missing from the dict falls back to 0.5. val/test typically use
+        a balanced 0.5 for honest metrics while train sits lower (or reverts to
+        natural prevalence under class weighting — see _train_tc_fraction).
+        """
+        tf = self._tc_fraction
+        if isinstance(tf, dict):
+            return float(tf.get(split, 0.5))
+        return float(tf)
+
     def _train_tc_fraction(self) -> float:
         """TC fraction per batch for the TRAIN loader.
 
@@ -667,12 +772,12 @@ class TCDataModule(BaseDataModule):
         the natural fraction is undefined (no background or no TC in the split).
         """
         if not self._cw_active:
-            return self._tc_fraction
+            return self._tc_fraction_for('train')
         counts = self._manifest['train']['class_counts']
         n_bg = int(counts.get('0', 0))
         n_tc = sum(int(v) for k, v in counts.items() if k != '0')
         if n_bg == 0 or n_tc == 0:
-            return self._tc_fraction
+            return self._tc_fraction_for('train')
         return n_tc / (n_tc + n_bg)
 
     def train_loader(
@@ -695,6 +800,9 @@ class TCDataModule(BaseDataModule):
             station_selection  = self._station_selection,   # train-only random views
             bg_refresh_every   = self._bg_refresh_every,
             bg_buffer_size     = self._bg_buffer_size,
+            background_sampling       = self._bg_sampling,
+            storm_exclusion_radius_km = self._bg_excl_radius_km,
+            storm_time_tol_ns         = self._bg_time_tol_ns,
         )
 
     def val_loader(
@@ -707,12 +815,15 @@ class TCDataModule(BaseDataModule):
         return TCLoader(
             self._val_ds,
             batch_size or self._batch_size,
-            tc_fraction=self._tc_fraction,
+            tc_fraction=self._tc_fraction_for('val'),
             shuffle=shuffle,
             seed=0,
             fov_lat=self._fov_lat,
             fov_lon=self._fov_lon,
             freeze_backgrounds=True,
+            background_sampling       = self._bg_sampling,
+            storm_exclusion_radius_km = self._bg_excl_radius_km,
+            storm_time_tol_ns         = self._bg_time_tol_ns,
         )
 
     def test_loader(
@@ -724,12 +835,15 @@ class TCDataModule(BaseDataModule):
         return TCLoader(
             self._test_ds,
             batch_size or self._batch_size,
-            tc_fraction=self._tc_fraction,
+            tc_fraction=self._tc_fraction_for('test'),
             shuffle=shuffle,
             seed=0,
             fov_lat=self._fov_lat,
             fov_lon=self._fov_lon,
             freeze_backgrounds=True,
+            background_sampling       = self._bg_sampling,
+            storm_exclusion_radius_km = self._bg_excl_radius_km,
+            storm_time_tol_ns         = self._bg_time_tol_ns,
         )
 
     # ------------------------------------------------------------------
@@ -850,7 +964,7 @@ class TCDataModule(BaseDataModule):
             # Train reverts to natural prevalence when class weighting is on;
             # val/test always use the configured tc_fraction (see
             # _train_tc_fraction).
-            frac    = self._train_tc_fraction() if name == 'train' else self._tc_fraction
+            frac    = self._train_tc_fraction() if name == 'train' else self._tc_fraction_for(name)
             tc_half = max(1, round(self._batch_size * frac))
             if name == 'train' and steps_per_epoch is not None:
                 # Random mode — epoch length is exact and controlled by config
