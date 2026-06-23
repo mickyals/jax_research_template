@@ -30,6 +30,7 @@ import yaml
 from experiments.tc_perceiver_io.data.datamodule import TCDataModule
 from experiments.tc_perceiver_io.train.evaluate import (
     collect_predictions,
+    build_prediction_outputs,
     confusion_matrix,
     domain_latlon_for_sample,
     per_class_metrics,
@@ -42,7 +43,6 @@ from experiments.tc_perceiver_io.plotting.plotting import (
     plot_confusion_matrix,
     plot_pr_curve,
     plot_pr_curves_per_class,
-    plot_per_class_prediction_maps,
 )
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
@@ -61,6 +61,16 @@ from utils.jax_core.diagnostics import (
     visualize_activations,
     plot_loss_landscape,
 )
+
+
+def _should_run(epoch: int, every_n_epochs: int) -> bool:
+    """Whether an epoch-cadence callback fires this epoch.
+
+    Shared gate for the epoch-level callbacks (attention figures, gradient
+    histograms, eval plots): True when ``every_n_epochs`` is positive and the
+    epoch is a multiple of it. ``0`` (or negative) disables the callback.
+    """
+    return every_n_epochs > 0 and epoch % every_n_epochs == 0
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +184,7 @@ def _make_attn_figure_callback(
         return logits, read, proc, dec
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
-        if fig_every <= 0 or epoch % fig_every != 0:
+        if not _should_run(epoch, fig_every):
             return
         logits, read, proc, dec = _attn(state.params)
         true_c = class_names[int(probe_batch['y'][0])]
@@ -295,7 +305,7 @@ def _make_grad_flow_callback(
             )
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
-        if every_n_epochs <= 0 or epoch % every_n_epochs != 0:
+        if not _should_run(epoch, every_n_epochs):
             return
         _log(state.params, global_step)
 
@@ -314,6 +324,7 @@ def _make_eval_plots_callback(
     fov_lat=None,
     fov_lon=None,
     geo: bool = False,
+    csv_dir=None,
 ) -> Callable[[TrainState, int, int], None]:
     """Return an epoch-level callback that logs confusion / per-class figures
     and full-set scalar metrics under ``<prefix>/...``.
@@ -339,7 +350,7 @@ def _make_eval_plots_callback(
         end-of-training pass).
     """
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
-        if every_n_epochs <= 0 or epoch % every_n_epochs != 0:
+        if not _should_run(epoch, every_n_epochs):
             return
 
         variables = {'params': state.params}
@@ -384,18 +395,23 @@ def _make_eval_plots_callback(
         logger.log_figure(f'{prefix}/pr_curve',           fig_pr,     step=global_step)
         logger.log_figure(f'{prefix}/pr_curves_per_class', fig_pr_cls, step=global_step)
 
-        # Spatial classification maps over the FOV (one per true class, coloured
-        # by prediction). Opt-in (spatial_maps) — used for the end-of-train TEST
-        # pass so the wandb test/ section shows WHERE the model classifies each
-        # class well. Needs the per-sample query positions from the loader meta.
-        if spatial_maps and meta is not None and 'query_lat' in meta:
-            for name, fig_sp in plot_per_class_prediction_maps(
-                meta['query_lat'], meta['query_lon'], labels, preds, class_names,
-                fov_lat=fov_lat, fov_lon=fov_lon, geo=geo,
-                n_classes=len(class_names),
-            ).items():
+        # Per-sample table + per-class spatial maps from ONE source (the maps
+        # derive from the table's own columns — see build_prediction_outputs),
+        # so the logged CSV and the maps describe the same rows. Both are opt-in
+        # and used for the end-of-train TEST pass, giving the wandb test/ section
+        # the full study table + WHERE the model classifies each class well.
+        if spatial_maps or csv_dir is not None:
+            table, spatial_figs = build_prediction_outputs(
+                preds, labels, logits, meta, class_names,
+                fov_lat=fov_lat, fov_lon=fov_lon, geo=geo, make_maps=spatial_maps)
+            for name, fig_sp in spatial_figs.items():
                 logger.log_figure(f'{prefix}/spatial_pred/{name}', fig_sp,
                                   step=global_step)
+            if csv_dir is not None:
+                csv_path = Path(csv_dir) / f'{prefix}_per_sample.csv'
+                table.to_csv(csv_path, index=False)
+                logger.log_artifact(f'{prefix}_per_sample', csv_path,
+                                    artifact_type='predictions')
 
     return callback
 
@@ -865,6 +881,7 @@ def train(config_path: str | Path, resume: bool = False,
         fov_lat=config['data'].get('fov_lat'),
         fov_lon=config['data'].get('fov_lon'),
         geo=bool(config['data'].get('eval_geo_maps', False)),
+        csv_dir=run_dir,
     )(best_state, epoch=0, global_step=int(best_state.step))
 
     # Finalize logger here, after test(), so test metrics are logged before

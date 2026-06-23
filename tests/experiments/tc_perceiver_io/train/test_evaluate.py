@@ -31,6 +31,8 @@ from experiments.tc_perceiver_io.train.evaluate import (
     confusion_matrix,
     per_class_metrics,
     per_storm_metrics,
+    per_sample_table,
+    build_prediction_outputs,
     print_report,
 )
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
@@ -391,3 +393,128 @@ class TestPrintReport:
         out = capsys.readouterr().out
         for name in metrics_fns:
             assert f'val/{name}' in out
+
+
+# ---------------------------------------------------------------------------
+# Per-sample classification table
+# ---------------------------------------------------------------------------
+
+class TestPerSampleTable:
+
+    _NAMES = ['Background', 'Disturbance', 'Depression', 'Storm',
+              'Cat1', 'Cat2', 'Cat3', 'Cat4', 'Cat5']
+
+    def _inputs(self, n=5):
+        rng    = np.random.default_rng(0)
+        preds  = np.array([0, 4, 2, 0, 8])[:n]
+        labels = np.array([0, 4, 3, 1, 8])[:n]
+        logits = rng.standard_normal((n, 9)).astype(np.float32)
+        meta = {
+            'sid':         ['2019A', None, '2019B', None, '2020C'][:n],
+            'iso_time':    np.arange(n, dtype=np.int64) * 10_800_000_000_000
+                           + 1_567_296_000_000_000_000,
+            'query_lat':   np.linspace(5, 25, n).astype(np.float32),
+            'query_lon':   np.linspace(-90, -55, n).astype(np.float32),
+            'n_used':      np.array([3, 7, 1, 9, 4])[:n].astype(np.int32),
+            'n_available': np.array([5, 9, 1, 12, 6])[:n].astype(np.int32),
+        }
+        return preds, labels, logits, meta
+
+    def test_columns_and_rows(self):
+        preds, labels, logits, meta = self._inputs()
+        df = per_sample_table(preds, labels, logits, meta, self._NAMES)
+        assert len(df) == 5
+        for c in ('sid', 'iso_time', 'query_lat', 'query_lon', 'true',
+                  'true_name', 'pred', 'pred_name', 'correct', 'max_prob',
+                  'p_true', 'n_used', 'n_available'):
+            assert c in df.columns
+
+    def test_correct_and_names(self):
+        preds, labels, logits, meta = self._inputs()
+        df = per_sample_table(preds, labels, logits, meta, self._NAMES)
+        assert df['correct'].tolist() == [True, True, False, False, True]
+        assert df['true_name'].iloc[1] == 'Cat1'
+        assert df['pred_name'].iloc[2] == 'Depression'
+        # background sid (None) is filled for readability
+        assert df['sid'].iloc[1] == 'background'
+
+    def test_probs_in_range(self):
+        preds, labels, logits, meta = self._inputs()
+        df = per_sample_table(preds, labels, logits, meta, self._NAMES)
+        assert (df['max_prob'] >= df['p_true'] - 1e-9).all()
+        assert ((df['max_prob'] >= 0) & (df['max_prob'] <= 1)).all()
+
+    def test_full_per_class_distribution(self):
+        preds, labels, logits, meta = self._inputs()
+        df = per_sample_table(preds, labels, logits, meta, self._NAMES)
+        pcols = [f"p_{n.replace(' ', '_')}" for n in self._NAMES]
+        assert all(c in df.columns for c in pcols)        # one column per class
+        row_sums = df[pcols].to_numpy().sum(axis=1)
+        assert np.allclose(row_sums, 1.0, atol=1e-9)      # a proper distribution
+        # max_prob equals the row-wise max of the per-class columns
+        assert np.allclose(df['max_prob'].to_numpy(),
+                           df[pcols].to_numpy().max(axis=1))
+
+    def test_handles_missing_meta(self):
+        preds, labels, logits, _ = self._inputs()
+        df = per_sample_table(preds, labels, logits, None, self._NAMES)
+        assert len(df) == 5
+        assert 'true_name' in df.columns
+
+
+class TestBuildPredictionOutputs:
+    """One source feeds both the CSV table and the spatial maps."""
+
+    _NAMES = ['Background', 'Disturbance', 'Depression', 'Storm',
+              'Cat1', 'Cat2', 'Cat3', 'Cat4', 'Cat5']
+
+    def _inputs(self, n=6):
+        rng    = np.random.default_rng(2)
+        preds  = np.array([0, 4, 2, 0, 8, 1])[:n]
+        labels = np.array([0, 4, 3, 1, 8, 1])[:n]
+        logits = rng.standard_normal((n, 9)).astype(np.float32)
+        meta = {
+            'sid':       ['A', None, 'B', None, 'C', 'D'][:n],
+            'query_lat': np.linspace(5, 25, n).astype(np.float32),
+            'query_lon': np.linspace(-90, -55, n).astype(np.float32),
+        }
+        return preds, labels, logits, meta
+
+    def test_returns_table_and_maps(self):
+        import matplotlib
+        matplotlib.use('Agg')
+        import pandas as pd
+        preds, labels, logits, meta = self._inputs()
+        table, figs = build_prediction_outputs(
+            preds, labels, logits, meta, self._NAMES,
+            fov_lat=[0, 30], fov_lon=[-100, -45])
+        assert isinstance(table, pd.DataFrame) and len(table) == 6
+        # one map per present TRUE class (skips absent)
+        assert set(figs) == {self._NAMES[c] for c in set(labels.tolist())}
+
+    def test_maps_match_table_rows(self):
+        # The maps are derived from the table, so a true-class panel's point
+        # count equals that class's row count in the table.
+        preds, labels, logits, meta = self._inputs()
+        table, figs = build_prediction_outputs(
+            preds, labels, logits, meta, self._NAMES)
+        for c, name in enumerate(self._NAMES):
+            if name in figs:
+                n_rows = int((table['true'] == c).sum())
+                # scatter collection length on the map's axes
+                ax = figs[name].axes[0]
+                n_pts = sum(len(col.get_offsets()) for col in ax.collections)
+                assert n_pts == n_rows
+
+    def test_make_maps_false_skips_figs(self):
+        preds, labels, logits, meta = self._inputs()
+        table, figs = build_prediction_outputs(
+            preds, labels, logits, meta, self._NAMES, make_maps=False)
+        assert figs == {}
+        assert len(table) == 6
+
+    def test_no_positions_no_maps(self):
+        preds, labels, logits, _ = self._inputs()
+        table, figs = build_prediction_outputs(
+            preds, labels, logits, {'sid': ['A'] * 6}, self._NAMES)
+        assert figs == {}
