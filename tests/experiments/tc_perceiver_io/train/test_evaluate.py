@@ -33,6 +33,7 @@ from experiments.tc_perceiver_io.train.evaluate import (
     per_storm_metrics,
     per_sample_table,
     build_prediction_outputs,
+    build_eval_figures,
     print_report,
 )
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
@@ -518,3 +519,42 @@ class TestBuildPredictionOutputs:
         table, figs = build_prediction_outputs(
             preds, labels, logits, {'sid': ['A'] * 6}, self._NAMES)
         assert figs == {}
+
+
+class TestBuildEvalFigures:
+    """Shared figure bundle for train.py (wandb) + evaluate.py (disk)."""
+
+    _NAMES = ['Background', 'Disturbance', 'Depression', 'Storm',
+              'Cat1', 'Cat2', 'Cat3', 'Cat4', 'Cat5']
+
+    def _inputs(self, n=8):
+        import matplotlib
+        matplotlib.use('Agg')
+        rng    = np.random.default_rng(3)
+        preds  = rng.integers(0, 9, n)
+        labels = rng.integers(0, 9, n)
+        logits = rng.standard_normal((n, 9)).astype(np.float32)
+        meta = {'sid': ['A'] * n,
+                'query_lat': rng.uniform(0, 30, n).astype(np.float32),
+                'query_lon': rng.uniform(-100, -45, n).astype(np.float32)}
+        return preds, labels, logits, meta
+
+    def test_returns_core_figs_and_table(self):
+        import pandas as pd
+        preds, labels, logits, meta = self._inputs()
+        figs, table = build_eval_figures(
+            preds, labels, logits, meta, self._NAMES,
+            fov_lat=[0, 30], fov_lon=[-100, -45], make_spatial=True)
+        for tag in ('confusion_norm', 'confusion_counts', 'per_class_metrics',
+                    'pr_curve', 'pr_curves_per_class'):
+            assert tag in figs
+        # spatial maps present (one per present true class)
+        assert any(t.startswith('spatial_pred/') for t in figs)
+        assert isinstance(table, pd.DataFrame) and len(table) == 8
+
+    def test_make_spatial_false_drops_maps_keeps_core(self):
+        preds, labels, logits, meta = self._inputs()
+        figs, _ = build_eval_figures(
+            preds, labels, logits, meta, self._NAMES, make_spatial=False)
+        assert not any(t.startswith('spatial_pred/') for t in figs)
+        assert 'confusion_norm' in figs

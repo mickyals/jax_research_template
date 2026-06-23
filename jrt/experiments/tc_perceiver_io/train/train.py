@@ -30,28 +30,21 @@ import yaml
 from experiments.tc_perceiver_io.data.datamodule import TCDataModule
 from experiments.tc_perceiver_io.train.evaluate import (
     collect_predictions,
-    build_prediction_outputs,
-    confusion_matrix,
+    build_eval_figures,
     domain_latlon_for_sample,
-    per_class_metrics,
+    softmax_attn,
 )
 from experiments.tc_perceiver_io.plotting.plotting import (
     plot_attention_geographic,
     plot_attention_matrix_grid,
     plot_decoder_query,
-    plot_class_metrics,
-    plot_confusion_matrix,
-    plot_pr_curve,
-    plot_pr_curves_per_class,
 )
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
 from datasets.class_weights import class_weights_from_counts
 from training.metrics import (
-    binary_pr_curve,
     compute_full_set_metrics,
     cross_entropy,
-    per_class_pr_curves,
 )
 from training.trainer import Trainer, TrainState
 from utils.jax_core.diagnostics import (
@@ -174,19 +167,17 @@ def _make_attn_figure_callback(
     def _attn(params):
         logits, attn = model.apply({'params': params}, probe_X,
                                    train=False, return_weights=True)
-        # softmax the pre-softmax scores (over the LAST axis) so each plotter
-        # renders proper attention distributions.
-        read = jax.nn.softmax(attn['read'], axis=-1)          # (B, H, N, M)
-        proc = jax.nn.softmax(attn['processor'], axis=-1)     # (L, B, H, N, N)
-        dec  = attn.get('decoder')                            # (B, H, 1, N) | None
-        if dec is not None:
-            dec = jax.nn.softmax(dec, axis=-1)
-        return logits, read, proc, dec
+        # softmax_attn turns the pre-softmax scores into distributions (shared
+        # with evaluate.py); decoder is None for decode_mode='avgproj'.
+        return logits, softmax_attn(attn)
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
         if not _should_run(epoch, fig_every):
             return
-        logits, read, proc, dec = _attn(state.params)
+        logits, attn = _attn(state.params)
+        read = np.asarray(attn['read'])          # (B, H, N, M)
+        proc = np.asarray(attn['processor'])     # (L, B, H, N, N)
+        dec  = np.asarray(attn['decoder']) if attn['decoder'] is not None else None
         true_c = class_names[int(probe_batch['y'][0])]
         pred_c = class_names[int(np.asarray(logits)[0].argmax())]
         caption = f'true: {true_c}, pred: {pred_c}'
@@ -363,55 +354,24 @@ def _make_eval_plots_callback(
             step=global_step,
         )
 
-        cm  = confusion_matrix(preds, labels)
-        pcm = per_class_metrics(cm)
+        # Confusion / per-class / PR figures (+ per-class spatial maps when
+        # spatial_maps, + the per-sample table) from the shared bundle — the same
+        # set evaluate.py saves to disk; here they go to wandb under <prefix>/.
+        figs, table = build_eval_figures(
+            preds, labels, logits, meta, class_names,
+            fov_lat=fov_lat, fov_lon=fov_lon, geo=geo,
+            make_spatial=spatial_maps, label=prefix)
+        for tag, fig in figs.items():
+            logger.log_figure(f'{prefix}/{tag}', fig, step=global_step)
 
-        fig_norm = plot_confusion_matrix(
-            cm, class_names, normalize=True,
-            title=f'{prefix.capitalize()} confusion matrix (recall per class)',
-        )
-        fig_raw = plot_confusion_matrix(
-            cm, class_names, normalize=False,
-            title=f'{prefix.capitalize()} confusion matrix (counts)',
-        )
-        fig_cls = plot_class_metrics(
-            pcm, class_names,
-        )
-
-        logger.log_figure(f'{prefix}/confusion_norm',    fig_norm, step=global_step)
-        logger.log_figure(f'{prefix}/confusion_counts',  fig_raw,  step=global_step)
-        logger.log_figure(f'{prefix}/per_class_metrics', fig_cls,  step=global_step)
-
-        # Precision-recall CURVES (the shape behind the pr_auc / mAP scalars):
-        # binary TC-vs-background detection + per-class one-vs-rest overlay.
-        fig_pr = plot_pr_curve(
-            binary_pr_curve(logits, labels),
-            title=f'{prefix.capitalize()} PR — TC vs. background detection',
-        )
-        fig_pr_cls = plot_pr_curves_per_class(
-            per_class_pr_curves(logits, labels), class_names,
-            title=f'{prefix.capitalize()} per-class PR (one-vs-rest)',
-        )
-        logger.log_figure(f'{prefix}/pr_curve',           fig_pr,     step=global_step)
-        logger.log_figure(f'{prefix}/pr_curves_per_class', fig_pr_cls, step=global_step)
-
-        # Per-sample table + per-class spatial maps from ONE source (the maps
-        # derive from the table's own columns — see build_prediction_outputs),
-        # so the logged CSV and the maps describe the same rows. Both are opt-in
-        # and used for the end-of-train TEST pass, giving the wandb test/ section
-        # the full study table + WHERE the model classifies each class well.
-        if spatial_maps or csv_dir is not None:
-            table, spatial_figs = build_prediction_outputs(
-                preds, labels, logits, meta, class_names,
-                fov_lat=fov_lat, fov_lon=fov_lon, geo=geo, make_maps=spatial_maps)
-            for name, fig_sp in spatial_figs.items():
-                logger.log_figure(f'{prefix}/spatial_pred/{name}', fig_sp,
-                                  step=global_step)
-            if csv_dir is not None:
-                csv_path = Path(csv_dir) / f'{prefix}_per_sample.csv'
-                table.to_csv(csv_path, index=False)
-                logger.log_artifact(f'{prefix}_per_sample', csv_path,
-                                    artifact_type='predictions')
+        # Per-sample classification CSV (sid/time/lat/lon/true/pred/correct/full
+        # 9-class softmax/…) → run artifact, so the wandb test/ section is
+        # self-contained. The maps above are derived from this same table.
+        if csv_dir is not None:
+            csv_path = Path(csv_dir) / f'{prefix}_per_sample.csv'
+            table.to_csv(csv_path, index=False)
+            logger.log_artifact(f'{prefix}_per_sample', csv_path,
+                                artifact_type='predictions')
 
     return callback
 
@@ -525,6 +485,54 @@ def _background_count(data_cfg: dict, batch_size: int,
     if steps_per_epoch:
         return int(steps_per_epoch * bg_half)
     return int(round(n_tc_total * bg_half / tc_half))
+
+
+def resolve_class_weights(
+    data_cfg:        dict,
+    manifest:        dict,
+    n_classes:       int,
+    batch_size:      int,
+    steps_per_epoch: Optional[int],
+) -> tuple[Optional[list], Optional[dict]]:
+    """Per-class loss weights from the train split's realized counts.
+
+    Single source shared by train.py and tune.py so both weight IDENTICALLY
+    (previously tune.py omitted the background fold-in and diverged). Builds the
+    per-class counts from ``manifest['train']['class_counts']``, folds background
+    (class 0) in via :func:`_background_count` (its count is the ``n_background``
+    hyperparameter, not the raw pool size), then applies
+    ``class_weights_from_counts`` with the configured scheme/beta/normalize.
+
+    Returns
+    -------
+    (weights, info) : (list | None, dict | None)
+        ``weights`` is the length-``n_classes`` list for
+        ``loss_kwargs['class_weights']``; ``info`` is the manifest record
+        (scheme / n_background / effective_counts / weights). Both are ``None``
+        when ``data.class_weight_scheme`` is ``'none'``.
+    """
+    scheme = str(data_cfg.get('class_weight_scheme', 'none'))
+    if scheme == 'none':
+        return None, None
+    counts = [int(manifest['train']['class_counts'].get(str(c), 0))
+              for c in range(n_classes)]
+    # Fold background (class 0) in as a real class with a count (a hyperparameter
+    # — see _background_count) instead of pinning it at 1.0.
+    counts[0] = _background_count(
+        data_cfg, batch_size, steps_per_epoch, n_tc_total=sum(counts))
+    cw = class_weights_from_counts(
+        counts,
+        scheme    = scheme,
+        beta      = data_cfg.get('class_weight_beta', 0.999),
+        normalize = data_cfg.get('class_weight_normalize', True),
+    )
+    info = {
+        'scheme':           scheme,
+        'n_background':     counts[0],
+        'effective_counts': counts,        # all 9, incl. folded-in background
+        'weights':          cw.tolist(),
+    }
+    return cw.tolist(), info
 
 
 def _resolve_run_dir(trainer_cfg: dict, experiment_dir: Path,
@@ -724,33 +732,19 @@ def train(config_path: str | Path, resume: bool = False,
     # in the manifest so the run is reproducible from its artifact.
     manifest    = dm.manifest()
     loss_kwargs = dict(trainer_cfg.get('loss_kwargs') or {})
-    cw_scheme   = config['data'].get('class_weight_scheme', 'none')
     # Precedence: an explicit loss_kwargs.class_weights wins; otherwise a
-    # data.class_weight_scheme is computed from the train split's class counts.
-    if 'class_weights' not in loss_kwargs and cw_scheme != 'none':
-        n_classes = target_spec.n_classes
-        counts = [int(manifest['train']['class_counts'].get(str(c), 0))
-                  for c in range(n_classes)]
-        # Fold background (class 0) in as a real class with a count (its count is
-        # a hyperparameter — see _background_count) instead of pinning it at 1.0.
-        counts[0] = _background_count(
-            config['data'], trainer_cfg['batch_size'], steps_per_epoch,
-            n_tc_total=sum(counts))
-        cw = class_weights_from_counts(
-            counts,
-            scheme    = cw_scheme,
-            beta      = config['data'].get('class_weight_beta', 0.999),
-            normalize = config['data'].get('class_weight_normalize', True),
-        )
-        loss_kwargs['class_weights'] = cw.tolist()
-        manifest['train']['class_weights'] = {
-            'scheme':           cw_scheme,
-            'n_background':     counts[0],
-            'effective_counts': counts,        # all 9, incl. folded-in background
-            'weights':          cw.tolist(),
-        }
-        print(f"  class counts (incl. background) : {counts}")
-        print(f"  class weighting [{cw_scheme}]   : {np.round(cw, 3).tolist()}")
+    # data.class_weight_scheme is computed from the train split's class counts
+    # (resolve_class_weights — shared with tune.py so both weight identically).
+    if 'class_weights' not in loss_kwargs:
+        weights, info = resolve_class_weights(
+            config['data'], manifest, target_spec.n_classes,
+            trainer_cfg['batch_size'], steps_per_epoch)
+        if weights is not None:
+            loss_kwargs['class_weights'] = weights
+            manifest['train']['class_weights'] = info
+            print(f"  class counts (incl. background) : {info['effective_counts']}")
+            print(f"  class weighting [{info['scheme']}]   : "
+                  f"{np.round(weights, 3).tolist()}")
 
     metrics_fns = build_metrics_fns(
         loss        = trainer_cfg.get('loss', target_spec.loss),

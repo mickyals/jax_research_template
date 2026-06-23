@@ -41,7 +41,7 @@ import yaml
 
 from experiments.tc_perceiver_io.data.datamodule import TCDataModule
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
-from datasets.class_weights import class_weights_from_counts
+from experiments.tc_perceiver_io.train.train import resolve_class_weights
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
 from training.tuner import Tuner, apply_search_space
 
@@ -143,18 +143,16 @@ def tune(
         return dm.val_loader()
 
     # Optional class weighting from the train split's realized class counts
-    # (computed once; shared across trials). See train.py for the rationale.
+    # (computed once; shared across trials). Uses the SAME resolve_class_weights
+    # as train.py — incl. the background (class 0) fold-in — so a tuned run and
+    # the final train run weight identically.
     loss_kwargs = dict(trainer_cfg.get("loss_kwargs") or {})
-    cw_scheme   = base_config["data"].get("class_weight_scheme", "none")
-    if "class_weights" not in loss_kwargs and cw_scheme != "none":
-        n_classes = dm.target_spec.n_classes
-        counts = [int(dm.manifest()["train"]["class_counts"].get(str(c), 0))
-                  for c in range(n_classes)]
-        loss_kwargs["class_weights"] = class_weights_from_counts(
-            counts, scheme=cw_scheme,
-            beta=base_config["data"].get("class_weight_beta", 0.999),
-            normalize=base_config["data"].get("class_weight_normalize", True),
-        ).tolist()
+    if "class_weights" not in loss_kwargs:
+        weights, _ = resolve_class_weights(
+            base_config["data"], dm.manifest(), dm.target_spec.n_classes,
+            trainer_cfg["batch_size"], _steps_per_epoch)
+        if weights is not None:
+            loss_kwargs["class_weights"] = weights
 
     metrics_fns = build_metrics_fns(
         loss        = trainer_cfg.get("loss", dm.target_spec.loss),

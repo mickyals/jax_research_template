@@ -398,6 +398,7 @@ matplotlib.use('Agg')   # headless — set before train.py pulls in pyplot
 
 from experiments.tc_perceiver_io.train.train import (   # noqa: E402
     _background_count,
+    resolve_class_weights,
     _make_attn_entropy_callback,
     _make_attn_figure_callback,
     _make_eval_plots_callback,
@@ -672,3 +673,46 @@ class TestBackgroundCount:
         n = _background_count({'tc_fraction': {'train': 0.5}}, batch_size=128,
                               steps_per_epoch=100, n_tc_total=7000)
         assert n == 100 * (128 - 64)
+
+
+class TestResolveClassWeights:
+    """Shared by train.py + tune.py — both weight identically (incl. the
+    background fold-in that tune.py used to omit)."""
+
+    def _manifest(self):
+        return {'train': {'class_counts': {
+            '0': 500, '1': 100, '2': 50, '3': 30,
+            '4': 10, '5': 5, '6': 4, '7': 3, '8': 1}}}
+
+    def test_none_scheme_returns_none(self):
+        w, info = resolve_class_weights(
+            {'class_weight_scheme': 'none'}, self._manifest(), 9, 128, 2000)
+        assert w is None and info is None
+
+    def test_background_folded_in_from_n_background(self):
+        # Explicit n_background HP overrides the manifest pool count (500).
+        w, info = resolve_class_weights(
+            {'class_weight_scheme': 'effective_number', 'n_background': 1_000_000},
+            self._manifest(), 9, 128, 2000)
+        assert len(w) == 9
+        assert info['n_background'] == 1_000_000        # NOT 500 (the fold-in)
+        assert info['effective_counts'][0] == 1_000_000
+
+    def test_default_background_is_steps_times_bg_half(self):
+        # No n_background → realized per-epoch count (random mode).
+        # tc_fraction 0.1 @ batch 128 → tc_half=13, bg_half=115; ×2000 steps.
+        w, info = resolve_class_weights(
+            {'class_weight_scheme': 'effective_number', 'tc_fraction': 0.1},
+            self._manifest(), 9, 128, 2000)
+        assert info['n_background'] == 2000 * (128 - max(1, round(128 * 0.1)))
+
+    def test_normalize_flag_changes_recorded_weights(self):
+        cfg = {'class_weight_scheme': 'effective_number', 'n_background': 1_000_000}
+        w_norm, _ = resolve_class_weights({**cfg, 'class_weight_normalize': True},
+                                          self._manifest(), 9, 128, 2000)
+        w_raw, _  = resolve_class_weights({**cfg, 'class_weight_normalize': False},
+                                          self._manifest(), 9, 128, 2000)
+        # same ratios, different scale (mean-1 vs raw)
+        assert w_norm != w_raw
+        assert np.allclose(np.array(w_norm) / np.array(w_norm).mean(),
+                           np.array(w_raw) / np.array(w_raw).mean())
