@@ -112,8 +112,8 @@ data:
   # --- Token padding / truncation ---
   # All stations within radius_km are candidates; samples with more than
   # max_stations are trimmed (see station_selection); fewer are zero-padded.
-  max_stations:           20          # cap on station tokens; pad below, trim above
-  min_stations:           2          # samples with fewer real stations are discarded
+  max_stations:           32          # cap on station tokens; pad below, trim above
+  min_stations:           8          # samples with fewer real stations are discarded
 
   # Which stations to keep when a sample has more than max_stations candidates:
   #   nearest  deterministic, closest by distance (ALWAYS used for val/test)
@@ -150,7 +150,7 @@ data:
   # training — cross_entropy_loss reduces by the weight sum, so this only changes
   # the printed/manifest weight vector, not the gradient. Set false to record the
   # raw scheme values (e.g. raw Cui effective-number weights).
-  class_weight_normalize: false
+  class_weight_normalize: true
 
   # Effective class-0 (background) POPULATION size for the weight scales. Folding
   # background in as a real class lets the per-class weights span class 0..8 over
@@ -159,7 +159,7 @@ data:
   # background-class size you want represented (e.g. 1,000,000 → bg is the
   # dominant class, heavily down-weighted). null → default to the realized
   # per-epoch sampling count (steps_per_epoch × bg_half).
-  n_background:           1000000
+  n_background:           100000
 
   # --- Domain / field of view ---
   fov_lat:                [0.0,  30.0]
@@ -183,11 +183,12 @@ data:
   background_buffer_hours: 3.0        # time-mode: exclusion half-window around any TC obs.
                                       # spatial-mode: time tolerance for the storm-proximity check.
 
-  # --- End-of-run spatial maps ---
-  # The end-of-train TEST pass logs one FOV map per true class (test/spatial_pred/*)
-  # coloured by predicted class. true = draw them on a cartopy basemap with
-  # coastlines/borders (requires cartopy); false (code default) = plain lat/lon
-  # scatter with no basemap. Set true once cartopy is installed.
+  # --- Cartopy basemaps for the geographic figures ---
+  # true = draw coastlines/borders under BOTH (a) the per-class test/spatial_pred/*
+  # maps (lat/lon PlateCarree) and (b) the val/attn_read_map Read-attention map
+  # (storm-centred AzimuthalEquidistant for unit_circle). Requires cartopy.
+  # false (code default) = plain axes, no basemap (cartopy-free). Set true once
+  # cartopy is installed.
   eval_geo_maps:          true
 
   # --- Coordinate encoding ---
@@ -204,8 +205,8 @@ model:
   # latent array is the encode query, so there is no query token to position.
 
   # --- Latent / attention sizing ---
-  embed_dim:            128           # latent + token width D (divisible by num_heads)
-  num_heads:            4
+  embed_dim:            64           # latent + token width D (divisible by num_heads)
+  num_heads:            8
   num_latents:          16           # N — number of learned latent vectors (the
                                       # index dim the model processes; decoupled
                                       # from the station count M)
@@ -275,12 +276,12 @@ trainer:
   scheduler_kwargs:
     init_value:         0.0
     peak_value:         1.0e-4
-    warmup_steps:       50
+    warmup_steps:       100
     decay_steps:        null          # auto = num_epochs * steps_per_epoch (train.py)
     end_value:          1.0e-6
 
   # --- Training loop ---
-  num_epochs:           1
+  num_epochs:           5
   num_steps:            .inf          # no step-count cap; epoch limit governs stopping
 
   # Steps per training epoch (random TC sampling mode).
@@ -288,7 +289,7 @@ trainer:
   # For a smoke test keep this small (200-500).
   # For a full run use 2000-5000 depending on desired training time per epoch.
   # Remove or set to null to fall back to sequential mode (one pass through TC data).
-  steps_per_epoch:     2000
+  steps_per_epoch:     3000
 
   # --- Loss ---
   # Training objective, selected from training/losses.py LOSSES registry.
@@ -299,8 +300,8 @@ trainer:
   # Setting both gives the class-balanced focal loss.
   loss:                 cross_entropy
   loss_kwargs:          #{}
-    focal_gamma:      2.0
-    # emd_lambda:       0.1          # squared-EMD regulariser; emd_omega/emd_mu tune it
+    focal_gamma:      0.5
+    emd_lambda:       0.1          # squared-EMD regulariser; emd_omega/emd_mu tune it
     # class_weights:    [1.0, ...]   # explicit 9 values; else use data.class_weight_scheme
 
   # --- Reported metrics ---

@@ -124,6 +124,7 @@ def _make_attn_figure_callback(
     fov_lat:           tuple[float, float] | None = None,
     fov_lon:           tuple[float, float] | None = None,
     fig_every:         int = 5,
+    geo:               bool = False,
 ) -> Callable[[TrainState, int, int], None]:
     """Return an **epoch-level** callback logging the per-component attention maps.
 
@@ -160,12 +161,17 @@ def _make_attn_figure_callback(
     """
     probe_X = probe_batch['X']
 
-    # The probe batch is fixed, so for domain mode decode its sample-0
-    # station/query positions once (plotting does not import the encoding).
-    station_latlon = query_latlon = None
+    # The probe batch is fixed, so resolve its sample-0 geo anchors once:
+    # domain mode decodes station/query lat-lon (plotting does not import the
+    # encoding); unit_circle geo needs the storm centre (lat, lon) to anchor the
+    # azimuthal basemap, taken from the probe meta.
+    station_latlon = query_latlon = storm_latlon = None
     if location_encoding == 'domain':
         station_latlon, query_latlon = domain_latlon_for_sample(
             probe_batch, 0, fov_lat, fov_lon)
+    elif geo and 'meta' in probe_batch and 'query_lat' in probe_batch['meta']:
+        m = probe_batch['meta']
+        storm_latlon = (float(m['query_lat'][0]), float(m['query_lon'][0]))
 
     @jax.jit
     def _attn(params):
@@ -190,7 +196,7 @@ def _make_attn_figure_callback(
             np.asarray(read), probe_batch,
             location_encoding=location_encoding,
             fov_lat=fov_lat, fov_lon=fov_lon, radius_km=radius_km,
-            sample_idx=0,
+            sample_idx=0, geo=geo, storm_latlon=storm_latlon,
             station_latlon=station_latlon, query_latlon=query_latlon,
             title=caption,
         )
@@ -809,7 +815,8 @@ def train(config_path: str | Path, resume: bool = False,
                                    radius_km=config['data'].get('radius_km', 500.0),
                                    fov_lat=config['data'].get('fov_lat'),
                                    fov_lon=config['data'].get('fov_lon'),
-                                   fig_every=fig_every),
+                                   fig_every=fig_every,
+                                   geo=bool(config['data'].get('eval_geo_maps', False))),
         _make_eval_plots_callback(model, val_loader, trainer.logger,
                                   class_names=class_names,
                                   every_n_epochs=eval_plots_every),
