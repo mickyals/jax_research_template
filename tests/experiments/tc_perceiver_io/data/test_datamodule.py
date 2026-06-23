@@ -925,3 +925,38 @@ class TestSpatialBackground:
         buf, ok = self._spatial_loader(ds)._draw_background(np.random.default_rng(0))
         assert ok is True
         assert len(buf) == 4 // 2
+
+
+# ---------------------------------------------------------------------------
+# Multiprocess prefetch (num_workers > 0) — fork-guarded
+# ---------------------------------------------------------------------------
+
+import os as _os
+
+
+@pytest.mark.skipif(not hasattr(_os, "fork"), reason="fork-only multiprocessing test")
+class TestMultiWorkerLoader(TestTCLoaderRandomMode):
+    """num_workers>0 spreads the epoch's steps across worker processes; the
+    main loop moves NumPy batches to device. num_workers=0 stays the parity path.
+    Reuses TestTCLoaderRandomMode._make_random_loader (passes num_workers via
+    **bg_kwargs to TCLoader)."""
+
+    def test_workers_yield_steps_per_epoch(self, tmp_path):
+        loader  = self._make_random_loader(tmp_path, steps=6, num_workers=2)
+        batches = list(loader)
+        assert len(batches) == 6                       # disjoint shards sum to steps
+
+    def test_worker_batches_are_device_arrays(self, tmp_path):
+        import jax.numpy as jnp
+        loader = self._make_random_loader(tmp_path, steps=4, num_workers=2)
+        for b in loader:
+            assert b['y'].dtype == jnp.int32           # _to_device applied in main
+            assert set(b['X'].keys()) == {
+                'query_coords', 'station_obs', 'station_coords',
+                'station_mask', 'obs_mask'}
+            break
+
+    def test_count_matches_synchronous(self, tmp_path):
+        sync = list(self._make_random_loader(tmp_path, steps=5, num_workers=0))
+        par  = list(self._make_random_loader(tmp_path, steps=5, num_workers=3))
+        assert len(sync) == len(par) == 5

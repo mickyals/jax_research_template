@@ -684,6 +684,19 @@ def train(config_path: str | Path, resume: bool = False,
         trainer_cfg.setdefault('log_kwargs', {})['name'] = name
 
     # ------------------------------------------------------------------
+    # Logger — start the run NOW, before the data/model summaries print, so its
+    # stdout (the splits table + the model parameter table) is captured in the
+    # run log. The Trainer below is handed this same logger instead of making
+    # its own.
+    # ------------------------------------------------------------------
+    from training.logger import create_logger
+    logger = create_logger(
+        trainer_cfg.get('log_backend', 'null'),
+        log_dir=str(Path(trainer_cfg['run_dir']).resolve() / 'logs'),
+        **trainer_cfg.get('log_kwargs', {}),
+    )
+
+    # ------------------------------------------------------------------
     # Data
     # ------------------------------------------------------------------
     dm = TCDataModule.from_config(config['data'])
@@ -765,7 +778,7 @@ def train(config_path: str | Path, resume: bool = False,
             f"(have: {sorted(metrics_fns)}) or set patience_metric to val/loss."
         )
 
-    trainer     = Trainer(model, metrics_fns, trainer_cfg)
+    trainer     = Trainer(model, metrics_fns, trainer_cfg, logger=logger)
 
     # Log full config so every run is reproducible from its artifact
     trainer.log_hyperparams(config)

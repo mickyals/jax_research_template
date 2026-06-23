@@ -181,6 +181,7 @@ class Trainer:
         model:       Any,
         metrics_fns: dict[str, Callable],
         config:      dict,
+        logger:      Any = None,
     ) -> None:
         self.model       = model
         self.metrics_fns = metrics_fns
@@ -261,7 +262,10 @@ class Trainer:
             )
 
         # --- logger ---
-        self._logger = create_logger(
+        # A pre-built logger may be passed in (e.g. so the caller can start the
+        # run — and its stdout capture — BEFORE the Trainer is constructed);
+        # otherwise build one from the config here.
+        self._logger = logger if logger is not None else create_logger(
             config.get("log_backend", "null"),
             log_dir=_log_dir,
             **config.get("log_kwargs", {}),

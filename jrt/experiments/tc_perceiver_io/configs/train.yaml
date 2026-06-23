@@ -127,6 +127,14 @@ data:
   # batch_size is NOT set here — it flows down from trainer.batch_size automatically.
   # See trainer.batch_size below.
   #
+  # Multiprocess prefetch for the TRAIN loader (random mode). Training is
+  # INPUT-bound (CPU sample assembly), so spreading it across worker processes is
+  # the main throughput lever. 0 = synchronous (identical batches). >0 = that many
+  # worker processes (tune to ~CPU cores); fork on Linux inherits the mmap dataset
+  # cheaply. Eval (val/test) always stays single-process.
+  num_workers:            0
+  prefetch_factor:        2
+  #
   # tc_fraction = fraction of each batch drawn as TC samples (rest = background).
   # A single number applies to all splits; a {train, val, test} mapping sets it
   # per split. val/test use a balanced 0.5 for honest, comparable eval metrics;
@@ -330,7 +338,7 @@ trainer:
   # uses TensorBoard's Profile plugin (WandB stores but cannot render XLA
   # traces). The first traced step includes jit compilation; read later
   # steps for steady-state timing (e.g. is the GPU idle on the loader?).
-  profile:              false
+  profile:              true
   profile_steps:        5
 
   # --- Run directory ---

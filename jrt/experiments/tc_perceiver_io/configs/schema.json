@@ -112,6 +112,8 @@
         "cache_sorted_obs":       { "type": "boolean", "description": "On a slow .npz load, build (and reuse) a sibling <stem>_sorted/ memory-mappable cache so future runs start in seconds. Default true." },
         "eval_geo_maps":          { "type": "boolean", "description": "End-of-train test pass: draw the per-class spatial prediction maps (test/spatial_pred/*) on a cartopy basemap with coastlines/borders (requires cartopy). Default false = plain lat/lon scatter, no basemap." },
         "batch_size":             { "type": "integer", "minimum": 2 },
+        "num_workers":            { "type": "integer", "minimum": 0, "description": "TRAIN loader (random mode): worker processes for CPU sample assembly. 0 (default) = synchronous, identical batches. >0 spreads the epoch's steps across processes (training is input-bound); tune to ~CPU cores. fork on Linux (cheap), spawn elsewhere. Eval stays single-process." },
+        "prefetch_factor":        { "type": "integer", "minimum": 1, "description": "Prefetch queue capacity per worker (num_workers>0): queue holds num_workers*prefetch_factor batches before workers block. Default 2." },
         "tc_fraction": {
           "description": "Fraction of each batch drawn as TC samples (rest = background). A single number applies to all splits, or a {train, val, test} object sets it per split (e.g. balanced 0.5 val/test for honest metrics while train sits lower). A split absent from the object defaults to 0.5.",
           "oneOf": [

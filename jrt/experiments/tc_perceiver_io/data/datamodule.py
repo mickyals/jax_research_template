@@ -154,25 +154,23 @@ def _build_background_pool(
 # Batch collation
 # ---------------------------------------------------------------------------
 
-def _collate(samples: list[dict]) -> dict:
-    """Stack sample dicts into {'X': dict_of_jnp_arrays, 'y': jnp.array, 'meta': dict}.
+def _collate_numpy(samples: list[dict]) -> dict:
+    """Stack sample dicts into a NumPy batch {'X': dict, 'y': array, 'meta': dict}.
 
-    'meta' carries sample attribution and diagnostics (SID, timestamp, raw
-    query position, station counts) OUTSIDE the model inputs — batch['X']
+    The device-free half of collation, so it can run inside worker processes
+    (no JAX). 'meta' carries sample attribution and diagnostics (SID, timestamp,
+    raw query position, station counts) OUTSIDE the model inputs — batch['X']
     contains exactly the model-facing arrays and nothing else.
     """
     X = {
-        k: jnp.array(np.stack([s[k] for s in samples], axis=0))
+        k: np.stack([s[k] for s in samples], axis=0)
         for k in (
             'query_coords',
             'station_obs', 'station_coords',
             'station_mask', 'obs_mask',
         )
     }
-    y = jnp.array(
-        np.stack([s['label'] for s in samples], axis=0),
-        dtype=jnp.int32,
-    )
+    y = np.stack([s['label'] for s in samples], axis=0).astype(np.int32)
     meta = {
         'sid':         [s['sid'] for s in samples],   # str | None (background)
         'iso_time':    np.array([s['iso_time']    for s in samples], dtype=np.int64),
@@ -182,6 +180,39 @@ def _collate(samples: list[dict]) -> dict:
         'n_used':      np.array([s['n_stations']  for s in samples], dtype=np.int32),
     }
     return {'X': X, 'y': y, 'meta': meta}
+
+
+def _to_device(batch: dict) -> dict:
+    """Move a NumPy batch's model-facing arrays onto the device (JAX).
+
+    Runs in the MAIN process only (workers never touch JAX). 'meta' stays NumPy/
+    Python — the Trainer drops it before its jitted steps.
+    """
+    return {
+        'X':    {k: jnp.array(v) for k, v in batch['X'].items()},
+        'y':    jnp.array(batch['y'], dtype=jnp.int32),
+        'meta': batch['meta'],
+    }
+
+
+def _collate(samples: list[dict]) -> dict:
+    """NumPy collation + device transfer — the synchronous (num_workers=0) path."""
+    return _to_device(_collate_numpy(samples))
+
+
+def _loader_shard_iter(loader, epoch: int, worker_id: int, num_workers: int):
+    """One worker's disjoint shard of a random-mode epoch (NumPy batches).
+
+    Round-robins the epoch's gradient steps across workers (worker w runs steps
+    w, w+num_workers, …) so the shards are disjoint and sum to exactly
+    steps_per_epoch. Each worker gets an independent, reproducible RNG seeded from
+    (base_seed, epoch, worker_id) via NumPy SeedSequence — no JAX in the worker.
+    Module-level (picklable) so the spawn start method works too.
+    """
+    rng   = np.random.default_rng(
+        np.random.SeedSequence([int(loader._base_seed), int(epoch), int(worker_id)]))
+    steps = len(range(worker_id, loader._steps_per_epoch, num_workers))
+    yield from loader._iter_random(rng, steps, _collate_numpy)
 
 
 # ---------------------------------------------------------------------------
@@ -275,9 +306,13 @@ class TCLoader:
         background_sampling:        str   = 'time',
         storm_exclusion_radius_km:  Optional[float] = None,
         storm_time_tol_ns:          Optional[int]   = None,
+        num_workers:        int   = 0,
+        prefetch_factor:    int   = 2,
     ) -> None:
         if not (0.0 < tc_fraction < 1.0):
             raise ValueError(f"tc_fraction must be in (0, 1), got {tc_fraction}")
+        if num_workers < 0:
+            raise ValueError(f"num_workers must be >= 0, got {num_workers}")
         if bg_refresh_every < 1:
             raise ValueError(
                 f"bg_refresh_every must be >= 1, got {bg_refresh_every}")
@@ -328,6 +363,12 @@ class TCLoader:
         self._storm_excl_radius_km  = storm_exclusion_radius_km
         self._storm_time_tol_ns     = storm_time_tol_ns
         self._frozen_bg: Optional[list[dict]] = None
+        # Multiprocess prefetch (random/train mode only): num_workers>0 spreads
+        # the epoch's steps across worker PROCESSES (CPU sample assembly is the
+        # bottleneck), each producing NumPy batches into a queue; the main loop
+        # moves them to device. 0 = synchronous, bitwise-identical to before.
+        self._num_workers        = int(num_workers)
+        self._prefetch_factor    = int(prefetch_factor)
         self._epoch              = 0
 
     # ------------------------------------------------------------------
@@ -457,18 +498,37 @@ class TCLoader:
 
     def __iter__(self) -> Iterator[dict]:
         # Per-epoch seed derived from a JAX key — same pattern as ArrayLoader.
-        jax_key = jax.random.fold_in(create_rng(self._base_seed), self._epoch)
-        np_seed = int(jax_key[0])
-        rng     = np.random.default_rng(np_seed)
+        epoch   = self._epoch
+        jax_key = jax.random.fold_in(create_rng(self._base_seed), epoch)
+        rng     = np.random.default_rng(int(jax_key[0]))
         self._epoch += 1
 
-        if self._steps_per_epoch is not None:
-            yield from self._iter_random(rng)
-        else:
+        if self._steps_per_epoch is None:
+            # Sequential (val/test) stays single-process: ordered, frozen
+            # backgrounds, identical batches every epoch.
             yield from self._iter_sequential(rng)
+        elif self._num_workers and self._num_workers > 0:
+            # Random/train mode with worker processes: each worker assembles a
+            # disjoint shard of the epoch's steps into NumPy batches; the main
+            # process moves them to device. Eval is never multi-process.
+            import functools
+            from training.prefetch import ProcessPrefetcher
+            worker_fn = functools.partial(_loader_shard_iter, self, epoch)
+            yield from ProcessPrefetcher(
+                worker_fn, self._num_workers, self._prefetch_factor,
+                to_device=_to_device,
+            )
+        else:
+            yield from self._iter_random(rng, self._steps_per_epoch, _collate)
 
-    def _iter_random(self, rng: np.random.Generator) -> Iterator[dict]:
-        """Random mode: draw TC samples with replacement for steps_per_epoch steps.
+    def _iter_random(self, rng: np.random.Generator, steps: int,
+                     collate) -> Iterator[dict]:
+        """Random mode: draw TC samples with replacement for ``steps`` steps.
+
+        ``collate`` is the batch builder (``_collate`` → device arrays for the
+        synchronous path; ``_collate_numpy`` → NumPy for the worker path). ``rng``
+        and ``steps`` are supplied by the caller so a worker can run a disjoint
+        shard with its own seeded stream.
 
         Backgrounds come from a reusable buffer refreshed every
         _bg_refresh_every steps (see __init__): each step samples _bg_half from
@@ -479,7 +539,7 @@ class TCLoader:
         n_tc = len(self._dataset)
         bg_buffer: list[dict] = []
         step = 0
-        while step < self._steps_per_epoch:
+        while step < steps:
             # Draw tc_half TC samples randomly with replacement.
             # get_tc_sample may return None (invalid SSHS, or < min_stations),
             # so retry until the buffer is full.
@@ -506,7 +566,7 @@ class TCLoader:
             )
             bg_buf = [bg_buffer[i] for i in sel]
 
-            yield _collate(tc_buf + bg_buf)
+            yield collate(tc_buf + bg_buf)
             step += 1
 
     def _iter_sequential(self, rng: np.random.Generator) -> Iterator[dict]:
@@ -618,6 +678,10 @@ class TCDataModule(BaseDataModule):
     _bg_refresh_every: int = 1
     _bg_buffer_size: Optional[int] = None
 
+    # Multiprocess prefetch defaults (set in setup()); 0 = synchronous.
+    _num_workers: int = 0
+    _prefetch_factor: int = 2
+
     # Background sampling policy defaults (set in setup()); class defaults keep
     # stub instances that bypass setup on the legacy time-only behaviour.
     _bg_sampling: str = 'time'
@@ -672,6 +736,11 @@ class TCDataModule(BaseDataModule):
         # fresh-every-step assembly; raise bg_refresh_every (+ optionally
         # bg_buffer_size) to cut per-step background-assembly cost when the
         # batch is background-heavy (e.g. natural prevalence). See TCLoader.
+        # Multiprocess prefetch for the TRAIN loader (random mode). 0 = sync
+        # (parity). >0 spreads sample assembly across worker processes; tune to
+        # ~CPU cores. See TCLoader / training.prefetch.
+        self._num_workers        = int(config.get('num_workers', 0))
+        self._prefetch_factor    = int(config.get('prefetch_factor', 2))
         self._bg_refresh_every   = int(config.get('bg_refresh_every', 1))
         self._bg_buffer_size     = config.get('bg_buffer_size')
         # Train-only station-selection policy ('nearest' | 'random'); val/test
@@ -800,6 +869,8 @@ class TCDataModule(BaseDataModule):
             station_selection  = self._station_selection,   # train-only random views
             bg_refresh_every   = self._bg_refresh_every,
             bg_buffer_size     = self._bg_buffer_size,
+            num_workers        = self._num_workers,
+            prefetch_factor    = self._prefetch_factor,
             background_sampling       = self._bg_sampling,
             storm_exclusion_radius_km = self._bg_excl_radius_km,
             storm_time_tol_ns         = self._bg_time_tol_ns,
