@@ -183,6 +183,13 @@ data:
   background_buffer_hours: 3.0        # time-mode: exclusion half-window around any TC obs.
                                       # spatial-mode: time tolerance for the storm-proximity check.
 
+  # --- End-of-run spatial maps ---
+  # The end-of-train TEST pass logs one FOV map per true class (test/spatial_pred/*)
+  # coloured by predicted class. true = draw them on a cartopy basemap with
+  # coastlines/borders (requires cartopy); false (code default) = plain lat/lon
+  # scatter with no basemap. Set true once cartopy is installed.
+  eval_geo_maps:          true
+
   # --- Coordinate encoding ---
   # Set at top level — propagated here by train.py. Do not set in this block.
 

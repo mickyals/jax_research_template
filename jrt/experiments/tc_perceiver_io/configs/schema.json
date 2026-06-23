@@ -110,6 +110,7 @@
         "min_stations":           { "type": "integer", "minimum": 1 },
         "station_selection":      { "type": "string", "enum": ["nearest", "random"], "description": "How to pick max_stations when a sample has more candidates: 'nearest' (default, deterministic) or 'random' (train-only view augmentation; val/test always nearest). Only bites when n_available > max_stations." },
         "cache_sorted_obs":       { "type": "boolean", "description": "On a slow .npz load, build (and reuse) a sibling <stem>_sorted/ memory-mappable cache so future runs start in seconds. Default true." },
+        "eval_geo_maps":          { "type": "boolean", "description": "End-of-train test pass: draw the per-class spatial prediction maps (test/spatial_pred/*) on a cartopy basemap with coastlines/borders (requires cartopy). Default false = plain lat/lon scatter, no basemap." },
         "batch_size":             { "type": "integer", "minimum": 2 },
         "tc_fraction": {
           "description": "Fraction of each batch drawn as TC samples (rest = background). A single number applies to all splits, or a {train, val, test} object sets it per split (e.g. balanced 0.5 val/test for honest metrics while train sits lower). A split absent from the object defaults to 0.5.",
