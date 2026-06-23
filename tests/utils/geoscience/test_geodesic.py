@@ -6,6 +6,7 @@ import pytest
 from utils.geoscience.geodesic import (
     haversine_np,
     haversine_jax,
+    initial_bearing_np,
     vincenty_np,
     vincenty_jax,
 )
@@ -101,6 +102,40 @@ class TestHaversineJax:
 # ---------------------------------------------------------------------------
 # Vincenty
 # ---------------------------------------------------------------------------
+
+class TestInitialBearingNp:
+
+    def test_cardinal_directions(self):
+        # From (0,0): east → 90, north → 0, west → 270, south → 180.
+        assert float(initial_bearing_np(0.0, 0.0, 0.0,  1.0)) == pytest.approx(90.0,  abs=1e-3)
+        assert float(initial_bearing_np(0.0, 0.0, 1.0,  0.0)) == pytest.approx(0.0,   abs=1e-3)
+        assert float(initial_bearing_np(0.0, 0.0, 0.0, -1.0)) == pytest.approx(270.0, abs=1e-3)
+        assert float(initial_bearing_np(0.0, 0.0,-1.0,  0.0)) == pytest.approx(180.0, abs=1e-3)
+
+    def test_in_range(self):
+        rng = np.random.default_rng(0)
+        lat1, lon1 = rng.uniform(-60, 60, 50), rng.uniform(-180, 180, 50)
+        lat2, lon2 = rng.uniform(-60, 60, 50), rng.uniform(-180, 180, 50)
+        b = initial_bearing_np(lat1, lon1, lat2, lon2)
+        assert np.all((b >= 0.0) & (b < 360.0))
+
+    def test_coincident_is_zero(self):
+        assert float(initial_bearing_np(15.0, -75.0, 15.0, -75.0)) == pytest.approx(0.0)
+
+    def test_close_to_vincenty_at_short_range(self):
+        # Within ~500 km the spherical bearing matches the ellipsoidal Vincenty
+        # forward azimuth to well under a degree (the swap that de-bottlenecked
+        # sample assembly keeps the geometry essentially unchanged).
+        q_lat, q_lon = 15.0, -75.0
+        rng = np.random.default_rng(1)
+        lat = q_lat + rng.uniform(-4, 4, 40)
+        lon = q_lon + rng.uniform(-4, 4, 40)
+        sph = initial_bearing_np(q_lat, q_lon, lat, lon)
+        _, vin, _, _ = vincenty_np(np.full(40, q_lat), np.full(40, q_lon),
+                                   lat.astype(np.float64), lon.astype(np.float64))
+        diff = np.abs((sph - vin + 180.0) % 360.0 - 180.0)   # circular difference
+        assert np.nanmax(diff) < 1.0
+
 
 class TestVincentyNp:
     def test_scalar_distance(self):

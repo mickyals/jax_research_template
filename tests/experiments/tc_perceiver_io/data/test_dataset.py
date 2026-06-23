@@ -665,3 +665,47 @@ class TestStationSelection:
         rand    = _coord_set(ds.get_tc_sample(0, station_selection='random',
                                               rng=np.random.default_rng(3)))
         assert nearest == rand and len(nearest) == 5
+
+
+# ---------------------------------------------------------------------------
+# Storm proximity (spatial background validation)
+# ---------------------------------------------------------------------------
+
+class TestStormWithin:
+    """TCDataset.storm_within — the per-draw check behind spatial backgrounds.
+
+    The tc_dataset fixture has one storm at (15.0, -75.0) at base_ns.
+    """
+
+    _HOUR_NS = 3_600_000_000_000
+
+    def test_same_point_and_time_is_within(self, tc_dataset):
+        ts = int(tc_dataset._time[0])
+        assert tc_dataset.storm_within(
+            15.0, -75.0, ts, radius_km=100.0, time_tol_ns=self._HOUR_NS) is True
+
+    def test_far_point_is_not_within(self, tc_dataset):
+        # ~5500 km away — well outside any sane radius at the same time.
+        ts = int(tc_dataset._time[0])
+        assert tc_dataset.storm_within(
+            40.0, -10.0, ts, radius_km=500.0, time_tol_ns=self._HOUR_NS) is False
+
+    def test_far_time_is_not_within(self, tc_dataset):
+        # Same point, 100 days later — outside the time tolerance.
+        ts = int(tc_dataset._time[0]) + 100 * 24 * self._HOUR_NS
+        assert tc_dataset.storm_within(
+            15.0, -75.0, ts, radius_km=100.0, time_tol_ns=self._HOUR_NS) is False
+
+    def test_radius_boundary(self, tc_dataset):
+        # A point just inside vs outside ~110 km (1 deg latitude) of the storm.
+        ts = int(tc_dataset._time[0])
+        assert tc_dataset.storm_within(
+            16.0, -75.0, ts, radius_km=150.0, time_tol_ns=self._HOUR_NS) is True
+        assert tc_dataset.storm_within(
+            16.0, -75.0, ts, radius_km=50.0,  time_tol_ns=self._HOUR_NS) is False
+
+    def test_returns_plain_bool(self, tc_dataset):
+        ts = int(tc_dataset._time[0])
+        out = tc_dataset.storm_within(
+            15.0, -75.0, ts, radius_km=100.0, time_tol_ns=self._HOUR_NS)
+        assert isinstance(out, bool)

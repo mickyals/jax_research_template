@@ -5,11 +5,17 @@
 # Experiment-wide shared values — propagated to data: and model: by train.py.
 seed: 3678
 
-# Coordinate encoding used for station positions and query token construction.
+# GPU to pin training to (sets CUDA_VISIBLE_DEVICES before JAX initialises, so
+# JAX doesn't claim + preallocate memory on every device of a multi-GPU box).
+# Override with `--gpu N`; a shell CUDA_VISIBLE_DEVICES takes precedence.
+# Comment out / remove to let JAX use its default device visibility.
+gpu: 0
+
+# Coordinate encoding used for station positions and the query coordinate.
 # Changing this affects both the data preprocessing pipeline and the model, so
 # it lives here rather than being duplicated in data: and model:.
 #
-# The model is coordinate-agnostic (Senseiver single projection over
+# The model is coordinate-agnostic (a single projection of
 # [obs; mask; Fourier(coords)]); this only sets the datamodule's coordinate
 # convention.
 # unit_circle  station_coords = [x, y] storm-centred local map
@@ -26,6 +32,10 @@ location_encoding:      unit_circle
 data:
 
   # --- Source files ---
+  # On a slow .npz load of insitu_obs_path, build (and then reuse) a sibling
+  # <stem>_sorted/ memory-mappable cache so future runs start in seconds instead
+  # of re-loading + re-sorting 74.7M rows (~8 min). Set false to disable.
+  cache_sorted_obs:       true
   ibtracs_path:           E:/sparse_obs/ibtracs/ibtracs_full.npz
   multi_storm_path:       E:/sparse_obs/ibtracs/ibtracs_multi_storm_times.npz
   ibtracs_sid_meta_path:  E:/sparse_obs/ibtracs/ibtracs_sid_meta.npz
@@ -102,13 +112,13 @@ data:
   # --- Token padding / truncation ---
   # All stations within radius_km are candidates; samples with more than
   # max_stations are trimmed (see station_selection); fewer are zero-padded.
-  max_stations:           20          # cap on station tokens; pad below, trim above
-  min_stations:           2          # samples with fewer real stations are discarded
+  max_stations:           32          # cap on station tokens; pad below, trim above
+  min_stations:           8          # samples with fewer real stations are discarded
 
   # Which stations to keep when a sample has more than max_stations candidates:
   #   nearest  deterministic, closest by distance (ALWAYS used for val/test)
   #   random   TRAIN-ONLY augmentation — each draw of a TC row gets a different
-  #            random station subset, so the finite TC set can't be memorised.
+  #            random station subset, so the finite TC set can't be memorized.
   #            Only bites when n_available > max_stations (widen radius_km to
   #            grow the candidate pool — see the n_available sweep).
   station_selection:      nearest
@@ -116,22 +126,78 @@ data:
   # --- Batch construction ---
   # batch_size is NOT set here — it flows down from trainer.batch_size automatically.
   # See trainer.batch_size below.
-  tc_fraction:            0.1         # fraction of each batch drawn as TC samples (rest = background)
+  #
+  # Multiprocess prefetch for the TRAIN loader (random mode). Training is
+  # INPUT-bound (CPU sample assembly), so spreading it across worker processes is
+  # the main throughput lever. 0 = synchronous (identical batches). >0 = that many
+  # worker processes (tune to ~CPU cores); fork on Linux inherits the mmap dataset
+  # cheaply. Eval (val/test) always stays single-process.
+  num_workers:            0
+  prefetch_factor:        2
+  #
+  # tc_fraction = fraction of each batch drawn as TC samples (rest = background).
+  # A single number applies to all splits; a {train, val, test} mapping sets it
+  # per split. val/test use a balanced 0.5 for honest, comparable eval metrics;
+  # train sits lower (or reverts to natural prevalence when class weighting is on
+  # — see _train_tc_fraction). A split omitted from the mapping defaults to 0.5.
+  tc_fraction:
+    train: 0.1
+    val:   0.5
+    test:  0.5
 
-  # --- Class weighting (within-TC imbalance) ---
-  # Per-class loss weights computed at setup from the train split's realized
-  # class counts and injected as loss_kwargs.class_weights (stored back in the
-  # manifest). An explicit trainer.loss_kwargs.class_weights takes precedence.
-  # Background (class 0, absent from the TC count table) stays weight 1.0.
+  # --- Class weighting (all 9 classes, background folded in) ---
+  # Per-class loss weights computed at setup from the realized class counts and
+  # injected as loss_kwargs.class_weights (stored in the manifest). An explicit
+  # trainer.loss_kwargs.class_weights takes precedence. Background (class 0) is
+  # folded in as a real class with the count from n_background (below).
   # Schemes: none | inverse_freq | sqrt_inverse_freq | effective_number | median_freq
-  class_weight_scheme:    none
-  class_weight_beta:      0.999       # effective_number only
+  class_weight_scheme:    effective_number
+  class_weight_beta:      0.9999       # effective_number only; ↑ → wider gap
+                                       # between common (bg/TS) and rare (Cat4/5)
+  # Scale present-class weights to mean 1.0 (true, default). COSMETIC for
+  # training — cross_entropy_loss reduces by the weight sum, so this only changes
+  # the printed/manifest weight vector, not the gradient. Set false to record the
+  # raw scheme values (e.g. raw Cui effective-number weights).
+  class_weight_normalize: true
+
+  # Effective class-0 (background) POPULATION size for the weight scales. Folding
+  # background in as a real class lets the per-class weights span class 0..8 over
+  # the WHOLE train set (not a per-batch ratio). Background is synthesised (no
+  # fixed dataset count), so this is a hyperparameter: set it to the full
+  # background-class size you want represented (e.g. 1,000,000 → bg is the
+  # dominant class, heavily down-weighted). null → default to the realized
+  # per-epoch sampling count (steps_per_epoch × bg_half).
+  n_background:           100000
 
   # --- Domain / field of view ---
   fov_lat:                [0.0,  30.0]
   fov_lon:                [-100.0, -45.0]
-  background_buffer_hours: 3.0        # timestamps within this window of any TC obs are excluded
-                                      # from the background pool
+
+  # --- Background (no-storm) sampling ---
+  # time     pool excludes any synoptic timestamp within background_buffer_hours
+  #          of ANY active TC basin-wide (time-only; shrinks hard in peak season).
+  # spatial  every grid timestamp is kept; a draw is background iff no storm is
+  #          within background_exclusion_radius_km of the point at
+  #          ±background_buffer_hours (decouples space, keeps the pool full
+  #          mid-season). Applies to train draws AND frozen eval backgrounds.
+  background_sampling:     spatial
+  background_exclusion_radius_km: 500   # spatial-mode: storm-free radius required
+                                         # for a background draw. null → radius_km
+                                         # (strictest — no storm-affected station
+                                         # can enter the sample). Smaller than
+                                         # radius_km (500 < 1000 here) keeps more
+                                         # background mid-season but admits some
+                                         # storm-adjacent stations.
+  background_buffer_hours: 3.0        # time-mode: exclusion half-window around any TC obs.
+                                      # spatial-mode: time tolerance for the storm-proximity check.
+
+  # --- Cartopy basemaps for the geographic figures ---
+  # true = draw coastlines/borders under BOTH (a) the per-class test/spatial_pred/*
+  # maps (lat/lon PlateCarree) and (b) the val/attn_read_map Read-attention map
+  # (storm-centred AzimuthalEquidistant for unit_circle). Requires cartopy.
+  # false (code default) = plain axes, no basemap (cartopy-free). Set true once
+  # cartopy is installed.
+  eval_geo_maps:          true
 
   # --- Coordinate encoding ---
   # Set at top level — propagated here by train.py. Do not set in this block.
@@ -147,8 +213,8 @@ model:
   # latent array is the encode query, so there is no query token to position.
 
   # --- Latent / attention sizing ---
-  embed_dim:            128           # latent + token width D (divisible by num_heads)
-  num_heads:            4
+  embed_dim:            64           # latent + token width D (divisible by num_heads)
+  num_heads:            8
   num_latents:          16           # N — number of learned latent vectors (the
                                       # index dim the model processes; decoupled
                                       # from the station count M)
@@ -218,12 +284,12 @@ trainer:
   scheduler_kwargs:
     init_value:         0.0
     peak_value:         1.0e-4
-    warmup_steps:       50
+    warmup_steps:       100
     decay_steps:        null          # auto = num_epochs * steps_per_epoch (train.py)
     end_value:          1.0e-6
 
   # --- Training loop ---
-  num_epochs:           1
+  num_epochs:           5
   num_steps:            .inf          # no step-count cap; epoch limit governs stopping
 
   # Steps per training epoch (random TC sampling mode).
@@ -231,7 +297,7 @@ trainer:
   # For a smoke test keep this small (200-500).
   # For a full run use 2000-5000 depending on desired training time per epoch.
   # Remove or set to null to fall back to sequential mode (one pass through TC data).
-  steps_per_epoch:     2000
+  steps_per_epoch:     3000
 
   # --- Loss ---
   # Training objective, selected from training/losses.py LOSSES registry.
@@ -241,9 +307,9 @@ trainer:
   #                  effective-number / median-freq) — index 0 = background
   # Setting both gives the class-balanced focal loss.
   loss:                 cross_entropy
-  loss_kwargs:          {}
-    # focal_gamma:      2.0
-    # emd_lambda:       0.1          # squared-EMD regulariser; emd_omega/emd_mu tune it
+  loss_kwargs:          #{}
+    focal_gamma:      0.5
+    emd_lambda:       0.1          # squared-EMD regulariser; emd_omega/emd_mu tune it
     # class_weights:    [1.0, ...]   # explicit 9 values; else use data.class_weight_scheme
 
   # --- Reported metrics ---
@@ -252,7 +318,8 @@ trainer:
   # accuracy / binary_accuracy / mae_class. cross_entropy is the unweighted
   # comparability anchor (and the patience metric below) — keep it listed.
   # Plain top-1 accuracy is demoted (misleading under class imbalance); add it
-  # here only if you want it reported. Full-set QWK/ECE are logged separately.
+  # here only if you want it reported. Full-set mAP / pr_auc (+ PR curves and the
+  # confusion matrix) are computed over accumulated preds and logged separately.
   metrics:              [cross_entropy, binary_accuracy, mae_class]
 
   # --- Early stopping ---
@@ -271,7 +338,7 @@ trainer:
   # uses TensorBoard's Profile plugin (WandB stores but cannot render XLA
   # traces). The first traced step includes jit compilation; read later
   # steps for steady-state timing (e.g. is the GPU idle on the loader?).
-  profile:              false
+  profile:              true
   profile_steps:        5
 
   # --- Run directory ---

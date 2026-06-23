@@ -52,6 +52,7 @@ from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
+from utils.geoscience.geodesic import haversine_np
 from experiments.tc_perceiver_io.data.sources.ibtracs import IBTrACSDataset
 from experiments.tc_perceiver_io.data.sources.insitu_land import InsituLandDataset
 from experiments.tc_perceiver_io.data.inputs import InputSpec
@@ -143,6 +144,15 @@ class TCDataset:
         self._time = ibtracs['ISO_TIME']                    # int64 Unix-ns
         self._sid  = ibtracs['SID']
 
+        # Storm-proximity index (sorted by time) for spatial background
+        # validation: a background draw (lat, lon, ts) is rejected when any
+        # storm sits within an exclusion radius at ~that time. Built once from
+        # this split's IBTrACS rows — see storm_within.
+        order            = np.argsort(self._time, kind='stable')
+        self._storm_time = self._time[order]
+        self._storm_lat  = self._lat[order]
+        self._storm_lon  = self._lon[order]
+
     def __len__(self) -> int:
         return len(self.ibtracs)
 
@@ -153,6 +163,38 @@ class TCDataset:
             f"obs_vars={self.obs_vars}, "
             f"radius_km={self.radius_km})"
         )
+
+    # ------------------------------------------------------------------
+    # Storm proximity (spatial background validation)
+    # ------------------------------------------------------------------
+
+    def storm_within(
+        self,
+        lat:          float,
+        lon:          float,
+        timestamp_ns: int,
+        radius_km:    float,
+        time_tol_ns:  int,
+    ) -> bool:
+        """True if any storm sits within radius_km of (lat, lon) at ~timestamp_ns.
+
+        Used by the loader's spatial background policy: a candidate background
+        (point, time) is only clean when this returns False. The time window is
+        a tolerance (±time_tol_ns) since best-track rows sit on the synoptic
+        grid; within it, great-circle (haversine) distance decides proximity —
+        consistent with the station search in get_obs_near. O(log N) binary
+        search on the time-sorted index + a haversine over the windowed slice.
+        """
+        t  = self._storm_time
+        lo = int(np.searchsorted(t, timestamp_ns - time_tol_ns, side='left'))
+        hi = int(np.searchsorted(t, timestamp_ns + time_tol_ns, side='right'))
+        if lo >= hi:
+            return False
+        dist_km = haversine_np(
+            np.float32(lat), np.float32(lon),
+            self._storm_lat[lo:hi], self._storm_lon[lo:hi],
+        )
+        return bool(np.any(dist_km <= radius_km))
 
     # ------------------------------------------------------------------
     # TC sample

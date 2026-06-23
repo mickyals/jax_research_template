@@ -36,6 +36,8 @@ from experiments.tc_perceiver_io.plotting.plotting import (
     plot_confusion_matrix,
     plot_pr_curve,
     plot_pr_curves_per_class,
+    plot_per_class_prediction_maps,
+    plot_class_coverage_map,
 )
 from training.metrics import binary_pr_curve, per_class_pr_curves
 from experiments.tc_perceiver_io.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
@@ -362,3 +364,45 @@ class TestPlotAttentionGeographic:
         assert isinstance(fig0, plt.Figure)
         assert isinstance(fig1, plt.Figure)
         plt.close('all')
+
+
+# ---------------------------------------------------------------------------
+# Spatial classification / coverage maps
+# ---------------------------------------------------------------------------
+
+class TestSpatialMaps:
+
+    _NAMES = ['Background', 'Disturbance', 'Depression', 'Storm',
+              'Cat1', 'Cat2', 'Cat3', 'Cat4', 'Cat5']
+
+    def _data(self, n=60, seed=0):
+        rng = np.random.default_rng(seed)
+        lat = rng.uniform(0, 30, n)
+        lon = rng.uniform(-100, -45, n)
+        true = rng.integers(0, 9, n)
+        pred = rng.integers(0, 9, n)
+        return lat, lon, true, pred
+
+    def test_per_class_maps_one_fig_per_present_class(self):
+        lat, lon, true, pred = self._data()
+        figs = plot_per_class_prediction_maps(
+            lat, lon, true, pred, self._NAMES,
+            fov_lat=[0, 30], fov_lon=[-100, -45], n_classes=9)
+        assert set(figs) == {self._NAMES[c] for c in set(true.tolist())}
+        for f in figs.values():
+            assert isinstance(f, plt.Figure)
+
+    def test_per_class_skips_absent_classes(self):
+        # Only true classes {0, 4} present → exactly two maps.
+        lat = np.array([5.0, 6.0, 7.0]); lon = np.array([-60.0, -61.0, -62.0])
+        true = np.array([0, 4, 0]);       pred = np.array([0, 0, 4])
+        figs = plot_per_class_prediction_maps(
+            lat, lon, true, pred, self._NAMES, n_classes=9)
+        assert set(figs) == {'Background', 'Cat1'}
+
+    def test_coverage_map_returns_figure(self):
+        lat, lon, true, _ = self._data()
+        fig = plot_class_coverage_map(
+            lat, lon, true, self._NAMES,
+            fov_lat=[0, 30], fov_lon=[-100, -45], n_classes=9)
+        assert isinstance(fig, plt.Figure)

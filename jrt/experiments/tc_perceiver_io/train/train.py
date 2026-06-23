@@ -17,6 +17,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
 from typing import Callable, Optional
@@ -29,27 +30,25 @@ import yaml
 from experiments.tc_perceiver_io.data.datamodule import TCDataModule
 from experiments.tc_perceiver_io.train.evaluate import (
     collect_predictions,
-    confusion_matrix,
+    build_eval_figures,
     domain_latlon_for_sample,
-    per_class_metrics,
+    softmax_attn,
 )
 from experiments.tc_perceiver_io.plotting.plotting import (
     plot_attention_geographic,
     plot_attention_matrix_grid,
     plot_decoder_query,
-    plot_class_metrics,
-    plot_confusion_matrix,
-    plot_pr_curve,
-    plot_pr_curves_per_class,
+)
+from experiments.tc_perceiver_io.train._config import (
+    load_config,
+    propagate_location_encoding,
 )
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
 from datasets.class_weights import class_weights_from_counts
 from training.metrics import (
-    binary_pr_curve,
     compute_full_set_metrics,
     cross_entropy,
-    per_class_pr_curves,
 )
 from training.trainer import Trainer, TrainState
 from utils.jax_core.diagnostics import (
@@ -59,6 +58,16 @@ from utils.jax_core.diagnostics import (
     visualize_activations,
     plot_loss_landscape,
 )
+
+
+def _should_run(epoch: int, every_n_epochs: int) -> bool:
+    """Whether an epoch-cadence callback fires this epoch.
+
+    Shared gate for the epoch-level callbacks (attention figures, gradient
+    histograms, eval plots): True when ``every_n_epochs`` is positive and the
+    epoch is a multiple of it. ``0`` (or negative) disables the callback.
+    """
+    return every_n_epochs > 0 and epoch % every_n_epochs == 0
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +124,7 @@ def _make_attn_figure_callback(
     fov_lat:           tuple[float, float] | None = None,
     fov_lon:           tuple[float, float] | None = None,
     fig_every:         int = 5,
+    geo:               bool = False,
 ) -> Callable[[TrainState, int, int], None]:
     """Return an **epoch-level** callback logging the per-component attention maps.
 
@@ -151,30 +161,33 @@ def _make_attn_figure_callback(
     """
     probe_X = probe_batch['X']
 
-    # The probe batch is fixed, so for domain mode decode its sample-0
-    # station/query positions once (plotting does not import the encoding).
-    station_latlon = query_latlon = None
+    # The probe batch is fixed, so resolve its sample-0 geo anchors once:
+    # domain mode decodes station/query lat-lon (plotting does not import the
+    # encoding); unit_circle geo needs the storm centre (lat, lon) to anchor the
+    # azimuthal basemap, taken from the probe meta.
+    station_latlon = query_latlon = storm_latlon = None
     if location_encoding == 'domain':
         station_latlon, query_latlon = domain_latlon_for_sample(
             probe_batch, 0, fov_lat, fov_lon)
+    elif geo and 'meta' in probe_batch and 'query_lat' in probe_batch['meta']:
+        m = probe_batch['meta']
+        storm_latlon = (float(m['query_lat'][0]), float(m['query_lon'][0]))
 
     @jax.jit
     def _attn(params):
         logits, attn = model.apply({'params': params}, probe_X,
                                    train=False, return_weights=True)
-        # softmax the pre-softmax scores (over the LAST axis) so each plotter
-        # renders proper attention distributions.
-        read = jax.nn.softmax(attn['read'], axis=-1)          # (B, H, N, M)
-        proc = jax.nn.softmax(attn['processor'], axis=-1)     # (L, B, H, N, N)
-        dec  = attn.get('decoder')                            # (B, H, 1, N) | None
-        if dec is not None:
-            dec = jax.nn.softmax(dec, axis=-1)
-        return logits, read, proc, dec
+        # softmax_attn turns the pre-softmax scores into distributions (shared
+        # with evaluate.py); decoder is None for decode_mode='avgproj'.
+        return logits, softmax_attn(attn)
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
-        if fig_every <= 0 or epoch % fig_every != 0:
+        if not _should_run(epoch, fig_every):
             return
-        logits, read, proc, dec = _attn(state.params)
+        logits, attn = _attn(state.params)
+        read = np.asarray(attn['read'])          # (B, H, N, M)
+        proc = np.asarray(attn['processor'])     # (L, B, H, N, N)
+        dec  = np.asarray(attn['decoder']) if attn['decoder'] is not None else None
         true_c = class_names[int(probe_batch['y'][0])]
         pred_c = class_names[int(np.asarray(logits)[0].argmax())]
         caption = f'true: {true_c}, pred: {pred_c}'
@@ -183,7 +196,7 @@ def _make_attn_figure_callback(
             np.asarray(read), probe_batch,
             location_encoding=location_encoding,
             fov_lat=fov_lat, fov_lon=fov_lon, radius_km=radius_km,
-            sample_idx=0,
+            sample_idx=0, geo=geo, storm_latlon=storm_latlon,
             station_latlon=station_latlon, query_latlon=query_latlon,
             title=caption,
         )
@@ -293,7 +306,7 @@ def _make_grad_flow_callback(
             )
 
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
-        if every_n_epochs <= 0 or epoch % every_n_epochs != 0:
+        if not _should_run(epoch, every_n_epochs):
             return
         _log(state.params, global_step)
 
@@ -308,6 +321,11 @@ def _make_eval_plots_callback(
     class_names: list[str],
     every_n_epochs: int = 1,
     prefix:      str = 'val',
+    spatial_maps: bool = False,
+    fov_lat=None,
+    fov_lon=None,
+    geo: bool = False,
+    csv_dir=None,
 ) -> Callable[[TrainState, int, int], None]:
     """Return an epoch-level callback that logs confusion / per-class figures
     and full-set scalar metrics under ``<prefix>/...``.
@@ -333,11 +351,11 @@ def _make_eval_plots_callback(
         end-of-training pass).
     """
     def callback(state: TrainState, epoch: int, global_step: int) -> None:
-        if every_n_epochs <= 0 or epoch % every_n_epochs != 0:
+        if not _should_run(epoch, every_n_epochs):
             return
 
         variables = {'params': state.params}
-        preds, labels, logits, _ = collect_predictions(model, variables, val_loader)
+        preds, labels, logits, meta = collect_predictions(model, variables, val_loader)
 
         # Full-set scalars (PR-curve based — not per-batch averageable).
         logger.log_metrics(
@@ -346,37 +364,24 @@ def _make_eval_plots_callback(
             step=global_step,
         )
 
-        cm  = confusion_matrix(preds, labels)
-        pcm = per_class_metrics(cm)
+        # Confusion / per-class / PR figures (+ per-class spatial maps when
+        # spatial_maps, + the per-sample table) from the shared bundle — the same
+        # set evaluate.py saves to disk; here they go to wandb under <prefix>/.
+        figs, table = build_eval_figures(
+            preds, labels, logits, meta, class_names,
+            fov_lat=fov_lat, fov_lon=fov_lon, geo=geo,
+            make_spatial=spatial_maps, label=prefix)
+        for tag, fig in figs.items():
+            logger.log_figure(f'{prefix}/{tag}', fig, step=global_step)
 
-        fig_norm = plot_confusion_matrix(
-            cm, class_names, normalize=True,
-            title=f'{prefix.capitalize()} confusion matrix (recall per class)',
-        )
-        fig_raw = plot_confusion_matrix(
-            cm, class_names, normalize=False,
-            title=f'{prefix.capitalize()} confusion matrix (counts)',
-        )
-        fig_cls = plot_class_metrics(
-            pcm, class_names,
-        )
-
-        logger.log_figure(f'{prefix}/confusion_norm',    fig_norm, step=global_step)
-        logger.log_figure(f'{prefix}/confusion_counts',  fig_raw,  step=global_step)
-        logger.log_figure(f'{prefix}/per_class_metrics', fig_cls,  step=global_step)
-
-        # Precision-recall CURVES (the shape behind the pr_auc / mAP scalars):
-        # binary TC-vs-background detection + per-class one-vs-rest overlay.
-        fig_pr = plot_pr_curve(
-            binary_pr_curve(logits, labels),
-            title=f'{prefix.capitalize()} PR — TC vs. background detection',
-        )
-        fig_pr_cls = plot_pr_curves_per_class(
-            per_class_pr_curves(logits, labels), class_names,
-            title=f'{prefix.capitalize()} per-class PR (one-vs-rest)',
-        )
-        logger.log_figure(f'{prefix}/pr_curve',           fig_pr,     step=global_step)
-        logger.log_figure(f'{prefix}/pr_curves_per_class', fig_pr_cls, step=global_step)
+        # Per-sample classification CSV (sid/time/lat/lon/true/pred/correct/full
+        # 9-class softmax/…) → run artifact, so the wandb test/ section is
+        # self-contained. The maps above are derived from this same table.
+        if csv_dir is not None:
+            csv_path = Path(csv_dir) / f'{prefix}_per_sample.csv'
+            table.to_csv(csv_path, index=False)
+            logger.log_artifact(f'{prefix}_per_sample', csv_path,
+                                artifact_type='predictions')
 
     return callback
 
@@ -428,11 +433,6 @@ def _log_diagnostics(
 # Config helpers
 # ---------------------------------------------------------------------------
 
-def _load_config(path: str | Path) -> dict:
-    with open(path, encoding='utf-8') as f:
-        return yaml.safe_load(f)
-
-
 def _validate_config(config: dict) -> None:
     """Catch config inconsistencies that the JSON schema cannot enforce."""
     n_obs_cfg = config['model'].get('n_obs_features')
@@ -463,6 +463,81 @@ def _print_token_summary(config: dict) -> None:
     print(f"  token_proj  : {raw}d -> {embed}d   (embed_dim D)")
     if max_st:
         print(f"  sequence    : up to {max_st} stations (padded)")
+
+
+def _background_count(data_cfg: dict, batch_size: int,
+                      steps_per_epoch: Optional[int], n_tc_total: int) -> int:
+    """Effective class-0 (background) sample count for class weighting.
+
+    Background is synthesised (random FOV point × pool timestamp), so unlike the
+    TC classes it has no fixed dataset count — its count for the effective-number
+    weighting is a hyperparameter. Resolution:
+      * explicit ``data.n_background`` wins;
+      * else the realized per-epoch sampling count ``steps_per_epoch × bg_half``
+        (random mode), which is what the model actually sees;
+      * else (sequential mode) the ratio-consistent count
+        ``n_tc_total × bg_half / tc_half`` so class 0 sits at the same TC:bg
+        ratio the loader produces.
+    """
+    n = data_cfg.get('n_background')
+    if n is not None:
+        return int(n)
+    tc_frac = data_cfg.get('tc_fraction', 0.5)
+    if isinstance(tc_frac, dict):
+        tc_frac = tc_frac.get('train', 0.5)
+    tc_half = max(1, round(batch_size * tc_frac))
+    bg_half = batch_size - tc_half
+    if steps_per_epoch:
+        return int(steps_per_epoch * bg_half)
+    return int(round(n_tc_total * bg_half / tc_half))
+
+
+def resolve_class_weights(
+    data_cfg:        dict,
+    manifest:        dict,
+    n_classes:       int,
+    batch_size:      int,
+    steps_per_epoch: Optional[int],
+) -> tuple[Optional[list], Optional[dict]]:
+    """Per-class loss weights from the train split's realized counts.
+
+    Single source shared by train.py and tune.py so both weight IDENTICALLY
+    (previously tune.py omitted the background fold-in and diverged). Builds the
+    per-class counts from ``manifest['train']['class_counts']``, folds background
+    (class 0) in via :func:`_background_count` (its count is the ``n_background``
+    hyperparameter, not the raw pool size), then applies
+    ``class_weights_from_counts`` with the configured scheme/beta/normalize.
+
+    Returns
+    -------
+    (weights, info) : (list | None, dict | None)
+        ``weights`` is the length-``n_classes`` list for
+        ``loss_kwargs['class_weights']``; ``info`` is the manifest record
+        (scheme / n_background / effective_counts / weights). Both are ``None``
+        when ``data.class_weight_scheme`` is ``'none'``.
+    """
+    scheme = str(data_cfg.get('class_weight_scheme', 'none'))
+    if scheme == 'none':
+        return None, None
+    counts = [int(manifest['train']['class_counts'].get(str(c), 0))
+              for c in range(n_classes)]
+    # Fold background (class 0) in as a real class with a count (a hyperparameter
+    # — see _background_count) instead of pinning it at 1.0.
+    counts[0] = _background_count(
+        data_cfg, batch_size, steps_per_epoch, n_tc_total=sum(counts))
+    cw = class_weights_from_counts(
+        counts,
+        scheme    = scheme,
+        beta      = data_cfg.get('class_weight_beta', 0.999),
+        normalize = data_cfg.get('class_weight_normalize', True),
+    )
+    info = {
+        'scheme':           scheme,
+        'n_background':     counts[0],
+        'effective_counts': counts,        # all 9, incl. folded-in background
+        'weights':          cw.tolist(),
+    }
+    return cw.tolist(), info
 
 
 def _resolve_run_dir(trainer_cfg: dict, experiment_dir: Path,
@@ -562,7 +637,7 @@ def train(config_path: str | Path, resume: bool = False,
     # Resolve config path immediately so relative paths inside the config
     # can be anchored to the config file's own directory.
     config_path = Path(config_path).resolve()
-    config      = _load_config(config_path)
+    config      = load_config(config_path)
     _validate_config(config)
 
     # Single top-level seed propagated to all components
@@ -586,13 +661,9 @@ def train(config_path: str | Path, resume: bool = False,
     _resolve_schedule_steps(trainer_cfg)
 
     # location_encoding picks the coordinate convention for the datamodule's
-    # encoder. The model is coordinate-agnostic (Senseiver single projection of
-    # whatever coords it is handed), so it is injected into the data block only.
-    loc_enc = config.get('location_encoding', 'unit_circle')
-    config['data']['location_encoding']  = loc_enc
-    # The model is coordinate-agnostic (the learned latent array is the query;
-    # there is no query token to position), so location_encoding configures the
-    # datamodule only — nothing is injected into config['model'].
+    # encoder. The model is coordinate-agnostic, so it is injected into the data
+    # block only (propagate_location_encoding — shared with tune/evaluate).
+    loc_enc = propagate_location_encoding(config)
 
     # ------------------------------------------------------------------
     # Resolve run_dir relative to the experiment root (two levels up from this
@@ -611,6 +682,19 @@ def train(config_path: str | Path, resume: bool = False,
     # facets and the full config is in hparams.json. Overrides log_kwargs.name.
     if name:
         trainer_cfg.setdefault('log_kwargs', {})['name'] = name
+
+    # ------------------------------------------------------------------
+    # Logger — start the run NOW, before the data/model summaries print, so its
+    # stdout (the splits table + the model parameter table) is captured in the
+    # run log. The Trainer below is handed this same logger instead of making
+    # its own.
+    # ------------------------------------------------------------------
+    from training.logger import create_logger
+    logger = create_logger(
+        trainer_cfg.get('log_backend', 'null'),
+        log_dir=str(Path(trainer_cfg['run_dir']).resolve() / 'logs'),
+        **trainer_cfg.get('log_kwargs', {}),
+    )
 
     # ------------------------------------------------------------------
     # Data
@@ -662,24 +746,19 @@ def train(config_path: str | Path, resume: bool = False,
     # in the manifest so the run is reproducible from its artifact.
     manifest    = dm.manifest()
     loss_kwargs = dict(trainer_cfg.get('loss_kwargs') or {})
-    cw_scheme   = config['data'].get('class_weight_scheme', 'none')
     # Precedence: an explicit loss_kwargs.class_weights wins; otherwise a
-    # data.class_weight_scheme is computed from the train split's class counts.
-    if 'class_weights' not in loss_kwargs and cw_scheme != 'none':
-        n_classes = target_spec.n_classes
-        counts = [int(manifest['train']['class_counts'].get(str(c), 0))
-                  for c in range(n_classes)]
-        cw = class_weights_from_counts(
-            counts,
-            scheme = cw_scheme,
-            beta   = config['data'].get('class_weight_beta', 0.999),
-        )
-        loss_kwargs['class_weights'] = cw.tolist()
-        manifest['train']['class_weights'] = {
-            'scheme':  cw_scheme,
-            'weights': cw.tolist(),
-        }
-        print(f"  class weighting [{cw_scheme}]: {np.round(cw, 3).tolist()}")
+    # data.class_weight_scheme is computed from the train split's class counts
+    # (resolve_class_weights — shared with tune.py so both weight identically).
+    if 'class_weights' not in loss_kwargs:
+        weights, info = resolve_class_weights(
+            config['data'], manifest, target_spec.n_classes,
+            trainer_cfg['batch_size'], steps_per_epoch)
+        if weights is not None:
+            loss_kwargs['class_weights'] = weights
+            manifest['train']['class_weights'] = info
+            print(f"  class counts (incl. background) : {info['effective_counts']}")
+            print(f"  class weighting [{info['scheme']}]   : "
+                  f"{np.round(weights, 3).tolist()}")
 
     metrics_fns = build_metrics_fns(
         loss        = trainer_cfg.get('loss', target_spec.loss),
@@ -699,7 +778,7 @@ def train(config_path: str | Path, resume: bool = False,
             f"(have: {sorted(metrics_fns)}) or set patience_metric to val/loss."
         )
 
-    trainer     = Trainer(model, metrics_fns, trainer_cfg)
+    trainer     = Trainer(model, metrics_fns, trainer_cfg, logger=logger)
 
     # Log full config so every run is reproducible from its artifact
     trainer.log_hyperparams(config)
@@ -749,7 +828,8 @@ def train(config_path: str | Path, resume: bool = False,
                                    radius_km=config['data'].get('radius_km', 500.0),
                                    fov_lat=config['data'].get('fov_lat'),
                                    fov_lon=config['data'].get('fov_lon'),
-                                   fig_every=fig_every),
+                                   fig_every=fig_every,
+                                   geo=bool(config['data'].get('eval_geo_maps', False))),
         _make_eval_plots_callback(model, val_loader, trainer.logger,
                                   class_names=class_names,
                                   every_n_epochs=eval_plots_every),
@@ -806,6 +886,11 @@ def train(config_path: str | Path, resume: bool = False,
     _make_eval_plots_callback(
         model, test_loader, trainer.logger, class_names=class_names,
         every_n_epochs=1, prefix='test',
+        spatial_maps=True,
+        fov_lat=config['data'].get('fov_lat'),
+        fov_lon=config['data'].get('fov_lon'),
+        geo=bool(config['data'].get('eval_geo_maps', False)),
+        csv_dir=run_dir,
     )(best_state, epoch=0, global_step=int(best_state.step))
 
     # Finalize logger here, after test(), so test metrics are logged before
@@ -817,6 +902,33 @@ def train(config_path: str | Path, resume: bool = False,
 # CLI
 # ---------------------------------------------------------------------------
 
+def _pin_gpu(cli_gpu: Optional[str], config_path: str | Path) -> None:
+    """Pin training to a single GPU via CUDA_VISIBLE_DEVICES.
+
+    JAX otherwise claims EVERY visible GPU and preallocates memory on each — not
+    what you want for single-device training on a shared multi-GPU box. The
+    device is resolved from ``--gpu``, else the config's top-level ``gpu`` field.
+    A ``CUDA_VISIBLE_DEVICES`` already set in the shell always wins.
+
+    Must run before the first JAX device op. JAX's GPU backend initialises
+    lazily (not at ``import jax``), so calling this at the top of ``__main__``,
+    before ``train()``, is sufficient. For an absolute guarantee, export
+    ``CUDA_VISIBLE_DEVICES`` in the shell instead.
+    """
+    if 'CUDA_VISIBLE_DEVICES' in os.environ:
+        return                                   # shell setting wins
+    gpu = cli_gpu
+    if gpu is None:
+        try:
+            with open(config_path, encoding='utf-8') as f:
+                gpu = yaml.safe_load(f).get('gpu')
+        except (OSError, yaml.YAMLError):
+            gpu = None
+    if gpu is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
+        print(f"  [device] CUDA_VISIBLE_DEVICES={gpu} (single-GPU pin)")
+
+
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Train TCPerceiverIO for tc_perceiver_io experiment."
@@ -825,6 +937,14 @@ def _parse_args(argv=None):
         "config",
         type=str,
         help="Path to YAML config file.",
+    )
+    parser.add_argument(
+        "--gpu",
+        type=str,
+        default=None,
+        help="GPU index to pin to (sets CUDA_VISIBLE_DEVICES; overrides the "
+             "config's top-level `gpu`). On a multi-GPU box this stops JAX from "
+             "grabbing and preallocating memory on every device.",
     )
     parser.add_argument(
         "--resume",
@@ -845,4 +965,5 @@ def _parse_args(argv=None):
 
 if __name__ == "__main__":
     args = _parse_args()
+    _pin_gpu(args.gpu, args.config)      # before any JAX device op
     train(args.config, resume=args.resume, name=args.name)

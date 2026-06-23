@@ -181,6 +181,7 @@ class Trainer:
         model:       Any,
         metrics_fns: dict[str, Callable],
         config:      dict,
+        logger:      Any = None,
     ) -> None:
         self.model       = model
         self.metrics_fns = metrics_fns
@@ -261,7 +262,10 @@ class Trainer:
             )
 
         # --- logger ---
-        self._logger = create_logger(
+        # A pre-built logger may be passed in (e.g. so the caller can start the
+        # run — and its stdout capture — BEFORE the Trainer is constructed);
+        # otherwise build one from the config here.
+        self._logger = logger if logger is not None else create_logger(
             config.get("log_backend", "null"),
             log_dir=_log_dir,
             **config.get("log_kwargs", {}),
@@ -483,7 +487,16 @@ class Trainer:
         """
         totals  = {k: 0.0 for k in self.metrics_fns}
         n_total = 0
-        for batch in val_loader:
+
+        # Progress bar for the eval pass (val during training, test at the end)
+        # so a finished train bar isn't followed by a silent wait.
+        iterator = val_loader
+        if self._use_tqdm and _TQDM_AVAILABLE:
+            n_batches = len(val_loader) if hasattr(val_loader, "__len__") else None
+            iterator  = _tqdm(val_loader, total=n_batches,
+                              desc=f"  {prefix:<5}", unit="batch", leave=False)
+
+        for batch in iterator:
             batch   = _to_jax_batch(batch)
             n       = _leading_dim(batch["X"])
             metrics = self._eval_step(state, batch)
@@ -611,9 +624,12 @@ class Trainer:
     def write_manifest(self, manifest: dict, filename: str = "manifest.json") -> None:
         """Write a run manifest next to checkpoints and push it to the logger.
 
-        The file under checkpoint_dir is the source of truth; the logger
-        copy (via log_hyperparams) is a convenience for browsing alongside
-        the run's config.
+        Three destinations: the file under checkpoint_dir is the source of
+        truth; ``log_hyperparams`` puts a browsable copy in the run config; and
+        ``log_artifact`` uploads the file itself as a per-run artifact (wandb:
+        the run's Artifacts tab, downloadable; TensorBoard/null: the path is
+        printed). The last one is what makes the manifest visible *per run* in
+        wandb rather than buried in the config.
 
         Parameters
         ----------
@@ -629,6 +645,7 @@ class Trainer:
         with open(path, "w") as fh:
             json.dump(manifest, fh, indent=2, default=str)
         self._logger.log_hyperparams({"manifest": manifest})
+        self._logger.log_artifact("manifest", path, "manifest")
 
     def init_state(self, exmp_batch: dict) -> TrainState:
         """Initialise model and optimizer state from one example batch.

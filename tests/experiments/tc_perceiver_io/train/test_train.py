@@ -397,6 +397,8 @@ import matplotlib
 matplotlib.use('Agg')   # headless — set before train.py pulls in pyplot
 
 from experiments.tc_perceiver_io.train.train import (   # noqa: E402
+    _background_count,
+    resolve_class_weights,
     _make_attn_entropy_callback,
     _make_attn_figure_callback,
     _make_eval_plots_callback,
@@ -610,3 +612,107 @@ class TestRunDirAndTokenSummary:
                          'missingness_indicator': False}, 'data': {}}
         _print_token_summary(cfg)
         assert '69d' in capsys.readouterr().out   # 5 + 64 (no mask channel)
+
+
+class TestPinGpu:
+
+    def test_cli_gpu_sets_env(self, tmp_path, monkeypatch):
+        import os
+        from experiments.tc_perceiver_io.train.train import _pin_gpu
+        monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
+        _pin_gpu('2', tmp_path / 'missing.yaml')   # cli wins; config not needed
+        assert os.environ['CUDA_VISIBLE_DEVICES'] == '2'
+
+    def test_existing_env_wins(self, monkeypatch):
+        import os
+        from experiments.tc_perceiver_io.train.train import _pin_gpu
+        monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '5')
+        _pin_gpu('2', 'whatever.yaml')
+        assert os.environ['CUDA_VISIBLE_DEVICES'] == '5'
+
+    def test_reads_config_gpu(self, tmp_path, monkeypatch):
+        import os
+        from experiments.tc_perceiver_io.train.train import _pin_gpu
+        monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
+        cfg = tmp_path / 'c.yaml'
+        cfg.write_text('gpu: 3\n')
+        _pin_gpu(None, cfg)
+        assert os.environ['CUDA_VISIBLE_DEVICES'] == '3'
+
+    def test_no_gpu_anywhere_leaves_env_unset(self, tmp_path, monkeypatch):
+        import os
+        from experiments.tc_perceiver_io.train.train import _pin_gpu
+        monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
+        cfg = tmp_path / 'c.yaml'
+        cfg.write_text('seed: 1\n')
+        _pin_gpu(None, cfg)
+        assert 'CUDA_VISIBLE_DEVICES' not in os.environ
+
+
+class TestBackgroundCount:
+
+    def test_explicit_wins(self):
+        n = _background_count({'n_background': 5000, 'tc_fraction': 0.1},
+                              batch_size=128, steps_per_epoch=2000, n_tc_total=7000)
+        assert n == 5000
+
+    def test_random_mode_is_realized_count(self):
+        # steps × bg_half ; bg_half = 128 - round(128*0.1)=128-13=115
+        n = _background_count({'tc_fraction': 0.1}, batch_size=128,
+                              steps_per_epoch=2000, n_tc_total=7000)
+        assert n == 2000 * 115
+
+    def test_sequential_mode_is_ratio_consistent(self):
+        # no steps_per_epoch → n_tc_total × bg_half/tc_half = 7000 × 115/13
+        n = _background_count({'tc_fraction': 0.1}, batch_size=128,
+                              steps_per_epoch=None, n_tc_total=7000)
+        assert n == round(7000 * 115 / 13)
+
+    def test_per_split_tc_fraction_dict(self):
+        # a dict tc_fraction uses the 'train' entry
+        n = _background_count({'tc_fraction': {'train': 0.5}}, batch_size=128,
+                              steps_per_epoch=100, n_tc_total=7000)
+        assert n == 100 * (128 - 64)
+
+
+class TestResolveClassWeights:
+    """Shared by train.py + tune.py — both weight identically (incl. the
+    background fold-in that tune.py used to omit)."""
+
+    def _manifest(self):
+        return {'train': {'class_counts': {
+            '0': 500, '1': 100, '2': 50, '3': 30,
+            '4': 10, '5': 5, '6': 4, '7': 3, '8': 1}}}
+
+    def test_none_scheme_returns_none(self):
+        w, info = resolve_class_weights(
+            {'class_weight_scheme': 'none'}, self._manifest(), 9, 128, 2000)
+        assert w is None and info is None
+
+    def test_background_folded_in_from_n_background(self):
+        # Explicit n_background HP overrides the manifest pool count (500).
+        w, info = resolve_class_weights(
+            {'class_weight_scheme': 'effective_number', 'n_background': 1_000_000},
+            self._manifest(), 9, 128, 2000)
+        assert len(w) == 9
+        assert info['n_background'] == 1_000_000        # NOT 500 (the fold-in)
+        assert info['effective_counts'][0] == 1_000_000
+
+    def test_default_background_is_steps_times_bg_half(self):
+        # No n_background → realized per-epoch count (random mode).
+        # tc_fraction 0.1 @ batch 128 → tc_half=13, bg_half=115; ×2000 steps.
+        w, info = resolve_class_weights(
+            {'class_weight_scheme': 'effective_number', 'tc_fraction': 0.1},
+            self._manifest(), 9, 128, 2000)
+        assert info['n_background'] == 2000 * (128 - max(1, round(128 * 0.1)))
+
+    def test_normalize_flag_changes_recorded_weights(self):
+        cfg = {'class_weight_scheme': 'effective_number', 'n_background': 1_000_000}
+        w_norm, _ = resolve_class_weights({**cfg, 'class_weight_normalize': True},
+                                          self._manifest(), 9, 128, 2000)
+        w_raw, _  = resolve_class_weights({**cfg, 'class_weight_normalize': False},
+                                          self._manifest(), 9, 128, 2000)
+        # same ratios, different scale (mean-1 vs raw)
+        assert w_norm != w_raw
+        assert np.allclose(np.array(w_norm) / np.array(w_norm).mean(),
+                           np.array(w_raw) / np.array(w_raw).mean())

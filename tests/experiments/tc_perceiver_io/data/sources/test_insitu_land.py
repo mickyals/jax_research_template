@@ -321,3 +321,26 @@ class TestFilterReliabilityShortCircuit:
         from experiments.tc_perceiver_io.data.sources.insitu_land import RELIABILITY_LEVELS
         # Listing every level keeps all stations → identity short-circuit.
         assert ds.filter_reliability(list(RELIABILITY_LEVELS)) is ds
+
+
+class TestAutoCache:
+
+    def test_builds_sibling_cache_and_reuses(self, paths):
+        obs_path, meta_path, *_ = paths
+        sibling = obs_path.with_name(obs_path.stem + '_sorted')
+        assert not sibling.exists()
+
+        ds1 = InsituLandDataset(obs_path, meta_path, cache_sorted=True)
+        assert (sibling / 'manifest.json').exists()          # cache built on slow load
+
+        # A later construction (cache_sorted default False) auto-uses the cache.
+        ds2 = InsituLandDataset(obs_path, meta_path)
+        assert isinstance(ds2._obs['report_timestamp'], np.memmap)
+        np.testing.assert_array_equal(
+            np.asarray(ds1.timestamps), np.asarray(ds2.timestamps))
+
+    def test_no_cache_when_disabled(self, paths):
+        obs_path, meta_path, *_ = paths
+        sibling = obs_path.with_name(obs_path.stem + '_sorted')
+        InsituLandDataset(obs_path, meta_path, cache_sorted=False)
+        assert not sibling.exists()

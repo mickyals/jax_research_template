@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from utils.geoscience.geodesic import vincenty_np
+from utils.geoscience.geodesic import initial_bearing_np
 from utils.registry import Registry
 
 _HALF_PI = np.pi / 2.0
@@ -148,23 +148,18 @@ def _unit_circle_coords(df, query_lat, query_lon,
     """Encode station positions on the storm-centred unit map.
 
     Distance comes from the candidate frame's 'distance_km'; bearing is the
-    forward azimuth from the query to each station (Vincenty). NaN bearings
-    (near-coincident points) collapse to 0. The query sits at the origin.
+    closed-form spherical forward azimuth from the query to each station
+    (``initial_bearing_np`` — one-shot, consistent with the spherical haversine
+    distance; an earlier Vincenty call ran 200 iterations per sample and
+    dominated assembly cost). Coincident points give bearing 0. Query at origin.
     """
-    n         = len(df)
     dist_km   = df['distance_km'].to_numpy(dtype=np.float32)
     norm_dist = np.clip(dist_km / radius_km, 0.0, 1.0)
     raw_lats  = df['latitude'].to_numpy(dtype=np.float32)
     raw_lons  = df['longitude'].to_numpy(dtype=np.float32)
 
-    _, bearing_deg, _, _ = vincenty_np(
-        np.full(n, query_lat),
-        np.full(n, query_lon),
-        raw_lats.astype(np.float64),
-        raw_lons.astype(np.float64),
-    )
+    bearing_deg = initial_bearing_np(query_lat, query_lon, raw_lats, raw_lons)
     bearing_rad = np.radians(bearing_deg).astype(np.float32)
-    bearing_rad = np.where(np.isfinite(bearing_rad), bearing_rad, 0.0)
 
     x, y = encode_unit_circle(norm_dist, bearing_rad)
     station_coords = np.stack([x, y], axis=-1).astype(np.float32)   # (N, 2)

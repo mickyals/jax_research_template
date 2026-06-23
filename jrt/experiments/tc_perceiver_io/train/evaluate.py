@@ -41,8 +41,11 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-import yaml
 
+from experiments.tc_perceiver_io.train._config import (
+    load_config,
+    propagate_location_encoding,
+)
 from experiments.tc_perceiver_io.data.datamodule import TCDataModule
 from experiments.tc_perceiver_io.data.transforms.encoding import decode_domain
 from experiments.tc_perceiver_io.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
@@ -61,6 +64,7 @@ from experiments.tc_perceiver_io.plotting.plotting import (
     plot_decoder_query,
     plot_pr_curve,
     plot_pr_curves_per_class,
+    plot_per_class_prediction_maps,
 )
 from training.trainer import Trainer
 
@@ -148,6 +152,194 @@ def collect_predictions(
         np.concatenate(all_logits),
         meta,
     )
+
+
+def _softmax_np(logits: np.ndarray) -> np.ndarray:
+    """Row-wise softmax (numerically stable)."""
+    e = np.exp(logits - logits.max(axis=-1, keepdims=True))
+    return e / e.sum(axis=-1, keepdims=True)
+
+
+def softmax_attn(attn: dict) -> dict:
+    """Softmax the model's pre-softmax attention scores, per component.
+
+    Turns ``model.apply(..., return_weights=True)``'s raw scores into attention
+    DISTRIBUTIONS (softmax over the last axis): ``read`` (B,H,N,M), ``processor``
+    (L,B,H,N,N), and ``decoder`` (B,H,1,N) — the last is ``None`` for
+    ``decode_mode='avgproj'``. One home for the softmax + decoder-None handling,
+    shared by the train.py attention-figure callback and evaluate.py's attention
+    plots (callers that need only ``read`` softmax it inline to avoid the extra
+    processor/decoder work).
+    """
+    dec = attn.get('decoder')
+    return {
+        'read':      jax.nn.softmax(attn['read'],      axis=-1),
+        'processor': jax.nn.softmax(attn['processor'], axis=-1),
+        'decoder':   jax.nn.softmax(dec, axis=-1) if dec is not None else None,
+    }
+
+
+def per_sample_table(
+    preds:       np.ndarray,
+    labels:      np.ndarray,
+    logits:      np.ndarray,
+    meta:        Optional[dict],
+    class_names: list[str],
+):
+    """Build a per-sample classification table (one row per test sample).
+
+    Columns: ``sid`` (None→'background'), ``iso_time`` (UTC), ``query_lat`` /
+    ``query_lon`` (degrees), ``true`` / ``true_name``, ``pred`` / ``pred_name``,
+    ``correct``, ``max_prob`` (top softmax probability), ``p_true`` (probability
+    assigned to the true class), the FULL softmax distribution as one column per
+    class (``p_<class_name>``, spaces → underscores; these sum to 1 per row), and
+    the station counts ``n_used`` / ``n_available``. Everything comes from the
+    accumulated predictions plus the loader ``meta`` (see collect_predictions) —
+    no extra inference. Pairs with the spatial maps: same positions, now per row,
+    to study WHICH storms (by SID/time/place) are misclassified and how
+    confidently, plus where the probability mass leaks (e.g. Cat3↔Cat4).
+
+    Returns
+    -------
+    pandas.DataFrame
+    """
+    import pandas as pd
+
+    preds  = np.asarray(preds)
+    labels = np.asarray(labels)
+    n      = len(preds)
+    probs  = _softmax_np(np.asarray(logits, dtype=np.float64))
+    n_cls  = probs.shape[1]
+
+    def _names(arr):
+        return [class_names[int(c)] if int(c) < len(class_names) else str(int(c))
+                for c in arr]
+
+    meta = meta or {}
+    sid  = [(s if s is not None else 'background') for s in meta.get('sid', [None] * n)]
+    cols = {
+        'sid':         sid,
+        'true':        labels,
+        'true_name':   _names(labels),
+        'pred':        preds,
+        'pred_name':   _names(preds),
+        'correct':     preds == labels,
+        'max_prob':    probs.max(axis=-1),
+        'p_true':      probs[np.arange(n), labels],
+    }
+    # Full per-class softmax distribution — one column per class (sum to 1).
+    for c in range(n_cls):
+        cname = class_names[c] if c < len(class_names) else f'class{c}'
+        cols[f'p_{cname.replace(" ", "_")}'] = probs[:, c]
+    if 'iso_time' in meta:
+        cols['iso_time'] = pd.to_datetime(np.asarray(meta['iso_time']), utc=True)
+    for k in ('query_lat', 'query_lon', 'n_used', 'n_available'):
+        if k in meta:
+            cols[k] = np.asarray(meta[k])
+    return pd.DataFrame(cols)
+
+
+def build_prediction_outputs(
+    preds:       np.ndarray,
+    labels:      np.ndarray,
+    logits:      np.ndarray,
+    meta:        Optional[dict],
+    class_names: list[str],
+    fov_lat=None,
+    fov_lon=None,
+    geo:         bool = False,
+    make_maps:   bool = True,
+):
+    """Single source for the two test-time per-sample artifacts.
+
+    Builds the per-sample table ONCE (per_sample_table), then derives the
+    per-class spatial maps from that table's own ``query_lat``/``query_lon``/
+    ``true``/``pred`` columns — so the saved CSV and the maps are guaranteed to
+    describe the exact same rows, and the position/label extraction is not
+    repeated. Both call sites (evaluate.py CLI and train.py's end-of-train test
+    pass) use this and only differ in where they send the results (disk vs.
+    wandb artifact/figures).
+
+    Parameters
+    ----------
+    make_maps : bool
+        Build the per-class FOV maps (the expensive part). False → only the
+        table (e.g. when spatial maps are disabled). Maps also need the position
+        columns; absent them, an empty dict is returned regardless.
+
+    Returns
+    -------
+    (table, figs) : (pandas.DataFrame, dict[str, plt.Figure])
+        ``figs`` is empty when ``make_maps`` is False or positions are missing.
+    """
+    table = per_sample_table(preds, labels, logits, meta, class_names)
+    figs: dict = {}
+    if make_maps and {'query_lat', 'query_lon'}.issubset(table.columns):
+        figs = plot_per_class_prediction_maps(
+            table['query_lat'].to_numpy(), table['query_lon'].to_numpy(),
+            table['true'].to_numpy(),      table['pred'].to_numpy(),
+            class_names, fov_lat=fov_lat, fov_lon=fov_lon, geo=geo,
+            n_classes=len(class_names),
+        )
+    return table, figs
+
+
+def build_eval_figures(
+    preds:       np.ndarray,
+    labels:      np.ndarray,
+    logits:      np.ndarray,
+    meta:        Optional[dict],
+    class_names: list[str],
+    n_classes:   Optional[int] = None,
+    fov_lat=None,
+    fov_lon=None,
+    geo:          bool = False,
+    make_spatial: bool = True,
+    label:        str  = '',
+):
+    """Assemble the standard evaluation figure bundle (+ the per-sample table).
+
+    SINGLE source for the figures that train.py logs (end-of-epoch val / end-of-
+    train test pass) AND that evaluate.py saves to disk — the two used to build
+    the identical confusion / per-class / PR / spatial sequence independently.
+    Callers now differ only in the SINK (wandb ``log_figure`` vs ``savefig``).
+
+    Returns
+    -------
+    (figs, table) : (dict[str, plt.Figure], pandas.DataFrame)
+        ``figs`` keys double as wandb sub-tags (``f'{prefix}/{key}'``) and, with
+        ``'/'`` → ``'_'``, as PNG filename stems: ``confusion_norm``,
+        ``confusion_counts``, ``per_class_metrics``, ``pr_curve``,
+        ``pr_curves_per_class``, and ``spatial_pred/<class>`` (when
+        ``make_spatial`` and positions are present). ``table`` is the per-sample
+        DataFrame — spatial maps and table come from build_prediction_outputs
+        (one derivation, so the saved CSV and the maps describe the same rows).
+    """
+    n_classes = n_classes or len(class_names)
+    sfx = f' ({label})' if label else ''
+    cm  = confusion_matrix(preds, labels, n_classes)
+    pcm = per_class_metrics(cm)
+    figs: dict = {
+        'confusion_norm':      plot_confusion_matrix(
+            cm, class_names, normalize=True,
+            title=f'Confusion matrix — recall per class{sfx}'),
+        'confusion_counts':    plot_confusion_matrix(
+            cm, class_names, normalize=False,
+            title=f'Confusion matrix — counts{sfx}'),
+        'per_class_metrics':   plot_class_metrics(pcm, class_names),
+        'pr_curve':            plot_pr_curve(
+            binary_pr_curve(logits, labels),
+            title=f'PR — TC vs. background detection{sfx}'),
+        'pr_curves_per_class': plot_pr_curves_per_class(
+            per_class_pr_curves(logits, labels), class_names,
+            title=f'Per-class PR — one-vs-rest{sfx}'),
+    }
+    table, spatial = build_prediction_outputs(
+        preds, labels, logits, meta, class_names,
+        fov_lat=fov_lat, fov_lon=fov_lon, geo=geo, make_maps=make_spatial)
+    for name, fig in spatial.items():
+        figs[f'spatial_pred/{name}'] = fig
+    return figs, table
 
 
 def collect_class_exemplars(loader, n_classes: int):
@@ -356,9 +548,6 @@ def print_report(
 # Main evaluation pipeline
 # ---------------------------------------------------------------------------
 
-def _load_config(path: str | Path) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
 
 
 def evaluate(
@@ -393,18 +582,13 @@ def evaluate(
         borders): azimuthal storm-centred for unit_circle, PlateCarree
         for domain. Requires cartopy (optional dependency).
     """
-    config = _load_config(config_path)
+    config = load_config(config_path)
     if checkpoint_dir is not None:
         config['trainer']['checkpoint_dir'] = str(checkpoint_dir)
 
-    # Coordinate convention (top-level) drives the datamodule encoding and the
-    # CLS position handling — must match training for the checkpoint to load.
-    loc_enc = config.get('location_encoding',
-                         config['data'].get('location_encoding', 'unit_circle'))
-    config['data']['location_encoding'] = loc_enc
-    # The model is coordinate-agnostic (the learned latent array is the query),
-    # so location_encoding configures the datamodule only — nothing is injected
-    # into config['model'].
+    # Coordinate convention (top-level) drives the datamodule encoding — must
+    # match training for the checkpoint to load. Shared with train/tune.
+    loc_enc = propagate_location_encoding(config)
     radius_km = float(config['data'].get('radius_km', 500.0))
     fov_lat   = config['data'].get('fov_lat')
     fov_lon   = config['data'].get('fov_lon')
@@ -441,36 +625,22 @@ def evaluate(
                   f"mae={m['mae_class']:.2f}")
         print()
 
-    cm  = confusion_matrix(preds, labels, n_classes)
-    pcm = per_class_metrics(cm)
-
-    fig_norm = plot_confusion_matrix(
-        cm, class_names, normalize=True,
-        title=f'Confusion Matrix — {split} (row-normalised)',
-    )
-    fig_raw = plot_confusion_matrix(
-        cm, class_names, normalize=False,
-        title=f'Confusion Matrix — {split} (counts)',
-    )
-    fig_cls = plot_class_metrics(pcm, class_names)
-
-    # Precision-recall curves (the shape behind pr_auc / mAP).
-    fig_pr     = plot_pr_curve(
-        binary_pr_curve(logits, labels),
-        title=f'PR — TC vs. background detection ({split})')
-    fig_pr_cls = plot_pr_curves_per_class(
-        per_class_pr_curves(logits, labels), class_names,
-        title=f'Per-class PR — one-vs-rest ({split})')
+    # Confusion / per-class / PR / spatial figures + per-sample table from the
+    # shared bundle (build_eval_figures) — the same set train.py logs to wandb.
+    figs, sample_table = build_eval_figures(
+        preds, labels, logits, meta, class_names,
+        n_classes=n_classes, fov_lat=fov_lat, fov_lon=fov_lon, geo=geo,
+        label=split)
 
     if output_dir is not None:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
-        fig_norm.savefig(out / f'{split}_confusion_norm.png',    dpi=150, bbox_inches='tight')
-        fig_raw.savefig( out / f'{split}_confusion_counts.png',  dpi=150, bbox_inches='tight')
-        fig_cls.savefig( out / f'{split}_per_class_metrics.png', dpi=150, bbox_inches='tight')
-        fig_pr.savefig(  out / f'{split}_pr_curve.png',          dpi=150, bbox_inches='tight')
-        fig_pr_cls.savefig(out / f'{split}_pr_curves_per_class.png', dpi=150, bbox_inches='tight')
-        print(f"Confusion / metrics / PR-curve plots saved to {out}/")
+        for tag, fig in figs.items():
+            stem = tag.replace('/', '_').replace(' ', '_').lower()
+            fig.savefig(out / f'{split}_{stem}.png', dpi=150, bbox_inches='tight')
+        csv_path = out / f'{split}_per_sample.csv'
+        sample_table.to_csv(csv_path, index=False)
+        print(f"Eval figures ({len(figs)}) + per-sample table saved to {out}/")
 
     # ------------------------------------------------------------------
     # Attention plots — the three Perceiver-IO components (pre-softmax scores,
@@ -484,10 +654,11 @@ def evaluate(
         attn_batch   = exmp_batch  # first batch reused
         logits, attn = model.apply(variables, attn_batch['X'],
                                    train=False, return_weights=True)
-        read   = np.asarray(jax.nn.softmax(attn['read'],      axis=-1))  # (B,H,N,M)
-        proc   = np.asarray(jax.nn.softmax(attn['processor'], axis=-1))  # (L,B,H,N,N)
-        dec    = attn.get('decoder')
-        dec    = np.asarray(jax.nn.softmax(dec, axis=-1)) if dec is not None else None
+        attn_s = softmax_attn(attn)                          # distributions
+        read   = np.asarray(attn_s['read'])                 # (B,H,N,M)
+        proc   = np.asarray(attn_s['processor'])            # (L,B,H,N,N)
+        dec    = (np.asarray(attn_s['decoder'])
+                  if attn_s['decoder'] is not None else None)
         n_plot = min(n_attn_samples, proc.shape[1])
 
         # Per-batch predictions + storm attribution for figure titles.
