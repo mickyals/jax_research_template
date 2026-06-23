@@ -31,7 +31,9 @@ import matplotlib.pyplot as plt
 
 from utils.plotting._style import _value_scatter
 from utils.plotting.curves import plot_grouped_bars
-from utils.plotting.fields import plot_heatmap, plot_scatter_overlay
+from utils.plotting.fields import (
+    plot_heatmap, plot_scatter_overlay, plot_categorical_scatter,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -467,4 +469,91 @@ def plot_attention_geographic(
         scatter_size_range=(30, 280), grid=True, geo=geo,
         marker_x=q_lon, marker_y=q_lat, marker_label='Storm centre',
         marker_kwargs={'s': 250}, figsize=(9, 7),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Spatial classification / coverage maps over the study region (FOV)
+# ---------------------------------------------------------------------------
+
+def _fov_extent(fov_lat, fov_lon):
+    """[lon_min, lon_max, lat_min, lat_max] for the FOV, or None."""
+    if fov_lat is None or fov_lon is None:
+        return None
+    return [float(fov_lon[0]), float(fov_lon[1]),
+            float(fov_lat[0]), float(fov_lat[1])]
+
+
+def plot_per_class_prediction_maps(
+    query_lat:   np.ndarray,
+    query_lon:   np.ndarray,
+    true:        np.ndarray,
+    pred:        np.ndarray,
+    class_names: list[str],
+    fov_lat=None,
+    fov_lon=None,
+    geo: bool = False,
+    n_classes: Optional[int] = None,
+) -> dict[str, plt.Figure]:
+    """One FOV map per TRUE class, its samples coloured by PREDICTED class.
+
+    Shows *where* the model classifies each class well (mostly the class's own
+    colour) vs. confuses it (other colours) across the study region — e.g. the
+    Background panel reveals where false positives cluster geographically.
+    Sample positions are the geographic query points ``query_lat``/``query_lon``
+    (degrees), which are the real storm centres regardless of location_encoding.
+
+    Composes the template primitive ``plot_categorical_scatter`` (colours keyed
+    by class index, so a predicted class is the same colour in every panel).
+
+    Returns
+    -------
+    dict[str, plt.Figure]
+        ``{class_name: figure}`` for each true class with ≥1 sample (empty
+        classes are skipped — nothing to plot).
+    """
+    n        = int(n_classes) if n_classes is not None else len(class_names)
+    extent   = _fov_extent(fov_lat, fov_lon)
+    true     = np.asarray(true)
+    pred     = np.asarray(pred)
+    qlat     = np.asarray(query_lat)
+    qlon     = np.asarray(query_lon)
+    figs: dict[str, plt.Figure] = {}
+    for c in range(n):
+        m = true == c
+        cnt = int(m.sum())
+        if cnt == 0:
+            continue
+        name = class_names[c] if c < len(class_names) else f"class {c}"
+        figs[name] = plot_categorical_scatter(
+            qlon[m], qlat[m], pred[m], class_names,
+            n_classes=n, extent=extent, geo=geo,
+            title=f"True {name} (n={cnt}) — coloured by predicted class",
+            xlabel="longitude", ylabel="latitude",
+        )
+    return figs
+
+
+def plot_class_coverage_map(
+    query_lat:   np.ndarray,
+    query_lon:   np.ndarray,
+    true:        np.ndarray,
+    class_names: list[str],
+    fov_lat=None,
+    fov_lon=None,
+    geo: bool = False,
+    n_classes: Optional[int] = None,
+) -> plt.Figure:
+    """Single FOV map of all sample positions coloured by TRUE class.
+
+    A pure data diagnostic (no model) — where background and each storm class
+    sit across the study region, so the spatial coverage/imbalance is visible.
+    Composes ``plot_categorical_scatter``.
+    """
+    return plot_categorical_scatter(
+        np.asarray(query_lon), np.asarray(query_lat), np.asarray(true),
+        class_names, n_classes=n_classes or len(class_names),
+        extent=_fov_extent(fov_lat, fov_lon), geo=geo,
+        title="Sample coverage by true class",
+        xlabel="longitude", ylabel="latitude",
     )

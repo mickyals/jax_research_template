@@ -10,6 +10,7 @@ from utils.plotting.fields import (
     plot_field_2d,
     plot_field_comparison_2d,
     plot_scatter_overlay,
+    plot_categorical_scatter,
     plot_heatmap,
     plot_mollweide,
     plot_mollweide_comparison,
@@ -458,3 +459,54 @@ class TestPlotMollweideComparison:
             scatter_cmap="viridis",
             verbose=False,
         )
+
+# ---------------------------------------------------------------------------
+# plot_categorical_scatter
+# ---------------------------------------------------------------------------
+
+class TestPlotCategoricalScatter:
+
+    _NAMES = [f"c{i}" for i in range(9)]
+
+    @patch("matplotlib.pyplot.show")
+    def test_returns_figure(self, mock_show):
+        rng = np.random.default_rng(0)
+        fig = plot_categorical_scatter(
+            rng.uniform(-100, -40, 30), rng.uniform(0, 30, 30),
+            rng.integers(0, 9, 30), self._NAMES, n_classes=9,
+            extent=[-100, -40, 0, 30])
+        assert isinstance(fig, Figure)
+
+    @patch("matplotlib.pyplot.show")
+    def test_full_key_shows_all_classes(self, mock_show):
+        # Only classes {0, 2} present, but the default legend is a full 9-key.
+        fig = plot_categorical_scatter(
+            np.array([-80.0, -70.0]), np.array([10.0, 20.0]),
+            np.array([0, 2]), self._NAMES, n_classes=9)
+        texts = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+        assert len(texts) == 9
+
+    @patch("matplotlib.pyplot.show")
+    def test_legend_present_only(self, mock_show):
+        fig = plot_categorical_scatter(
+            np.array([-80.0, -70.0]), np.array([10.0, 20.0]),
+            np.array([0, 2]), self._NAMES, n_classes=9,
+            legend_present_only=True)
+        texts = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+        assert set(texts) == {"c0", "c2"}
+
+    @patch("matplotlib.pyplot.show")
+    def test_extent_sets_limits(self, mock_show):
+        fig = plot_categorical_scatter(
+            np.array([-80.0]), np.array([10.0]), np.array([1]),
+            self._NAMES, n_classes=9, extent=[-100, -40, 0, 30])
+        ax = fig.axes[0]
+        assert ax.get_xlim() == (-100, -40)
+        assert ax.get_ylim() == (0, 30)
+
+    @patch("matplotlib.pyplot.show")
+    def test_empty_points_ok(self, mock_show):
+        fig = plot_categorical_scatter(
+            np.array([]), np.array([]), np.array([], dtype=int),
+            self._NAMES, n_classes=9)
+        assert isinstance(fig, Figure)

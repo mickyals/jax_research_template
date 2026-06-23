@@ -42,6 +42,7 @@ from experiments.tc_perceiver_io.plotting.plotting import (
     plot_confusion_matrix,
     plot_pr_curve,
     plot_pr_curves_per_class,
+    plot_per_class_prediction_maps,
 )
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
@@ -309,6 +310,10 @@ def _make_eval_plots_callback(
     class_names: list[str],
     every_n_epochs: int = 1,
     prefix:      str = 'val',
+    spatial_maps: bool = False,
+    fov_lat=None,
+    fov_lon=None,
+    geo: bool = False,
 ) -> Callable[[TrainState, int, int], None]:
     """Return an epoch-level callback that logs confusion / per-class figures
     and full-set scalar metrics under ``<prefix>/...``.
@@ -338,7 +343,7 @@ def _make_eval_plots_callback(
             return
 
         variables = {'params': state.params}
-        preds, labels, logits, _ = collect_predictions(model, variables, val_loader)
+        preds, labels, logits, meta = collect_predictions(model, variables, val_loader)
 
         # Full-set scalars (PR-curve based — not per-batch averageable).
         logger.log_metrics(
@@ -378,6 +383,19 @@ def _make_eval_plots_callback(
         )
         logger.log_figure(f'{prefix}/pr_curve',           fig_pr,     step=global_step)
         logger.log_figure(f'{prefix}/pr_curves_per_class', fig_pr_cls, step=global_step)
+
+        # Spatial classification maps over the FOV (one per true class, coloured
+        # by prediction). Opt-in (spatial_maps) — used for the end-of-train TEST
+        # pass so the wandb test/ section shows WHERE the model classifies each
+        # class well. Needs the per-sample query positions from the loader meta.
+        if spatial_maps and meta is not None and 'query_lat' in meta:
+            for name, fig_sp in plot_per_class_prediction_maps(
+                meta['query_lat'], meta['query_lon'], labels, preds, class_names,
+                fov_lat=fov_lat, fov_lon=fov_lon, geo=geo,
+                n_classes=len(class_names),
+            ).items():
+                logger.log_figure(f'{prefix}/spatial_pred/{name}', fig_sp,
+                                  step=global_step)
 
     return callback
 
@@ -843,6 +861,10 @@ def train(config_path: str | Path, resume: bool = False,
     _make_eval_plots_callback(
         model, test_loader, trainer.logger, class_names=class_names,
         every_n_epochs=1, prefix='test',
+        spatial_maps=True,
+        fov_lat=config['data'].get('fov_lat'),
+        fov_lon=config['data'].get('fov_lon'),
+        geo=bool(config['data'].get('eval_geo_maps', False)),
     )(best_state, epoch=0, global_step=int(best_state.step))
 
     # Finalize logger here, after test(), so test metrics are logged before

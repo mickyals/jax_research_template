@@ -916,6 +916,51 @@ class TCDataModule(BaseDataModule):
             'frac_capped': float((avail_a >= self._max_stations).mean()),
         }
 
+    def coverage_figure(
+        self,
+        split:       str  = 'train',
+        geo:         bool = False,
+        max_batches: Optional[int] = None,
+    ):
+        """FOV map of sample positions coloured by TRUE class (data diagnostic).
+
+        Iterates the split's loader collecting each sample's query lat/lon and
+        true label from the batch ``meta``/``y`` (no model), then composes the
+        experiment's ``plot_class_coverage_map`` over the template
+        ``plot_categorical_scatter`` primitive. Background (class 0) appears at
+        its draw positions alongside the storm classes, so the spatial coverage
+        and imbalance across the region are visible at a glance.
+
+        Parameters
+        ----------
+        split : {'train', 'val', 'test'}
+        geo : bool
+            Draw on a cartopy FOV map (requires cartopy); else a plain lat/lon
+            scatter. Default False.
+        max_batches : int, optional
+            Cap on batches drawn — required-ish for the random train loader
+            (otherwise it yields steps_per_epoch batches). None = exhaust the
+            loader (val/test are finite).
+        """
+        from experiments.tc_perceiver_io.plotting.plotting import (
+            plot_class_coverage_map,
+        )
+        loader = getattr(self, f'{split}_loader')()
+        lats, lons, labels = [], [], []
+        for i, batch in enumerate(loader):
+            if max_batches is not None and i >= max_batches:
+                break
+            m = batch['meta']
+            lats.append(np.asarray(m['query_lat']))
+            lons.append(np.asarray(m['query_lon']))
+            labels.append(np.asarray(batch['y']))
+        return plot_class_coverage_map(
+            np.concatenate(lats), np.concatenate(lons), np.concatenate(labels),
+            self._target_spec.class_names,
+            fov_lat=self._fov_lat, fov_lon=self._fov_lon,
+            geo=geo, n_classes=self._target_spec.n_classes,
+        )
+
     # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------

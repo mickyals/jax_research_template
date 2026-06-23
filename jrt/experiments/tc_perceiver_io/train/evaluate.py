@@ -61,6 +61,7 @@ from experiments.tc_perceiver_io.plotting.plotting import (
     plot_decoder_query,
     plot_pr_curve,
     plot_pr_curves_per_class,
+    plot_per_class_prediction_maps,
 )
 from training.trainer import Trainer
 
@@ -462,6 +463,15 @@ def evaluate(
         per_class_pr_curves(logits, labels), class_names,
         title=f'Per-class PR — one-vs-rest ({split})')
 
+    # Spatial classification maps over the FOV: one map per true class, its
+    # samples positioned at their query lat/lon and coloured by prediction —
+    # shows WHERE the model classifies each class well across the region.
+    spatial_figs: dict = {}
+    if meta is not None and 'query_lat' in meta:
+        spatial_figs = plot_per_class_prediction_maps(
+            meta['query_lat'], meta['query_lon'], labels, preds, class_names,
+            fov_lat=fov_lat, fov_lon=fov_lon, geo=geo, n_classes=n_classes)
+
     if output_dir is not None:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -470,7 +480,11 @@ def evaluate(
         fig_cls.savefig( out / f'{split}_per_class_metrics.png', dpi=150, bbox_inches='tight')
         fig_pr.savefig(  out / f'{split}_pr_curve.png',          dpi=150, bbox_inches='tight')
         fig_pr_cls.savefig(out / f'{split}_pr_curves_per_class.png', dpi=150, bbox_inches='tight')
-        print(f"Confusion / metrics / PR-curve plots saved to {out}/")
+        for name, fig_sp in spatial_figs.items():
+            slug = name.lower().replace(' ', '_')
+            fig_sp.savefig(out / f'{split}_spatial_pred_{slug}.png',
+                           dpi=150, bbox_inches='tight')
+        print(f"Confusion / metrics / PR-curve / spatial plots saved to {out}/")
 
     # ------------------------------------------------------------------
     # Attention plots — the three Perceiver-IO components (pre-softmax scores,

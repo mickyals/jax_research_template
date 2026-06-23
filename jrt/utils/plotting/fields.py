@@ -331,6 +331,143 @@ def plot_scatter_overlay(
     return fig
 
 
+def plot_categorical_scatter(
+    x: np.ndarray,
+    y: np.ndarray,
+    labels: np.ndarray,
+    class_names: list[str],
+    extent: Optional[list[float]] = None,
+    n_classes: Optional[int] = None,
+    cmap: str = "tab10",
+    title: str = "",
+    xlabel: str = "x",
+    ylabel: str = "y",
+    marker_x: Optional[float] = None,
+    marker_y: Optional[float] = None,
+    marker_label: Optional[str] = None,
+    marker_kwargs: Optional[dict] = None,
+    scatter_size: float = 30,
+    legend: bool = True,
+    legend_present_only: bool = False,
+    grid: bool = False,
+    geo: bool | dict = False,
+    figsize: tuple[int, int] = (10, 5),
+) -> plt.Figure:
+    """Scatter points coloured by a discrete class label, with a class legend.
+
+    The categorical sibling of :func:`plot_scatter_overlay` (which colours by a
+    continuous value + colorbar). Each point's colour is its integer ``labels``
+    entry mapped through a discrete ``cmap``; the legend lists ``class_names``.
+    Colours are keyed by class INDEX (via ``plt.get_cmap(cmap, n_classes)``), so
+    a given class is the same colour across separate calls — pass a fixed
+    ``n_classes`` when plotting several panels that each contain only a subset of
+    classes (e.g. one map per true class, coloured by prediction).
+
+    With ``geo`` set, ``x``/``y`` are longitude/latitude in degrees and the plot
+    is drawn on a PlateCarree map with coastlines/borders (requires cartopy, an
+    optional dependency) — same contract as :func:`plot_scatter_overlay`.
+
+    Parameters
+    ----------
+    x, y : np.ndarray
+        Point coordinates, shape (n,). Lon/lat degrees when ``geo`` is set.
+    labels : np.ndarray
+        Integer class id per point, shape (n,).
+    class_names : list[str]
+        Legend label per class index.
+    extent : list[float], optional
+        [xmin, xmax, ymin, ymax]; also sets axis limits (plain axes) or map
+        extent (geo).
+    n_classes : int, optional
+        Number of classes for the colour scale. Defaults to ``len(class_names)``.
+    cmap : str
+        Discrete matplotlib colormap name (default ``tab10`` — ≤10 classes).
+    title, xlabel, ylabel : str
+        Labels (axis labels ignored in geo mode — map gridlines are labelled).
+    marker_x, marker_y : float, optional
+        A single highlighted reference point (e.g. a query/storm centre).
+    marker_label : str, optional
+        Legend label for the reference point.
+    marker_kwargs : dict, optional
+        Overrides merged over ``{"marker": "*", "s": 200, "color": "k"}``.
+    scatter_size : float
+        Marker size for all points.
+    legend : bool
+        Draw the class legend (default True).
+    legend_present_only : bool
+        If True, only classes present in ``labels`` appear in the legend;
+        default False shows every class (a full key).
+    grid : bool
+        Dashed grid on plain axes (ignored in geo mode). Default False.
+    geo : bool or dict
+        If truthy, draw on a PlateCarree map (lon/lat degrees); a dict is
+        forwarded to the canvas factory (``scale``/``color``/``lw``/
+        ``gridlines``). Requires cartopy.
+    figsize : tuple[int, int]
+        Figure size in inches.
+
+    Returns
+    -------
+    plt.Figure
+    """
+    from matplotlib.lines import Line2D
+
+    x = np.asarray(x)
+    y = np.asarray(y)
+    labels = np.asarray(labels).astype(int)
+    n = int(n_classes) if n_classes is not None else len(class_names)
+    cmap_obj = plt.get_cmap(cmap, max(n, 1))
+
+    geo_opts = {} if geo is True else dict(geo) if isinstance(geo, dict) else None
+    if geo_opts is not None:
+        from utils.plotting._geo import _make_geoaxes
+        fig, ax, transform = _make_geoaxes(figsize=figsize, extent=extent, **geo_opts)
+        tkw = {"transform": transform}
+    else:
+        fig, ax = plt.subplots(figsize=figsize)
+        tkw = {}
+
+    if len(x):
+        ax.scatter(
+            x, y, c=cmap_obj(np.clip(labels, 0, n - 1)),
+            s=scatter_size, edgecolor="black", linewidth=0.3, **tkw,
+        )
+
+    if marker_x is not None and marker_y is not None:
+        mk = {"marker": "*", "s": 200, "color": "k", "zorder": 5}
+        if marker_kwargs:
+            mk.update(marker_kwargs)
+        ax.scatter([marker_x], [marker_y], **mk, **tkw)
+
+    if legend:
+        present = set(labels.tolist())
+        shown = [k for k in range(n) if (k in present or not legend_present_only)]
+        handles = [
+            Line2D([], [], marker="o", linestyle="", markeredgecolor="black",
+                   markerfacecolor=cmap_obj(k),
+                   label=class_names[k] if k < len(class_names) else f"class {k}")
+            for k in shown
+        ]
+        if marker_label is not None:
+            handles.append(Line2D([], [], marker="*", linestyle="", color="k",
+                                  markersize=12, label=marker_label))
+        if handles:
+            ax.legend(handles=handles, loc="center left",
+                      bbox_to_anchor=(1.01, 0.5), fontsize=8)
+
+    ax.set_title(title)
+    if geo_opts is None:
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        if extent is not None:
+            ax.set_xlim(extent[0], extent[1])
+            ax.set_ylim(extent[2], extent[3])
+        if grid:
+            ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+    return fig
+
+
 def plot_heatmap(
     matrix: np.ndarray,
     row_labels: Optional[list[str]] = None,
