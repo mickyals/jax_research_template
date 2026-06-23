@@ -41,8 +41,11 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-import yaml
 
+from experiments.tc_perceiver_io.train._config import (
+    load_config,
+    propagate_location_encoding,
+)
 from experiments.tc_perceiver_io.data.datamodule import TCDataModule
 from experiments.tc_perceiver_io.data.transforms.encoding import decode_domain
 from experiments.tc_perceiver_io.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
@@ -545,9 +548,6 @@ def print_report(
 # Main evaluation pipeline
 # ---------------------------------------------------------------------------
 
-def _load_config(path: str | Path) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
 
 
 def evaluate(
@@ -582,18 +582,13 @@ def evaluate(
         borders): azimuthal storm-centred for unit_circle, PlateCarree
         for domain. Requires cartopy (optional dependency).
     """
-    config = _load_config(config_path)
+    config = load_config(config_path)
     if checkpoint_dir is not None:
         config['trainer']['checkpoint_dir'] = str(checkpoint_dir)
 
     # Coordinate convention (top-level) drives the datamodule encoding — must
-    # match training for the checkpoint to load.
-    loc_enc = config.get('location_encoding',
-                         config['data'].get('location_encoding', 'unit_circle'))
-    config['data']['location_encoding'] = loc_enc
-    # The model is coordinate-agnostic (the learned latent array is the query),
-    # so location_encoding configures the datamodule only — nothing is injected
-    # into config['model'].
+    # match training for the checkpoint to load. Shared with train/tune.
+    loc_enc = propagate_location_encoding(config)
     radius_km = float(config['data'].get('radius_km', 500.0))
     fov_lat   = config['data'].get('fov_lat')
     fov_lon   = config['data'].get('fov_lon')

@@ -39,6 +39,10 @@ from experiments.tc_perceiver_io.plotting.plotting import (
     plot_attention_matrix_grid,
     plot_decoder_query,
 )
+from experiments.tc_perceiver_io.train._config import (
+    load_config,
+    propagate_location_encoding,
+)
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
 from datasets.class_weights import class_weights_from_counts
@@ -423,11 +427,6 @@ def _log_diagnostics(
 # Config helpers
 # ---------------------------------------------------------------------------
 
-def _load_config(path: str | Path) -> dict:
-    with open(path, encoding='utf-8') as f:
-        return yaml.safe_load(f)
-
-
 def _validate_config(config: dict) -> None:
     """Catch config inconsistencies that the JSON schema cannot enforce."""
     n_obs_cfg = config['model'].get('n_obs_features')
@@ -632,7 +631,7 @@ def train(config_path: str | Path, resume: bool = False,
     # Resolve config path immediately so relative paths inside the config
     # can be anchored to the config file's own directory.
     config_path = Path(config_path).resolve()
-    config      = _load_config(config_path)
+    config      = load_config(config_path)
     _validate_config(config)
 
     # Single top-level seed propagated to all components
@@ -656,13 +655,9 @@ def train(config_path: str | Path, resume: bool = False,
     _resolve_schedule_steps(trainer_cfg)
 
     # location_encoding picks the coordinate convention for the datamodule's
-    # encoder. The model is coordinate-agnostic (a single projection of
-    # whatever coords it is handed), so it is injected into the data block only.
-    loc_enc = config.get('location_encoding', 'unit_circle')
-    config['data']['location_encoding']  = loc_enc
-    # The model is coordinate-agnostic (the learned latent array is the query;
-    # there is no query token to position), so location_encoding configures the
-    # datamodule only — nothing is injected into config['model'].
+    # encoder. The model is coordinate-agnostic, so it is injected into the data
+    # block only (propagate_location_encoding — shared with tune/evaluate).
+    loc_enc = propagate_location_encoding(config)
 
     # ------------------------------------------------------------------
     # Resolve run_dir relative to the experiment root (two levels up from this

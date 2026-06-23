@@ -37,9 +37,11 @@ import copy
 import json
 from pathlib import Path
 
-import yaml
-
 from experiments.tc_perceiver_io.data.datamodule import TCDataModule
+from experiments.tc_perceiver_io.train._config import (
+    load_config,
+    propagate_location_encoding,
+)
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
 from experiments.tc_perceiver_io.train.train import resolve_class_weights
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
@@ -99,8 +101,7 @@ def tune(
     # to the config file's own directory (same convention as train.py).
     config_path = Path(config_path).resolve()
 
-    with open(config_path, encoding='utf-8') as f:
-        base_config = yaml.safe_load(f)
+    base_config = load_config(config_path)
 
     seed = int(base_config.get("seed", 42))
     base_config["trainer"].setdefault("seed", seed)
@@ -109,9 +110,8 @@ def tune(
     base_config["data"]["batch_size"] = base_config["trainer"]["batch_size"]
 
     # Model is coordinate-agnostic; location_encoding only configures the
-    # datamodule's coordinate convention.
-    loc_enc = base_config.get("location_encoding", "unit_circle")
-    base_config["data"]["location_encoding"]  = loc_enc
+    # datamodule's coordinate convention (shared with train/evaluate).
+    loc_enc = propagate_location_encoding(base_config)
     # Model is coordinate-agnostic; location_encoding configures the datamodule
     # only (the learned latent array is the query — nothing to position).
 
