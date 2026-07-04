@@ -25,8 +25,10 @@ import numpy as np
 
 from experiments.cyclone_jax.data.sources.shelf import load_lookback
 from utils.geoscience.geodesic import haversine_np
-from utils.geoscience.met_conversions import wind_to_components
 
+from experiments.cyclone_jax.data.inputs import (
+    DEFAULT_SOURCE_ID, SOURCE_SCHEMAS, union_channels,
+)
 from experiments.cyclone_jax.data.transformations import (
     build_missingness, stamp_source_id,
 )
@@ -34,20 +36,9 @@ from experiments.cyclone_jax.data.sources.library import (
     CYC_SSHS, TROPICAL_STORM, get_fixes,
 )
 
-# Channel union over the surface volumes (u/v-unified wind). Upper-air
-# channels join this tuple when CUON enters training.
-CHANNELS = ('station_pressure', 'slp', 'air_temp', 'dewpoint', 'sst',
-            'u_wind', 'v_wind')
-
-# Direct column -> channel mapping per source (wind handled separately).
-_DIRECT = {
-    'land':   {'station_pressure': 'station_pressure', 'slp': 'slp',
-               'air_temp': 'air_temp', 'dewpoint': 'dewpoint'},
-    'marine': {'slp': 'slp', 'air_temp': 'air_temp',
-               'dewpoint': 'dewpoint', 'sst': 'sst'},
-}
-
-DEFAULT_SOURCE_ID = {'land': -1.0, 'upper': 0.0, 'marine': 1.0}
+# v1 channel union (land + marine); the schemas live in inputs.py. P3 makes
+# this per-instance via InputSpec.
+CHANNELS = union_channels(('land', 'marine'))
 
 # Token column layout: [lat, lon, dt, obs(C), mask(C), id]
 N_LOC = 3
@@ -114,12 +105,13 @@ class FixSampler:
 
         vals = np.full((n, len(CHANNELS)), np.nan, np.float32)
         ch = {c: j for j, c in enumerate(CHANNELS)}
-        for col, channel in _DIRECT[s].items():
+        schema = SOURCE_SCHEMAS[s]
+        for col, channel in schema.direct.items():
             vals[:, ch[channel]] = np.asarray(obs[col][lo:hi], np.float32)
-        u, v = wind_to_components(np.asarray(obs['wind_speed'][lo:hi]),
-                                  np.asarray(obs['wind_dir'][lo:hi]))
-        vals[:, ch['u_wind']] = u
-        vals[:, ch['v_wind']] = v
+        for d in schema.derived:
+            cols = (np.asarray(obs[c][lo:hi]) for c in d.columns)
+            for channel, arr in zip(d.channels, d.compute(*cols)):
+                vals[:, ch[channel]] = arr
 
         vals, mask = build_missingness(vals)
         dt = ((np.asarray(obs['report_timestamp'][lo:hi]).astype('int64')

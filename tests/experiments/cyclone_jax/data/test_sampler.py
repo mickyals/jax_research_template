@@ -144,6 +144,23 @@ class TestFixSampler:
         with pytest.raises(ValueError, match='max_stations'):
             FixSampler(library, selection='max_stations')
 
+    def test_union_channels_masked_per_source(self, library):
+        """Every token carries the FULL channel union; channels a source
+        lacks are zeroed with mask False (land: sst; marine:
+        station_pressure). Union positions are identical across sources."""
+        s = FixSampler(library, pad_to=512)
+        out = s.build(8)
+        n = int(out['n_stations'])
+        tok = out['tokens'][:n]
+        ch = {c: j for j, c in enumerate(CHANNELS)}
+        mask = tok[:, 3 + len(CHANNELS):3 + 2 * len(CHANNELS)]
+        land, marine = tok[:, -1] == -1.0, tok[:, -1] == 1.0
+        assert land.any() and marine.any()
+        assert not mask[land, ch['sst']].any()
+        assert np.all(tok[land, 3 + ch['sst']] == 0.0)
+        assert not mask[marine, ch['station_pressure']].any()
+        assert mask[land, ch['station_pressure']].all()
+
     def test_leakage_no_target_values_in_tokens(self, library):
         """Token columns are loc/dt/obs/mask/id only — TOKEN_DIM accounts
         for every column, none sourced from the cyclone volume."""
