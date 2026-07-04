@@ -1,8 +1,8 @@
 """
-experiments/cyclone_jax/data/sources/interface.py
+experiments/cyclone_jax/data/sources/library.py
 
 TRAIN-TIME access to the arcana library (numpy-only — never imports
-xarray/dask; those live in sources.py, the build-time module).
+xarray/dask; those live in build.py, the build-time module).
 
 The library ("Caribbean-Obs") is four volume_v1 directories plus one
 _BOOKSHELF of cross-volume indices:
@@ -13,7 +13,7 @@ _BOOKSHELF of cross-volume indices:
 This module owns the cyclone-specific vocabulary (SSHS constants, target
 columns, category-spine access, driver fixes) and the canonical per-volume
 lookback schedules; the generic volume/shelf mechanics live in
-datasets/volume.py and datasets/shelf.py.
+sources/volume.py and sources/shelf.py.
 
 Paths come from configs/data.yaml — nothing here hardcodes the library
 root. The deltas actually baked into a bookshelf are recorded in each
@@ -27,8 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
-from datasets.volume import load_volume, get_entity, time_slice, rows_at  # noqa: F401
-from datasets.shelf import (  # noqa: F401
+from experiments.cyclone_jax.data.sources.volume import load_volume, get_entity, time_slice, rows_at  # noqa: F401
+from experiments.cyclone_jax.data.sources.shelf import (  # noqa: F401
     SHELF_DIR, write_shelf, load_shelf, load_all_shelves, check_shelf_fresh,
     build_time_index, rows_at_shelf, build_lookback_pointers, write_lookback,
     load_lookback, window_obs, window_temporal_encoding, report_occupancy,

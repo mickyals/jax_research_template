@@ -8,7 +8,7 @@ no-chaining), and the category index.
 import numpy as np
 import pytest
 
-from experiments.cyclone_jax.data.sources.sources import (
+from experiments.cyclone_jax.data.sources.build import (
     G,
     N_CAT,
     RD,

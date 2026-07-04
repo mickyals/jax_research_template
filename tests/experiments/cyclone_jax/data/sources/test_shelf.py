@@ -11,7 +11,7 @@ Guardrails covered here (the causality invariants):
 import numpy as np
 import pytest
 
-from datasets.shelf import (
+from experiments.cyclone_jax.data.sources.shelf import (
     build_lookback_pointers,
     build_time_index,
     check_shelf_fresh,
@@ -26,7 +26,7 @@ from datasets.shelf import (
     write_lookback,
     write_shelf,
 )
-from datasets.volume import build_entity_spine, write_volume, load_volume
+from experiments.cyclone_jax.data.sources.volume import build_entity_spine, write_volume, load_volume
 
 
 # ---------------------------------------------------------------------------

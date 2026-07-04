@@ -7,12 +7,10 @@ selection modes, stack-only collation.
 import numpy as np
 import pytest
 
-from datasets.volume import build_entity_spine, write_volume
-from experiments.cyclone_jax.data.transformations import (
-    build_missingness, normalise_01, normalise_11, standardise, wind_to_uv,
-)
-from experiments.cyclone_jax.data.sources.sources import build_category_index
-from experiments.cyclone_jax.data.sources.interface import (
+from experiments.cyclone_jax.data.sources.volume import build_entity_spine, write_volume
+from experiments.cyclone_jax.data.transformations import build_missingness
+from experiments.cyclone_jax.data.sources.build import build_category_index
+from experiments.cyclone_jax.data.sources.library import (
     VOLUMES, build_bookshelf, load_library,
 )
 from experiments.cyclone_jax.data.sampler import (
@@ -83,28 +81,9 @@ def library(tmp_path_factory):
 # ---------------------------------------------------------------------------
 
 class TestTransformations:
-
-    def test_wind_from_north_blows_south(self):
-        u, v = wind_to_uv(np.array([10.0]), np.array([0.0]))
-        np.testing.assert_allclose([u[0], v[0]], [0.0, -10.0], atol=1e-5)
-
-    def test_wind_from_east_blows_west(self):
-        u, v = wind_to_uv(np.array([10.0]), np.array([90.0]))
-        np.testing.assert_allclose([u[0], v[0]], [-10.0, 0.0], atol=1e-5)
-
-    def test_calm_with_nan_direction_is_zero(self):
-        u, v = wind_to_uv(np.array([0.0]), np.array([np.nan]))
-        assert u[0] == 0.0 and v[0] == 0.0
-
-    def test_nan_speed_stays_nan(self):
-        u, v = wind_to_uv(np.array([np.nan]), np.array([90.0]))
-        assert np.isnan(u[0]) and np.isnan(v[0])
-
-    def test_normalisers(self):
-        x = np.array([0.0, 5.0, 10.0], np.float32)
-        np.testing.assert_allclose(normalise_01(x, 0, 10), [0, .5, 1], atol=1e-5)
-        np.testing.assert_allclose(normalise_11(x, 0, 10), [-1, 0, 1], atol=1e-5)
-        np.testing.assert_allclose(standardise(x, 5, 5), [-1, 0, 1], atol=1e-5)
+    # wind decomposition is utils.geoscience.met_conversions.wind_to_components
+    # (tested in tests/utils); the sampler-level wind behaviour is covered by
+    # the FixSampler assembly tests below.
 
     def test_missingness(self):
         vals, mask = build_missingness(np.array([[1.0, np.nan]]))

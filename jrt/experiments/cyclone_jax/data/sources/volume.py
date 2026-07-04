@@ -1,5 +1,5 @@
 """
-datasets/volume.py
+experiments/cyclone_jax/data/sources/volume.py
 
 Generic columnar "volume" store (format volume_v1) — the successor to the
 npz-backed layout. A volume is a directory of flat .npy column files plus a
@@ -20,7 +20,7 @@ only the pages actually touched are read from disk, keeping memory full
 of examples rather than the dataset.
 
 The library metaphor: a volume is a book whose pages (rows) are ordered
-by time; the shelf (datasets/shelf.py) is the cross-volume index system.
+by time; the shelf (sources/shelf.py) is the cross-volume index system.
 """
 
 from __future__ import annotations

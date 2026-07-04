@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from datasets.shelf import load_lookback
+from experiments.cyclone_jax.data.sources.shelf import load_lookback
 from utils.geoscience.geodesic import haversine_np
+from utils.geoscience.met_conversions import wind_to_components
 
 from experiments.cyclone_jax.data.transformations import (
-    build_missingness, stamp_source_id, wind_to_uv,
+    build_missingness, stamp_source_id,
 )
-from experiments.cyclone_jax.data.sources.interface import (
+from experiments.cyclone_jax.data.sources.library import (
     CYC_SSHS, TROPICAL_STORM, get_fixes,
 )
 
@@ -59,7 +60,7 @@ class FixSampler:
     Parameters
     ----------
     lib : dict
-        From interface.load_library (volumes + shelves, guards passed).
+        From library.load_library (volumes + shelves, guards passed).
     sources : sequence
         Obs volumes to gather ('land', 'marine' for v1).
     pad_to : int
@@ -115,8 +116,8 @@ class FixSampler:
         ch = {c: j for j, c in enumerate(CHANNELS)}
         for col, channel in _DIRECT[s].items():
             vals[:, ch[channel]] = np.asarray(obs[col][lo:hi], np.float32)
-        u, v = wind_to_uv(np.asarray(obs['wind_speed'][lo:hi]),
-                          np.asarray(obs['wind_dir'][lo:hi]))
+        u, v = wind_to_components(np.asarray(obs['wind_speed'][lo:hi]),
+                                  np.asarray(obs['wind_dir'][lo:hi]))
         vals[:, ch['u_wind']] = u
         vals[:, ch['v_wind']] = v
 

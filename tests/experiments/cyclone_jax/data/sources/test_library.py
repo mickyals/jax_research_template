@@ -11,9 +11,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from datasets.volume import build_entity_spine, write_volume
-from datasets.shelf import write_lookback
-from experiments.cyclone_jax.data.sources.interface import (
+from experiments.cyclone_jax.data.sources.volume import build_entity_spine, write_volume
+from experiments.cyclone_jax.data.sources.shelf import write_lookback
+from experiments.cyclone_jax.data.sources.library import (
     CYC_TARGETS,
     LOOKBACK_DELTAS,
     OBS_VOLUMES,
@@ -28,7 +28,7 @@ from experiments.cyclone_jax.data.sources.interface import (
     load_lookback,
     window_obs,
 )
-from experiments.cyclone_jax.data.sources.sources import build_category_index
+from experiments.cyclone_jax.data.sources.build import build_category_index
 
 
 BASE = np.datetime64('2020-08-01T00:00', 'ns')
@@ -152,7 +152,7 @@ class TestLoadLibrary:
     def _bake_wrong_land_deltas(self, library):
         """Overwrite land's lookback with a wrong schedule (no mmaps held
         on the shelf files being rewritten)."""
-        from datasets.volume import load_volume
+        from experiments.cyclone_jax.data.sources.volume import load_volume
         storm_times = np.load(
             library / '_BOOKSHELF' / 'cyclone_storm_times.npy')  # RAM copy
         land = load_volume(library / VOLUMES['land'])            # columns only
@@ -212,7 +212,7 @@ class TestFixesAndCategories:
     def test_leakage_allowlist_is_disjoint(self):
         """CYC_TARGETS (target/metadata) must never appear among the obs
         channel schemas that feed the model."""
-        from experiments.cyclone_jax.data.sources.sources import (
+        from experiments.cyclone_jax.data.sources.build import (
             LAND_VARS, MARINE_VARS, UPPER_VARS,
         )
         obs_channels = (set(LAND_VARS.values()) | set(MARINE_VARS.values())

@@ -1,10 +1,10 @@
 """
-experiments/cyclone_jax/data/sources/sources.py
+experiments/cyclone_jax/data/sources/build.py
 
 BUILD-TIME module: converts the four raw sources into volume_v1 column
-stores (see datasets/volume.py). Run where the raw NetCDF lives; the
+stores (see sources/volume.py). Run where the raw NetCDF lives; the
 training path never imports this — train-time access goes through
-interface.py (numpy-only).
+library.py (numpy-only).
 
 Sources (CDS version pins are provenance — record them with the data):
     LISO  land surface   (insitu-observations-surface-land,   v3_0_0) -> earth-arcanum
@@ -31,7 +31,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from datasets.volume import build_entity_spine, write_volume  # noqa: F401 (write_volume re-exported for build scripts)
+from experiments.cyclone_jax.data.sources.volume import build_entity_spine, write_volume  # noqa: F401 (write_volume re-exported for build scripts)
 
 
 # ===========================================================================

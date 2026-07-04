@@ -1,13 +1,13 @@
 # =============================================================================
 # cyclone_jax — DATA configuration
 # =============================================================================
-# One config per concern: data.yaml (this file), configs/models/<model>.yaml
-# (one per model), configs/trainer.yaml. The train CLI merges the three.
+# One config per concern (P6 restructure pending: configs/data/<scenario>.yaml
+# + configs/models/<model>.yaml + configs/train/train.yaml with pointers).
 #
 # Lookback window schedules are NOT configured here: the schedules baked into
 # the _BOOKSHELF (recorded in each volume's shelf meta as lookback_deltas_s)
-# are the source of truth, and interface.load_library verifies them against
-# interface.LOOKBACK_DELTAS at load. Rebuild via interface.build_bookshelf.
+# are the source of truth, and library.load_library verifies them against
+# library.LOOKBACK_DELTAS at load. Rebuild via library.build_bookshelf.
 
 data:
   # Arcana library root: four volume_v1 dirs + _BOOKSHELF

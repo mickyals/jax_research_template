@@ -1,5 +1,5 @@
 """
-datasets/shelf.py
+experiments/cyclone_jax/data/sources/shelf.py
 
 The Shelf: one `_BOOKSHELF/` directory beside the volumes holding every
 volume's cross-volume indices, keyed by volume name:
@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-from datasets.volume import build_volume_time_index, rows_at
+from experiments.cyclone_jax.data.sources.volume import build_volume_time_index, rows_at
 
 SHELF_DIR = '_BOOKSHELF'
 
