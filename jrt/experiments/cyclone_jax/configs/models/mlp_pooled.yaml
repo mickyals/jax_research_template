@@ -1,0 +1,13 @@
+# =============================================================================
+# cyclone_jax — MODEL config: pooled-MLP baseline (ladder rung 2)
+# =============================================================================
+# DRAFT — MLP over per-channel pooled statistics of the FOV token set
+# (mean/min/max/std per obs channel + counts). Fixed-size input by
+# construction; the memorisation gate (Phase 7) runs on THIS model first.
+
+model:
+  name: mlp_pooled
+  hidden_dims: [256, 256]
+  activation: gelu
+  dropout_rate: 0.0            # OFF for the memorisation gate
+  n_classes: 6                 # from data.class_set (TS+ 3..8)

@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import warnings
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -618,6 +619,28 @@ def _resolve_schedule_steps(trainer_cfg: dict) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _geo_enabled(config: dict) -> bool:
+    """data.eval_geo_maps, but only if cartopy is importable.
+
+    Graceful degradation: if geographic basemaps are requested but cartopy is not
+    installed, warn once and fall back to plain-axes figures rather than crashing
+    a training run. (pip install cartopy for coastlines/borders.)
+    """
+    if not config['data'].get('eval_geo_maps', False):
+        return False
+    try:
+        import cartopy  # noqa: F401
+        return True
+    except ImportError:
+        warnings.warn(
+            "data.eval_geo_maps=true but cartopy is not installed — geographic "
+            "figures (spatial maps, Read attention map) will render WITHOUT a "
+            "basemap. Install cartopy for coastlines/borders.",
+            UserWarning, stacklevel=2,
+        )
+        return False
+
+
 def train(config_path: str | Path, resume: bool = False,
           name: Optional[str] = None) -> None:
     """Run training from a YAML config file.
@@ -829,7 +852,7 @@ def train(config_path: str | Path, resume: bool = False,
                                    fov_lat=config['data'].get('fov_lat'),
                                    fov_lon=config['data'].get('fov_lon'),
                                    fig_every=fig_every,
-                                   geo=bool(config['data'].get('eval_geo_maps', False))),
+                                   geo=_geo_enabled(config)),
         _make_eval_plots_callback(model, val_loader, trainer.logger,
                                   class_names=class_names,
                                   every_n_epochs=eval_plots_every),
@@ -889,7 +912,7 @@ def train(config_path: str | Path, resume: bool = False,
         spatial_maps=True,
         fov_lat=config['data'].get('fov_lat'),
         fov_lon=config['data'].get('fov_lon'),
-        geo=bool(config['data'].get('eval_geo_maps', False)),
+        geo=_geo_enabled(config),
         csv_dir=run_dir,
     )(best_state, epoch=0, global_step=int(best_state.step))
 

@@ -397,6 +397,6 @@ trainer:
     project:  sparse_obs_encoding
     name:     perceiver-io-unit-circle-run5
     offline:  false
-    tags:     [unit_circle, perceiver_io]
+    tags:     [unit_circle, perceiver_io, local, windows]
 
   # seed is injected from the top-level seed by train.py — do not set here.

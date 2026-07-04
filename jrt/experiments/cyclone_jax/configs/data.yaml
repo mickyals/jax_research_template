@@ -1,0 +1,45 @@
+# =============================================================================
+# cyclone_jax — DATA configuration
+# =============================================================================
+# One config per concern: data.yaml (this file), configs/models/<model>.yaml
+# (one per model), configs/trainer.yaml. The train CLI merges the three.
+#
+# Lookback window schedules are NOT configured here: the schedules baked into
+# the _BOOKSHELF (recorded in each volume's shelf meta as lookback_deltas_s)
+# are the source of truth, and interface.load_library verifies them against
+# interface.LOOKBACK_DELTAS at load. Rebuild via interface.build_bookshelf.
+
+data:
+  # Arcana library root: four volume_v1 dirs + _BOOKSHELF
+  root: "E:/Caribbean-Obs"
+
+  # v1 trains on the surface volumes only. Upper air (sky-arcanum) is
+  # deferred until its pressure-coordinate encoding is designed; when it
+  # returns, add 'upper' here.
+  sources: [land, marine]
+
+  # Station selection within the field of view. The FOV is the FULL data
+  # box (lon -100..-30, lat 0..30) — every obs in the volumes is in-FOV by
+  # construction, so 'all' applies no spatial filter at all.
+  #   all          — every measurement in the FOV (DEFAULT)
+  #   max_stations — nearest max_stations to the fix (land+marine option)
+  selection: all
+  max_stations: null          # int, used only when selection: max_stations
+
+  # Fixed token count per sample: the land+marine per-fix maximum across the
+  # whole library is 1,534, so 1536 pads every sample with zero truncation
+  # (one static shape -> jit compiles once).
+  pad_to: 1536
+
+  # Driver / label (remapped 0..8 SSHS scheme; see sources.remap_sshs)
+  sshs_min: 3                       # TS+ driver threshold (matches bookshelf)
+  class_set: [3, 4, 5, 6, 7, 8]     # 6-class TS+; no background class
+  drop_subtropical: false
+
+  # Source-ID channel appended to each token (scalar)
+  source_id: {land: -1, upper: 0, marine: 1}
+
+  # Sample shape: Batch x Station x [location | obs | missingness | ID]
+  # (x timestep; 1 = single-fix samples). timesteps>1 = the past-n fixes of
+  # the SAME storm via the entity spine, each with its own causal windows.
+  timesteps: 1
