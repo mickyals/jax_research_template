@@ -77,6 +77,12 @@ class Loader:
 
         self.fixes = get_fixes(lib['volumes']['cyclone'], sshs_min=sshs_min,
                                drop_subtropical=drop_subtropical)
+        if targets.kind == 'categorical':
+            # Only fixes whose category is IN the label space are samples —
+            # a class_set narrower than sshs_min must not crash build_y.
+            keep = np.isin(np.rint(np.asarray(self.fixes[CYC_SSHS])),
+                           targets.class_set)
+            self.fixes = {k: v[keep] for k, v in self.fixes.items()}
         self.storm_times = np.asarray(lib['shelves']['cyclone']['storm_times'])
         self._edges = {}
         for s in inputs.sources:

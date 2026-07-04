@@ -8,13 +8,6 @@ sample -> device-batch translation (fixed pad_to, meta routing).
 import numpy as np
 import pytest
 
-from experiments.cyclone_jax.data.sources.volume import (
-    build_entity_spine, write_volume,
-)
-from experiments.cyclone_jax.data.sources.build import build_category_index
-from experiments.cyclone_jax.data.sources.library import (
-    VOLUMES, build_bookshelf, load_library,
-)
 from experiments.cyclone_jax.data.inputs import CHANNEL_ORDER, resolve_input
 from experiments.cyclone_jax.data.targets import resolve_target
 from experiments.cyclone_jax.data.sampler import (
@@ -22,62 +15,7 @@ from experiments.cyclone_jax.data.sampler import (
 )
 from experiments.cyclone_jax.data.batching import collate
 
-BASE = np.datetime64('2020-08-01T00:00', 'ns')
-
-
-def _ts(seconds):
-    off = np.asarray(seconds)
-    return BASE + off.astype('timedelta64[s]').astype('timedelta64[ns]')
-
-
-@pytest.fixture(scope='module')
-def library(tmp_path_factory):
-    """Mini library with the REAL surface columns the loader consumes."""
-    rng = np.random.default_rng(3)
-    root = tmp_path_factory.mktemp('lib_v1')
-    n = 500
-    for name in ('land', 'marine', 'upper'):
-        obs = {
-            'report_timestamp': _ts(np.sort(rng.integers(0, 5 * 24 * 3600, n))),
-            'lat':        rng.uniform(0, 30, n).astype(np.float32),
-            'lon':        rng.uniform(-100, -30, n).astype(np.float32),
-            'level':      rng.uniform(90000, 103000, n).astype(np.float32),
-            'slp':        rng.uniform(99000, 103000, n).astype(np.float32),
-            'air_temp':   rng.normal(300, 5, n).astype(np.float32),
-            'dewpoint':   rng.normal(295, 5, n).astype(np.float32),
-            'wind_speed': rng.uniform(0, 40, n).astype(np.float32),
-            'wind_dir':   rng.uniform(0, 360, n).astype(np.float32),
-        }
-        if name == 'land':
-            obs['station_pressure'] = rng.uniform(
-                90000, 103000, n).astype(np.float32)
-        if name == 'marine':
-            obs['sst'] = rng.normal(302, 2, n).astype(np.float32)
-            obs['sst'][:20] = np.nan                        # some missing
-        sid = rng.choice([f'{name[:2].upper()}{i}' for i in range(8)], n)
-        eids, eint, eorder, eoff = build_entity_spine(sid)
-        write_volume(root / VOLUMES[name], obs, eint, eids, eorder, eoff)
-
-    hours = np.arange(24, 96, 3)
-    t = _ts(hours * 3600)
-    m = len(t)
-    cyc = {
-        'report_timestamp': t,
-        'lat': rng.uniform(10, 25, m).astype(np.float32),
-        'lon': rng.uniform(-80, -50, m).astype(np.float32),
-        'level': np.full(m, np.nan, np.float32),
-        'sid': np.array(['AL012020'] * m),
-        'usa_sshs': rng.integers(3, 9, m).astype(np.float32),
-        'usa_wind': rng.uniform(35, 140, m).astype(np.float32),
-        'usa_pres': rng.uniform(900, 1010, m).astype(np.float32),
-        'is_subtropical': np.zeros(m, bool),
-    }
-    eids, eint, eorder, eoff = build_entity_spine(cyc['sid'])
-    co, cf = build_category_index(cyc)
-    write_volume(root / VOLUMES['cyclone'], cyc, eint, eids, eorder, eoff,
-                 cat_order=co, cat_offsets=cf)
-    build_bookshelf(root, verbose=False)
-    return load_library(root)
+# library fixture: conftest.py (shared with test_interface)
 
 
 @pytest.fixture(scope='module')
@@ -138,6 +76,17 @@ class TestLoader:
         assert y['target'] == loader.targets.label(sshs)
         assert y['sid'] == 'AL012020'
         assert y['time'] == loader.fixes['time'][0]
+
+    def test_class_set_filters_fix_table(self, library):
+        """Fixes outside the label space are not samples — a class_set
+        narrower than sshs_min must never reach build_y."""
+        full = Loader(library, resolve_input({}), resolve_target({}))
+        cat45 = Loader(library, resolve_input({}),
+                       resolve_target({'class_set': [4, 5]}))
+        sshs = np.asarray(cat45.fixes['usa_sshs']).astype(int)
+        assert len(cat45) < len(full) and len(cat45) > 0
+        assert set(sshs) <= {4, 5}
+        assert cat45.build(0)['y']['target'] in (0, 1)
 
     def test_max_stations_keeps_nearest(self, library):
         spec_all = resolve_input({})
