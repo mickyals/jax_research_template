@@ -32,12 +32,34 @@ class TestBuildData:
     def test_year_split(self, library_root):
         data = build_data(_cfg(
             library_root,
-            split={'strategy': 'year',
+            split={'strategy': 'year', 'exclude_multistorm': False,
                    'years': {'train': [2019], 'val': [2021],
                              'test': [2020]}}))
         assert len(data.splits['test']) == len(data.loader)  # all fixes 2020
         assert len(data.splits['train']) == 0
         assert set(data.streams) == {'test'}        # empty splits: no stream
+
+    def test_year_split_excludes_multistorm_by_default(self, library_root):
+        split = {'strategy': 'year',
+                 'years': {'train': [2019], 'val': [2021], 'test': [2020]}}
+        data = build_data(_cfg(library_root, split=split))
+        multi = np.asarray(data.lib['shelves']['cyclone']['multi_times'])
+        assert len(multi) > 0                       # fixture has 2 storms
+        kept = np.asarray(data.loader.fixes['time'])[data.splits['test']]
+        assert not np.isin(kept, multi).any()
+        n_multi_fixes = np.isin(
+            np.asarray(data.loader.fixes['time']), multi).sum()
+        assert len(data.splits['test']) == len(data.loader) - n_multi_fixes
+
+    def test_multistorm_split_is_the_excluded_complement(self, library_root):
+        data = build_data(_cfg(library_root,
+                               split={'strategy': 'multistorm'}))
+        multi = np.asarray(data.lib['shelves']['cyclone']['multi_times'])
+        times = np.asarray(data.loader.fixes['time'])[data.splits['test']]
+        assert len(times) > 0 and np.isin(times, multi).all()
+        # both storms' fixes at a shared timestamp are included
+        sids = np.asarray(data.loader.fixes['sid'])[data.splits['test']]
+        assert {'AL012020', 'AL022020'} <= set(sids)
 
     def test_year_split_missing_key_raises(self, library_root):
         with pytest.raises(ValueError, match='split.years'):
@@ -109,7 +131,8 @@ class TestStreams:
         assert len(seen) == len(data.splits['val'])   # partial batch kept
         np.testing.assert_array_equal(
             np.sort(seen),
-            np.sort(np.asarray(data.loader.fixes['time'])))
+            np.sort(np.asarray(
+                data.loader.fixes['time'])[data.splits['val']]))
 
     def test_len_batches_per_epoch(self, library_root):
         data = build_data(_cfg(library_root))

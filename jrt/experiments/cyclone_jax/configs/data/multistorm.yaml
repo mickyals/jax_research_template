@@ -1,0 +1,25 @@
+# =============================================================================
+# cyclone_jax data scenario: MULTISTORM — the OOD hard-test set
+# =============================================================================
+# All fixes at multi-driver timestamps (>1 qualifying storm active at once)
+# — exactly the fixes the year splits exclude. Evaluation only; the split
+# resolves to a single 'test' entry.
+
+root: "E:/Caribbean-Obs"
+
+sources: [land, marine]
+selection: all
+max_stations: null
+pad_to: 1536
+
+target: usa_sshs
+sshs_min: 3
+class_set: [3, 4, 5, 6, 7, 8]
+drop_subtropical: false
+
+source_id: {land: -1, upper: 0, marine: 1}
+timesteps: 1
+
+batch_size: 32
+split:
+  strategy: multistorm

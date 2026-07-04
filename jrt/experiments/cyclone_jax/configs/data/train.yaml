@@ -1,0 +1,32 @@
+# =============================================================================
+# cyclone_jax data scenario: TRAIN — full year-split training
+# =============================================================================
+# Disjoint year lists; fixes at multi-driver timestamps are EXCLUDED
+# (ambiguous supervision) — they form the multistorm.yaml OOD scenario.
+# !! EDIT the year lists to the library's real coverage before training.
+
+root: "E:/Caribbean-Obs"
+
+sources: [land, marine]
+selection: all
+max_stations: null
+pad_to: 1536
+
+target: usa_sshs
+sshs_min: 3
+class_set: [3, 4, 5, 6, 7, 8]
+drop_subtropical: false
+
+source_id: {land: -1, upper: 0, marine: 1}
+timesteps: 1
+
+batch_size: 32
+split:
+  strategy: year
+  exclude_multistorm: true
+  years:                          # !! placeholders — set from the library
+    train: [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009,
+            2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019,
+            2020]
+    val:  [2021, 2022]
+    test: [2023, 2024]

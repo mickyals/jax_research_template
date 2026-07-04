@@ -17,9 +17,14 @@ Split strategies (cfg['split']['strategy']):
     year        disjoint year lists per split:
                   split: {strategy: year, years: {train: [...], val: [...],
                                                   test: [...]}}
+                Fixes at MULTI-driver timestamps (>1 qualifying storm =
+                ambiguous supervision) are excluded by default; set
+                exclude_multistorm: false to keep them.
     stratified  balanced overfit subset (memorisation gate) — train and
                 val are the SAME indices (watch train loss; val = sanity):
                   split: {strategy: stratified, n_per_class: 8}
+    multistorm  the multi-driver fixes as an OOD test set:
+                  split: {strategy: multistorm}   -> {'test': idx}
 
 Seeding: pass ONE seed (trainer.seed) — it orders every split's epoch
 streams here (numpy) and the caller feeds the same seed to jax model init
@@ -87,6 +92,15 @@ class DataBundle:
     streams: dict[str, BatchStream] = field(default_factory=dict)
 
 
+def _multistorm_mask(loader):
+    """Bool mask over the fix table: True at multi-driver timestamps
+    (shelf multi_times — which storm do these obs belong to?)."""
+    multi = loader.lib['shelves']['cyclone'].get('multi_times')
+    if multi is None or not len(multi):
+        return np.zeros(len(loader), bool)
+    return np.isin(np.asarray(loader.fixes['time']), np.asarray(multi))
+
+
 def _resolve_splits(cfg, loader, seed):
     split = cfg.get('split')
     if not split:
@@ -97,16 +111,22 @@ def _resolve_splits(cfg, loader, seed):
         missing = {'train', 'val', 'test'} - set(years)
         if missing:
             raise ValueError(f"split.years missing {sorted(missing)}.")
-        return split_by_year(loader.fixes['time'], years['train'],
-                             years['val'], years['test'])
+        out = split_by_year(loader.fixes['time'], years['train'],
+                            years['val'], years['test'])
+        if split.get('exclude_multistorm', True):
+            keep = ~_multistorm_mask(loader)
+            out = {k: v[keep[v]] for k, v in out.items()}
+        return out
     if strategy == 'stratified':
         if 'n_per_class' not in split:
             raise ValueError("split.strategy 'stratified' requires "
                              "n_per_class.")
         idx = stratified_fixes(loader, int(split['n_per_class']), seed=seed)
         return {'train': idx, 'val': idx.copy()}
+    if strategy == 'multistorm':
+        return {'test': np.nonzero(_multistorm_mask(loader))[0]}
     raise ValueError(f"unknown split.strategy {strategy!r} — "
-                     f"'year' or 'stratified'.")
+                     f"'year', 'stratified' or 'multistorm'.")
 
 
 def build_data(cfg, seed=0, check_fresh=True):

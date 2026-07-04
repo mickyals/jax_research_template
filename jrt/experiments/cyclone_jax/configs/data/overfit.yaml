@@ -1,0 +1,28 @@
+# =============================================================================
+# cyclone_jax data scenario: OVERFIT — the memorisation gate
+# =============================================================================
+# Balanced stratified subset; train and val are the SAME indices (watch
+# train loss go to ~0). Scenario files are deliberately self-contained
+# (no yaml inheritance) — diff them to see exactly how runs differ.
+# Keys are validated by config.py; consumed by data/interface.build_data.
+
+root: "E:/Caribbean-Obs"          # arcana library: four volumes + _BOOKSHELF
+
+sources: [land, marine]           # upper (sky-arcanum) deferred until its
+                                  # pressure-coordinate encoding is designed
+selection: all                    # every measurement in the FOV
+max_stations: null
+pad_to: 1536                      # land+marine per-fix max is 1,534
+
+target: usa_sshs                  # categorical over class_set
+sshs_min: 3                       # TS+ driver threshold (matches bookshelf)
+class_set: [3, 4, 5, 6, 7, 8]     # 6-class TS+; no background class
+drop_subtropical: false
+
+source_id: {land: -1, upper: 0, marine: 1}
+timesteps: 1
+
+batch_size: 16
+split:
+  strategy: stratified
+  n_per_class: 8                  # 48 fixes total — small enough to memorise

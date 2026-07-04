@@ -63,6 +63,24 @@ def library_root(tmp_path_factory):
         'usa_pres': rng.uniform(900, 1010, m).astype(np.float32),
         'is_subtropical': np.zeros(m, bool),
     }
+    # Second storm sharing three timestamps with AL012020 -> those become
+    # multi-driver times (shelf multi_times; the multistorm OOD scenario).
+    mB = 3
+    cyc_b = {
+        'report_timestamp': _ts(np.array([48, 51, 54]) * 3600),
+        'lat': rng.uniform(10, 25, mB).astype(np.float32),
+        'lon': rng.uniform(-80, -50, mB).astype(np.float32),
+        'level': np.full(mB, np.nan, np.float32),
+        'sid': np.array(['AL022020'] * mB),
+        'usa_sshs': np.array([4, 5, 6], np.float32),
+        'usa_wind': rng.uniform(35, 140, mB).astype(np.float32),
+        'usa_pres': rng.uniform(900, 1010, mB).astype(np.float32),
+        'is_subtropical': np.zeros(mB, bool),
+    }
+    cyc = {k: np.concatenate([cyc[k], cyc_b[k]]) for k in cyc}
+    order = np.argsort(cyc['report_timestamp'], kind='stable')
+    cyc = {k: v[order] for k, v in cyc.items()}
+
     eids, eint, eorder, eoff = build_entity_spine(cyc['sid'])
     co, cf = build_category_index(cyc)
     write_volume(root / VOLUMES['cyclone'], cyc, eint, eids, eorder, eoff,

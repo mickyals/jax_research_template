@@ -1,0 +1,54 @@
+# cyclone_jax
+
+Tropical-cyclone intensity classification from sparse in-situ observations
+(LISO land / MISO marine / CUON upper-air, IBTrACS driver), built on the
+arcana volume/bookshelf data layer. Branch of record: `jrtv2`.
+
+## Layout
+
+```
+cyclone_jax/
+├── config.py        # load_config: resolves train-config pointers, validates keys
+├── configs/         # composable yaml — see configs/usage_doc.md
+│   ├── data/        #   run scenarios: overfit / train / test / multistorm
+│   ├── models/      #   one yaml per model (empty until models land)
+│   └── train/       #   entry points: train.yaml points at {data, model}
+├── data/            # the whole data side — see data/usage_doc.md
+├── models/          # (next phase) MLP baseline ladder -> Perceiver-IO
+├── train/           # (next phase) train/evaluate/tune entry points
+├── visualise/       # (next phase) plotting
+└── runs/            # run artifacts, gitignored (**/runs/)
+```
+
+## Quick start (notebook)
+
+```python
+from experiments.cyclone_jax.config import load_config, CONFIG_DIR
+from experiments.cyclone_jax.data.interface import build_data
+
+cfg  = load_config(CONFIG_DIR / 'train' / 'train.yaml')
+data = build_data(cfg['data'], seed=cfg['trainer']['seed'])
+
+sample = data.loader.build(0)          # one named ragged sample {'x', 'y'}
+batch  = next(iter(data.streams['train']))   # device-ready batch
+```
+
+## Principles
+
+- **One seed** (`trainer.seed`) populates jax model init
+  (`utils.jax_core.helpers.create_rng`) and numpy data order (Sampler).
+- **Data modules are jax-free** (multiprocess-worker purity); jit sees one
+  static shape via a fixed `pad_to` at collate.
+- **Named dicts everywhere** — no positional token matrices in the data
+  layer; models decide their own packing/encoding.
+- **Leakage allowlist**: model input = obs channels + relative time +
+  position only; IBTrACS intensity/structure columns (`CYC_TARGETS`) are
+  target/metadata, never features.
+- Experiments import `jrt/*` freely; `jrt` never imports experiments.
+
+## Tests
+
+```bash
+/c/Users/micke/anaconda3/envs/jax-research-template/python.exe -m pytest \
+    tests/experiments/cyclone_jax/ tests/datasets/ -q
+```
