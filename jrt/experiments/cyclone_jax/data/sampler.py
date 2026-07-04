@@ -1,110 +1,105 @@
 """
 experiments/cyclone_jax/data/sampler.py
 
-Sample assembly: one storm FIX -> the model-ready token arrays. Replaces
-the old splits.py role too (splits + overfit sets are fix-index selections
-over the bookshelf). Batching (batch.py) only adds the batch dimension.
+Two layers, one file (split if either grows):
 
-A sample is Station x [location | dt | obs | missingness | ID]:
-    location    lat, lon (degrees — Fourier encoding is model-side)
-    dt          seconds before the fix time, <= 0 (carried even though the
-                v1 model may ignore it — cache cheap, consume selectively)
-    obs         the CHANNELS union (u/v-unified wind), NaN -> 0
-    missingness one mask bit per channel (True = measured)
-    ID          scalar source code (-1 land / +1 marine / 0 upper)
+    Loader   — DETERMINISTIC assembly: fix index -> one ragged named
+               sample. No RNG, no epochs, no padding; equally usable for
+               per-entity/notebook inspection and training.
+    Sampler  — index policy: year splits, stratified subsets, seeded
+               re-iterable epoch streams of batch indices. Owns ALL data
+               randomness.
 
-Causality is inherited from the bookshelf lookback edges: only rows in
-[T - reach, T] are ever gathered. The leakage allowlist holds by
-construction — tokens are built from obs volumes + fix position/time only;
-no CYC_TARGETS field enters the token array.
+A sample is {'x': ..., 'y': ...} with named ragged fields:
+
+    x = {lat (n,), lon (n,), level (n,), time (n,),
+         obs (n, C), missing (n, C) bool, id (n,)}
+    y = {'target', 'sid', 'lat', 'lon', 'time'}          (targets.build_y)
+
+x['time'] is SECONDS RELATIVE to the fix time, <= 0 by construction
+(causality inherited from the bookshelf lookback edges); the absolute fix
+time is y['time']. x['level'] is each volume's vertical coordinate (land:
+station pressure, marine: SLP, upper: z) — finite by the build-time
+vertical gate. Channels a source lacks ride NaN -> 0 with missing False,
+so every variable owns one fixed union position (inputs.CHANNEL_ORDER).
+
+Leakage allowlist holds by construction: x is built from obs volumes plus
+fix position/time only — no CYC_TARGETS field enters x.
+
+Seeding: one config seed (trainer.seed) populates BOTH sides — jax model
+init via utils.jax_core.helpers.create_rng(seed), and data order here via
+numpy (this module is jax-free so multiprocess workers stay cheap). Epoch
+streams derive rng = default_rng([seed, epoch]): any epoch is re-iterable
+without storing state.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from experiments.cyclone_jax.data.sources.shelf import load_lookback
+from datasets.splitting import group_mask, validate_disjoint_groups
 from utils.geoscience.geodesic import haversine_np
 
-from experiments.cyclone_jax.data.inputs import (
-    DEFAULT_SOURCE_ID, SOURCE_SCHEMAS, union_channels,
-)
-from experiments.cyclone_jax.data.transformations import (
-    build_missingness, stamp_source_id,
-)
+from experiments.cyclone_jax.data.inputs import SOURCE_SCHEMAS
+from experiments.cyclone_jax.data.transformations import build_missingness
+from experiments.cyclone_jax.data.sources.shelf import load_lookback
 from experiments.cyclone_jax.data.sources.library import (
     CYC_SSHS, TROPICAL_STORM, get_fixes,
 )
 
-# v1 channel union (land + marine); the schemas live in inputs.py. P3 makes
-# this per-instance via InputSpec.
-CHANNELS = union_channels(('land', 'marine'))
-
-# Token column layout: [lat, lon, dt, obs(C), mask(C), id]
-N_LOC = 3
-TOKEN_DIM = N_LOC + 2 * len(CHANNELS) + 1
+X_FIELDS = ('lat', 'lon', 'level', 'time', 'obs', 'missing', 'id')
 
 
-class FixSampler:
-    """Assembles one sample per driver fix from a loaded library.
+# ---------------------------------------------------------------------------
+# Loader — deterministic fix -> sample assembly
+# ---------------------------------------------------------------------------
+
+class Loader:
+    """Assembles one ragged named sample per driver fix.
 
     Parameters
     ----------
     lib : dict
         From library.load_library (volumes + shelves, guards passed).
-    sources : sequence
-        Obs volumes to gather ('land', 'marine' for v1).
-    pad_to : int
-        Fixed station-token count (1536 covers the v1 max of 1534).
-    sshs_min / class_min : int
-        Driver threshold and label origin: label = sshs - class_min.
-    selection : 'all' | 'max_stations'
-        'all' = every measurement in the FOV (default). 'max_stations' =
-        the nearest max_stations tokens by haversine distance to the fix.
+    inputs : InputSpec
+        Sources / channel union / selection policy (inputs.resolve_input).
+    targets : TargetSpec
+        y policy (targets.resolve_target).
+    sshs_min : int
+        Driver threshold for the fix table (matches the bookshelf build).
     """
 
-    def __init__(self, lib, sources=('land', 'marine'), pad_to=1536,
-                 sshs_min=TROPICAL_STORM, class_min=TROPICAL_STORM,
-                 source_id=None, selection='all', max_stations=None):
-        if selection not in ('all', 'max_stations'):
-            raise ValueError(f"selection must be 'all' or 'max_stations', "
-                             f"got {selection!r}")
-        if selection == 'max_stations' and not max_stations:
-            raise ValueError("selection='max_stations' requires max_stations.")
-        self.lib          = lib
-        self.sources      = tuple(sources)
-        self.pad_to       = int(pad_to)
-        self.class_min    = int(class_min)
-        self.selection    = selection
-        self.max_stations = int(max_stations) if max_stations else None
-        self.source_id    = dict(source_id or DEFAULT_SOURCE_ID)
+    def __init__(self, lib, inputs, targets, sshs_min=TROPICAL_STORM,
+                 drop_subtropical=False):
+        self.lib     = lib
+        self.inputs  = inputs
+        self.targets = targets
 
-        self.fixes = get_fixes(lib['volumes']['cyclone'], sshs_min=sshs_min)
+        self.fixes = get_fixes(lib['volumes']['cyclone'], sshs_min=sshs_min,
+                               drop_subtropical=drop_subtropical)
         self.storm_times = np.asarray(lib['shelves']['cyclone']['storm_times'])
-        self._edges, self._deltas = {}, {}
-        for s in self.sources:
-            edges, deltas = load_lookback(lib['shelves'][s])
+        self._edges = {}
+        for s in inputs.sources:
+            edges, _ = load_lookback(lib['shelves'][s])
             if edges is None:
                 raise RuntimeError(f"no lookback edges for {s!r} — rebuild "
                                    f"the bookshelf.")
-            self._edges[s], self._deltas[s] = edges, deltas
+            self._edges[s] = edges
 
     def __len__(self):
         return len(self.fixes['time'])
 
     # ------------------------------------------------------------------
 
-    def _source_tokens(self, s, ti, T):
-        """(n, TOKEN_DIM) float32 token block for one source at time idx ti."""
+    def _source_x(self, s, ti, T):
+        """One source's ragged x fields at storm-time index ti."""
         e = self._edges[s]
         lo, hi = int(e[ti, 0]), int(e[ti, -1])
         obs = self.lib['volumes'][s]['obs']
         n = hi - lo
-        if n == 0:
-            return np.zeros((0, TOKEN_DIM), np.float32)
 
-        vals = np.full((n, len(CHANNELS)), np.nan, np.float32)
-        ch = {c: j for j, c in enumerate(CHANNELS)}
+        vals = np.full((n, self.inputs.n_channels), np.nan, np.float32)
+        ch = self.inputs.channel_index
         schema = SOURCE_SCHEMAS[s]
         for col, channel in schema.direct.items():
             vals[:, ch[channel]] = np.asarray(obs[col][lo:hi], np.float32)
@@ -112,74 +107,112 @@ class FixSampler:
             cols = (np.asarray(obs[c][lo:hi]) for c in d.columns)
             for channel, arr in zip(d.channels, d.compute(*cols)):
                 vals[:, ch[channel]] = arr
+        vals, missing = build_missingness(vals)
 
-        vals, mask = build_missingness(vals)
         dt = ((np.asarray(obs['report_timestamp'][lo:hi]).astype('int64')
-               - T.astype('int64')) / 1e9).astype(np.float32)[:, None]
-        loc = np.stack([np.asarray(obs['lat'][lo:hi], np.float32),
-                        np.asarray(obs['lon'][lo:hi], np.float32)], axis=1)
-        sid_col = stamp_source_id(n, self.source_id[s])
-        return np.concatenate(
-            [loc, dt, vals, mask.astype(np.float32), sid_col], axis=1)
+               - T.astype('int64')) / 1e9).astype(np.float32)
+        return {
+            'lat':     np.asarray(obs['lat'][lo:hi], np.float32),
+            'lon':     np.asarray(obs['lon'][lo:hi], np.float32),
+            'level':   np.asarray(obs['level'][lo:hi], np.float32),
+            'time':    dt,
+            'obs':     vals,
+            'missing': missing,
+            'id':      np.full(n, self.inputs.source_id[s], np.float32),
+        }
 
     def build(self, i):
-        """Sample dict for fix i: tokens (pad_to, TOKEN_DIM), station_mask
-        (pad_to,), label int32, + meta (sid / time / sshs / n_stations)."""
+        """Sample {'x', 'y'} for fix i (see module docstring for schema)."""
         T = self.fixes['time'][i]
         ti = int(np.searchsorted(self.storm_times, T))
-        blocks = [self._source_tokens(s, ti, T) for s in self.sources]
-        tok = np.concatenate(blocks, axis=0) if blocks else \
-            np.zeros((0, TOKEN_DIM), np.float32)
+        parts = [self._source_x(s, ti, T) for s in self.inputs.sources]
+        x = {k: np.concatenate([p[k] for p in parts], axis=0)
+             for k in X_FIELDS}
 
-        if self.selection == 'max_stations' and len(tok) > self.max_stations:
+        k = self.inputs.max_stations
+        if self.inputs.selection == 'max_stations' and len(x['lat']) > k:
             d = haversine_np(np.float32(self.fixes['lat'][i]),
                              np.float32(self.fixes['lon'][i]),
-                             tok[:, 0], tok[:, 1])
-            tok = tok[np.argsort(d, kind='stable')[:self.max_stations]]
+                             x['lat'], x['lon'])
+            keep = np.argsort(d, kind='stable')[:k]
+            x = {f: v[keep] for f, v in x.items()}
 
-        n = min(len(tok), self.pad_to)
-        tokens = np.zeros((self.pad_to, TOKEN_DIM), np.float32)
-        tokens[:n] = tok[:n]
-        station_mask = np.zeros(self.pad_to, bool)
-        station_mask[:n] = True
-
-        return {
-            'tokens':       tokens,
-            'station_mask': station_mask,
-            'label':        np.int32(int(self.fixes[CYC_SSHS][i])
-                                     - self.class_min),
-            'sid':          str(self.fixes['sid'][i]),
-            'time':         T,
-            'sshs':         float(self.fixes[CYC_SSHS][i]),
-            'n_stations':   np.int32(n),
-        }
+        return {'x': x, 'y': self.targets.build_y(self.fixes, i)}
 
 
 # ---------------------------------------------------------------------------
-# Fix-index selections: splits + overfit sets
+# Index selections: splits + overfit sets
 # ---------------------------------------------------------------------------
 
 def split_by_year(fix_times, train_years, val_years, test_years):
-    """Disjoint year-based split over fix timestamps -> index arrays."""
-    years = fix_times.astype('datetime64[Y]').astype(int) + 1970
-    sets = {'train': train_years, 'val': val_years, 'test': test_years}
-    out = {k: np.nonzero(np.isin(years, list(v)))[0] for k, v in sets.items()}
-    for a in ('train', 'val'):
-        for b in ('val', 'test'):
-            if a != b:
-                assert not set(sets[a]) & set(sets[b]), 'split years overlap'
-    return out
+    """Disjoint year-based split over fix timestamps -> index arrays.
+
+    Disjointness and masking via datasets.splitting; raises on overlap.
+    """
+    years = (np.asarray(fix_times).astype('datetime64[Y]').astype(int)
+             + 1970)
+    sets = {'train': list(train_years), 'val': list(val_years),
+            'test': list(test_years)}
+    validate_disjoint_groups(sets)
+    return {k: np.nonzero(group_mask(years, v))[0] for k, v in sets.items()}
 
 
-def stratified_fixes(sampler, n_per_class, seed=0, classes=range(3, 9)):
-    """Balanced overfit set: n_per_class random fixes per remapped category
-    (drawn from the sampler's fix table). Classes short of n_per_class
-    contribute everything they have."""
+def stratified_fixes(loader, n_per_class, seed=0, classes=None):
+    """Balanced overfit set: n_per_class seeded random fixes per remapped
+    category (default: the loader's target class_set). Classes short of
+    n_per_class contribute everything they have. Sorted index array."""
+    classes = loader.targets.class_set if classes is None else classes
     rng = np.random.default_rng(seed)
-    sshs = np.asarray(sampler.fixes[CYC_SSHS]).astype(int)
+    sshs = np.asarray(loader.fixes[CYC_SSHS]).astype(int)
     picks = []
     for c in classes:
         idx = np.nonzero(sshs == c)[0]
         take = min(n_per_class, len(idx))
         picks.append(rng.choice(idx, take, replace=False))
     return np.sort(np.concatenate(picks))
+
+
+# ---------------------------------------------------------------------------
+# Sampler — seeded epoch streams of batch indices
+# ---------------------------------------------------------------------------
+
+class Sampler:
+    """Yields batch index arrays over a fixed index set, deterministically
+    in (seed, epoch).
+
+    numpy only — no jax (worker purity), no dependence on the Loader (the
+    consumer maps loader.build over the yielded indices and collates).
+    drop_last=True keeps every batch full-size so the jitted step sees one
+    shape (pair with batching.collate's fixed pad_to).
+    """
+
+    def __init__(self, indices, batch_size, seed=0, shuffle=True,
+                 drop_last=True):
+        self.indices = np.asarray(indices, np.int64)
+        if self.indices.ndim != 1 or len(self.indices) == 0:
+            raise ValueError("indices must be a non-empty 1-D index array.")
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}.")
+        self.batch_size = int(batch_size)
+        self.seed       = int(seed)
+        self.shuffle    = bool(shuffle)
+        self.drop_last  = bool(drop_last)
+
+    def __len__(self):
+        """Batches per epoch."""
+        n, b = len(self.indices), self.batch_size
+        return n // b if self.drop_last else -(-n // b)
+
+    def epoch(self, epoch=0):
+        """Yield batch index arrays for one epoch (re-iterable: the order
+        is a pure function of (seed, epoch))."""
+        idx = self.indices
+        if self.shuffle:
+            rng = np.random.default_rng([self.seed, int(epoch)])
+            idx = rng.permutation(idx)
+        stop = len(self) * self.batch_size if self.drop_last else len(idx)
+        for b0 in range(0, stop, self.batch_size):
+            yield idx[b0:b0 + self.batch_size]
+
+    def __iter__(self):
+        return self.epoch(0)

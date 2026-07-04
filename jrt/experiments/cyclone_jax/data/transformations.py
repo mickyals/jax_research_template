@@ -2,8 +2,8 @@
 experiments/cyclone_jax/data/transformations.py
 
 MECHANICS of sample assembly — pure numpy functions. Policy (which vars,
-which ID codes) lives with the sampler/config; these are the array-level
-operations they resolve to.
+which ID codes) lives in the specs (inputs.py / targets.py); these are the
+array-level operations they resolve to.
 
 Wind decomposition lives in utils/geoscience/met_conversions
 (wind_to_components — meteorological FROM convention, calm -> (0, 0));
@@ -21,9 +21,3 @@ def build_missingness(values):
     values = np.asarray(values, np.float32)
     mask = np.isfinite(values)
     return np.where(mask, values, 0.0).astype(np.float32), mask
-
-
-def stamp_source_id(n, code):
-    """(n, 1) float32 column of the scalar source code (-1 land / +1 marine
-    / 0 upper)."""
-    return np.full((n, 1), float(code), np.float32)

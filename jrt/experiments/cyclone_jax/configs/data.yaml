@@ -31,7 +31,11 @@ data:
   # (one static shape -> jit compiles once).
   pad_to: 1536
 
-  # Driver / label (remapped 0..8 SSHS scheme; see sources.remap_sshs)
+  # Driver / label (remapped 0..8 SSHS scheme; see build.remap_sshs).
+  # target selects the supervised variable (targets.resolve_target):
+  # usa_sshs = categorical over class_set; CYC_TARGETS vars = continuous
+  # (reserved, not implemented).
+  target: usa_sshs
   sshs_min: 3                       # TS+ driver threshold (matches bookshelf)
   class_set: [3, 4, 5, 6, 7, 8]     # 6-class TS+; no background class
   drop_subtropical: false
