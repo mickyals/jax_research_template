@@ -18,6 +18,7 @@ splits, streams` — all by name, notebook-friendly.
 | `sources/shelf.py` | `_BOOKSHELF` cross-volume indices: time spines, driver manifest (storm/multi times), causal lookback edges, freshness fingerprints |
 | `sources/build.py` | BUILD-TIME raw -> volume converters (LISO/MISO/CUON/IBTrACS; xarray/pandas; never imported at train time) |
 | `sources/library.py` | TRAIN-TIME library access: `load_library` (+staleness guards), `build_bookshelf`, `get_fixes`, cyclone vocabulary (SSHS constants, `CYC_TARGETS` allowlist, lookback schedules) |
+| `variables.py` | variable catalogue: canonical units + description per stored column (`VARIABLES`), meta.json sidecar content (`column_meta`), display-unit helper (`to_display`) |
 | `inputs.py` | `InputSpec` / `resolve_input`: per-source channel schemas (`SOURCE_SCHEMAS`), derived wind, canonical union (`CHANNEL_ORDER`), selection policy, `pad_to` |
 | `targets.py` | `TargetSpec` / `resolve_target`: label space (class_set; label = position in set), `build_y`, class names |
 | `transformations.py` | numpy mechanics (missingness). Wind lives in `utils/geoscience/met_conversions`, normalisers in `utils/jax_core/helpers` — not duplicated here |
@@ -91,6 +92,34 @@ third sibling of Input/TargetSpec).
   logged). `y` and `meta` stay RAW — they are eval metadata.
 - `domain: {lat: [lo, hi], lon: [lo, hi]}` pins the FOV for coord scaling;
   station selection (haversine) always runs on real degrees regardless.
+
+## Units
+
+Storage is **canonical SI everywhere** (ruling 2026-07-05). The CDM
+sources (LISO/MISO/CUON) deliver SI; IBTrACS is converted inside
+`build_storm_volume` (`convert_storm_units`, strictly AFTER `remap_sshs`
+— the remap's Saffir-Simpson thresholds are kt on raw `usa_wind`). Every
+volume carries a `meta.json` sidecar (`{column: {units, description}}`)
+written by `write_volume` from the catalogue. Figures/tables convert at
+the display boundary only: `to_display(value, units)` applies the one
+project-wide mapping (m → km, Pa → hPa, everything else as stored).
+Standardisation absorbs affine unit changes, so model results are
+unchanged by the conversion — this is metadata/eval/figure correctness.
+
+| variable | units | notes |
+|---|---|---|
+| `report_timestamp` (`launch_timestamp` upper) | datetime64[ns] | volume sort key (launch = ascent second, provenance) |
+| `lat` / `lon` | degrees | −90..90 / −180..180 symmetric |
+| `level` | Pa | vertical coord everywhere: land station p, marine SLP, upper z, storm `usa_pres` (NaN allowed on driver) |
+| `elevation`, `geopot` | m | land station height; upper geopotential height |
+| `station_pressure`, `slp`, `usa_pres`, `usa_poci` | Pa | storm pair converted from mb |
+| `air_temp`, `dewpoint`, `sst`, `dpd` | K | |
+| `wind_speed`, `u_wind`, `v_wind`, `usa_wind`, `storm_speed` | m/s | `usa_wind` is a 1-MINUTE average (US agencies); storm pair converted from kt |
+| `wind_dir`, `storm_dir` | degrees | 0..360 bearings: wind FROM, storm heading TOWARD |
+| `usa_rmw`, `usa_roci`, `usa_r{34,50,64}_{NE,SE,SW,NW}` | m | converted from nmile |
+| `rh` / `q` | % / kg kg⁻¹ | upper only |
+| `usa_sshs` (`usa_sshs_raw`, `is_subtropical`) | category | project 0..8 scheme (raw −5..5 kept alongside) |
+| `sid`, `name`, `basin`, `subbasin`, `iflag`, `usa_status`, `season`, `platform_type` | str / year / code | identity metadata |
 
 ## Rebuilding the library
 

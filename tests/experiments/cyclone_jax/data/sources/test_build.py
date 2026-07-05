@@ -8,12 +8,18 @@ no-chaining), and the category index.
 import numpy as np
 import pytest
 
+from utils.geoscience.met_conversions import R34_MS_THRESHOLD, kt_to_ms
+
 from experiments.cyclone_jax.data.sources.build import (
     G,
     N_CAT,
     RD,
+    STORM_KT_COLS,
+    STORM_MB_COLS,
+    STORM_NMILE_COLS,
     _hypsometric_fill,
     build_category_index,
+    convert_storm_units,
     remap_sshs,
 )
 
@@ -52,6 +58,50 @@ class TestRemapSSHS:
     def test_unmapped_code_stays_nan(self):
         new = remap_sshs(np.array([-5.0, np.nan]), np.array([50.0, 50.0]))
         assert np.all(np.isnan(new))
+
+
+# ---------------------------------------------------------------------------
+# Storm unit conversion (kt/mb/nmile -> SI, strictly after the remap)
+# ---------------------------------------------------------------------------
+
+class TestConvertStormUnits:
+
+    def _cols(self):
+        out = {c: np.float32([10.0, np.nan]) for c in
+               STORM_KT_COLS + STORM_MB_COLS + STORM_NMILE_COLS}
+        out['usa_sshs'] = np.float32([3.0, 3.0])       # untouched control
+        return out
+
+    def test_factors(self):
+        out = convert_storm_units(self._cols())
+        assert out['usa_wind'][0] == pytest.approx(10 * 0.514444)
+        assert out['usa_pres'][0] == pytest.approx(1000.0)     # mb -> Pa
+        assert out['level'][0] == pytest.approx(1000.0)
+        assert out['usa_rmw'][0] == pytest.approx(18520.0)     # nmi -> m
+        assert out['usa_r34_NE'][0] == pytest.approx(18520.0)
+
+    def test_nan_passthrough_and_dtype(self):
+        out = convert_storm_units(self._cols())
+        for c in STORM_KT_COLS + STORM_MB_COLS + STORM_NMILE_COLS:
+            assert np.isnan(out[c][1]) and out[c].dtype == np.float32
+
+    def test_category_column_untouched(self):
+        out = convert_storm_units(self._cols())
+        np.testing.assert_array_equal(out['usa_sshs'], [3.0, 3.0])
+
+    def test_remap_before_convert_order(self):
+        """The build-order contract: remap sees kt, conversion follows.
+        A 40-kt subtropical fix is a tropical storm (class 3) under the
+        kt thresholds; converted first (20.6 m/s) it would land in the
+        depression band — the wrong class."""
+        wind_kt = np.float32([40.0])
+        assert remap_sshs(np.float32([-2.0]), wind_kt)[0] == 3
+        assert kt_to_ms(wind_kt)[0] < 34            # would misclassify
+
+    def test_threshold_equivalence(self):
+        """34 kt converts to exactly the R34 m/s threshold constant —
+        remapped classes and converted winds stay consistent."""
+        assert kt_to_ms(34.0) == pytest.approx(R34_MS_THRESHOLD)
 
 
 # ---------------------------------------------------------------------------

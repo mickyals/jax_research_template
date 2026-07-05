@@ -55,6 +55,9 @@ python -m experiments.cyclone_jax.train.train \
 - **Leakage allowlist**: model input = obs channels + relative time +
   position only; IBTrACS intensity/structure columns (`CYC_TARGETS`) are
   target/metadata, never features.
+- **Canonical SI storage** (m, Pa, m/s; catalogue + meta.json sidecars +
+  display-unit helper in `data/variables.py`); IBTrACS converted at build,
+  after the kt-threshold SSHS remap. Details: `data/usage_doc.md` Units.
 - Experiments import `jrt/*` freely; `jrt` never imports experiments.
 
 ## Tests

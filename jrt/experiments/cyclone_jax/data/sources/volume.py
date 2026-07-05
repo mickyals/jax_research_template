@@ -13,6 +13,8 @@ CSR entity spine and a manifest:
     <dir>/_cat_order.npy      OPTIONAL category spine (driver volumes)
     <dir>/_cat_offsets.npy    OPTIONAL category spine indptr
     <dir>/manifest.json       format tag, column list, row count
+    <dir>/meta.json           {column: {units, description}} sidecar
+                              (from data/variables.py — volumes self-describe)
 
 Rows are time-sorted on `report_timestamp`, so time-window queries are
 O(log N) binary searches. All large arrays are memory-mapped at load —
@@ -83,6 +85,10 @@ def write_volume(out_dir, obs, entity_int, entity_ids, entity_order,
     memory-mapped. `cat_order`/`cat_offsets` (both or neither) attach an
     optional category spine (used by driver volumes, e.g. cyclone SSHS).
 
+    A meta.json sidecar ({column: {units, description}}, from the
+    data/variables.py catalogue) makes the volume self-describing;
+    uncatalogued columns get an explicit 'unknown' entry.
+
     Returns the written directory as a Path.
     """
     if (cat_order is None) != (cat_offsets is None):
@@ -106,6 +112,9 @@ def write_volume(out_dir, obs, entity_int, entity_ids, entity_order,
     (out / 'manifest.json').write_text(json.dumps(
         {'format': VOLUME_FORMAT, 'columns': cols,
          'n_rows': int(len(np.asarray(entity_int)))}))
+    # import here: variables.py is policy, this module is store mechanics
+    from experiments.cyclone_jax.data.variables import column_meta
+    (out / 'meta.json').write_text(json.dumps(column_meta(cols), indent=2))
     return out
 
 

@@ -116,6 +116,14 @@ class TestWriteLoad:
         assert man['n_rows'] == N_ROWS
         assert set(man['columns']) == set(obs.keys())
 
+    def test_meta_sidecar_written(self, volume_dir):
+        d, obs, _ = volume_dir
+        meta = json.loads((d / 'meta.json').read_text())
+        assert set(meta) == set(obs.keys())
+        # catalogued column carries real units; scratch columns are explicit
+        assert meta['air_temp']['units'] == 'K'
+        assert all({'units', 'description'} <= set(v) for v in meta.values())
+
     def test_wrong_format_raises(self, tmp_path, volume_dir):
         d, _, _ = volume_dir
         man = json.loads((d / 'manifest.json').read_text())

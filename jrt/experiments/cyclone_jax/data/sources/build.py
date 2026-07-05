@@ -24,12 +24,20 @@ category spine = cyclone; launch timestamp + z-in-key = upper).
 The surface vertical gate (require finite pressure) is DELIBERATE:
 pressure is fundamental to the weather state and doubles as the vertical
 coordinate — a report without it is not a usable measurement here.
+
+Units: every volume stores canonical SI (catalogue: data/variables.py).
+The CDM sources deliver SI already; IBTrACS does not — convert_storm_units
+(kt -> m/s, mb -> Pa, nmile -> m) runs inside build_storm_volume, strictly
+AFTER remap_sshs (whose thresholds are kt on raw usa_wind). write_volume
+drops a meta.json {column: {units, description}} sidecar beside the data.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+from utils.geoscience.met_conversions import hpa_to_pa, kt_to_ms, nmile_to_m
 
 from experiments.cyclone_jax.data.sources.volume import build_entity_spine, write_volume  # noqa: F401 (write_volume re-exported for build scripts)
 
@@ -308,6 +316,29 @@ def build_upper_volume(ds):
 # IBTrACS -> storm-arcanum (driver volume: SSHS remap + category spine)
 # ===========================================================================
 
+# IBTrACS raw units -> canonical SI at build time (units ruling 2026-07-05;
+# see data/variables.py). The CDM volumes are already SI — the storm volume
+# is the only one that needs converting. Conversion runs AFTER remap_sshs:
+# the remap's Saffir-Simpson thresholds are kt values on raw usa_wind.
+STORM_KT_COLS    = ('usa_wind', 'storm_speed')                    # kt -> m/s
+STORM_MB_COLS    = ('usa_pres', 'usa_poci', 'level')              # mb -> Pa
+STORM_NMILE_COLS = ('usa_rmw', 'usa_roci') + tuple(               # nmi -> m
+    f'usa_r{r}_{q}' for r in (34, 50, 64) for q in QUADS)
+
+
+def convert_storm_units(out):
+    """In-place kt->m/s, mb->Pa, nmile->m over the storm column dict.
+
+    NaN passes through (affine on NaN is NaN); dtypes stay float32.
+    Call strictly after remap_sshs.
+    """
+    for cols, fn in ((STORM_KT_COLS, kt_to_ms),
+                     (STORM_MB_COLS, hpa_to_pa),
+                     (STORM_NMILE_COLS, nmile_to_m)):
+        for c in cols:
+            out[c] = fn(out[c]).astype(np.float32)
+    return out
+
 def remap_sshs(usa_sshs, usa_wind):
     """IBTrACS USA_SSHS (-5..5) -> project scheme (0..8).
 
@@ -418,6 +449,8 @@ def build_storm_volume(ds, keep_subtropical=True):
     out['usa_sshs_raw']   = raw
     out['is_subtropical'] = (raw == RAW_SUBTROPICAL)
     out['usa_sshs']       = remap_sshs(raw, out['usa_wind'])
+
+    convert_storm_units(out)          # kt/mb/nmile -> SI, AFTER the remap
 
     out, entity_int, entity_ids, entity_order, entity_offsets = \
         _time_sort(out, out['sid'])
