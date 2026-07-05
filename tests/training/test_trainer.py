@@ -672,6 +672,15 @@ class TestFit:
         with pytest.raises(KeyError, match="nonexistent"):
             Trainer(_TinyMLP(), _METRICS, cfg).fit(train_loader, val_loader)
 
+    def test_patience_metric_may_watch_train_loss(self, tmp_path, train_loader,
+                                                  val_loader):
+        """Early stopping on 'train/<loss_key>' — memorisation/overfit gates."""
+        cfg = _base_config(tmp_path, patience_metric="train/mse", num_epochs=2)
+        trainer = Trainer(_TinyMLP(), _METRICS, cfg)
+        trainer.fit(train_loader, val_loader)
+        assert np.isfinite(trainer._best_metric_value)
+        assert (trainer._checkpoint_dir / "best").exists()
+
     def test_latest_checkpoint_saved_each_epoch(self, tmp_path, train_loader, val_loader):
         cfg     = _base_config(tmp_path, num_epochs=3, patience=10)
         trainer = Trainer(_TinyMLP(), _METRICS, cfg)

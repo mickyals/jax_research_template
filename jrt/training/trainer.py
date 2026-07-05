@@ -43,6 +43,9 @@ Optional  (defaults shown)
     num_steps         int    inf    stop at whichever limit is hit first
     patience          int    10
     patience_metric   str    'val/<first metrics_fns key>'
+                             any 'val/<metric>' works, as does
+                             'train/<loss_key>' — early stopping on the
+                             training loss (memorisation/overfit gates)
     patience_direction str   'lower_is_better'  or  'higher_is_better'
     max_grad_norm     float  None   gradient clipping; None = disabled
     checkpoint_dir    str    'checkpoints'
@@ -804,13 +807,14 @@ class Trainer:
                 for cb in epoch_callbacks:
                     cb(state, epoch, self._global_step)
 
-            if self._patience_metric not in val_metrics:
+            epoch_metrics = {**train_metrics, **val_metrics}
+            if self._patience_metric not in epoch_metrics:
                 raise KeyError(
                     f"patience_metric '{self._patience_metric}' not found in "
-                    f"val_metrics. Available: {list(val_metrics.keys())}. "
+                    f"epoch metrics. Available: {list(epoch_metrics.keys())}. "
                     "Check patience_metric in config."
                 )
-            current  = val_metrics[self._patience_metric]
+            current  = epoch_metrics[self._patience_metric]
             improved = self.is_better(current, best_metric)
 
             # optuna pruning: report intermediate value and stop early if
