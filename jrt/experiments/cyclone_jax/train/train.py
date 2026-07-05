@@ -27,28 +27,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from training.logger import create_logger
-from training.metrics import get_metric
 from training.trainer import Trainer
 
 from experiments.cyclone_jax.config import load_config
 from experiments.cyclone_jax.data.interface import build_data
 from experiments.cyclone_jax.models import build_model
-from experiments.cyclone_jax.train.losses import build_loss
-
-
-def build_metrics_fns(trainer_cfg: dict) -> dict:
-    """trainer yaml block -> Trainer metrics_fns dict.
-
-    'loss' is the FIRST key (the Trainer differentiates the first entry),
-    so the logged/patience name is train/loss regardless of which
-    registered loss — or weighted term list (train/losses.py) — the
-    config picked; trainer.metrics adds report-only metrics after it.
-    """
-    fns = {'loss': build_loss(trainer_cfg)}
-    for name in trainer_cfg.get('metrics') or ():
-        if name not in fns:
-            fns[name] = get_metric(name)
-    return fns
+from experiments.cyclone_jax.train.metrics import build_metrics_fns
 
 
 def build_trainer_config(cfg: dict) -> dict:

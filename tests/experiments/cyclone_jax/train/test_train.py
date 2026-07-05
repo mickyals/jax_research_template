@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from experiments.cyclone_jax.train.train import (
-    build_logger, build_metrics_fns, build_trainer_config, main,
+    build_logger, build_trainer_config, main,
 )
 
 TINY_MODEL = {
@@ -47,29 +47,6 @@ def _write_configs(config_dir, library_root, model=TINY_MODEL,
 # ---------------------------------------------------------------------------
 
 class TestHelpers:
-
-    def test_loss_is_first_metrics_key(self):
-        fns = build_metrics_fns({'loss': 'cross_entropy',
-                                 'metrics': ['accuracy', 'mae_class']})
-        assert list(fns) == ['loss', 'accuracy', 'mae_class']
-
-    def test_loss_entry_is_a_stack(self):
-        from training.losses import LossStack
-        fns = build_metrics_fns({'loss': 'cross_entropy'})
-        assert isinstance(fns['loss'], LossStack)
-        assert fns['loss'].needs_model is False
-
-    def test_term_list_loss_supported(self):
-        fns = build_metrics_fns({'loss': [
-            {'name': 'cross_entropy'},
-            {'name': 'l1_params', 'weight': 1.0e-4},
-        ]})
-        assert fns['loss'].needs_model is True
-        assert fns['loss'].term_names == ('cross_entropy', 'l1_params')
-
-    def test_metric_named_like_loss_not_duplicated(self):
-        fns = build_metrics_fns({'metrics': ['loss', 'accuracy']})
-        assert list(fns) == ['loss', 'accuracy']
 
     def test_trainer_schema_translation(self):
         cfg = {'data': {'batch_size': 16},
