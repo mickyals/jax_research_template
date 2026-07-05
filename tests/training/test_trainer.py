@@ -252,6 +252,11 @@ class TestTrainerInit:
         assert t._train_step is None
         assert t._eval_step  is None
 
+    def test_global_step_property_tracks_counter(self, trainer):
+        assert trainer.global_step == 0
+        trainer._global_step = 7
+        assert trainer.global_step == 7
+
 
 # ---------------------------------------------------------------------------
 # TestInitState

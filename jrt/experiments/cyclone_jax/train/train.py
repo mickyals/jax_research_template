@@ -32,7 +32,7 @@ from training.trainer import Trainer
 from experiments.cyclone_jax.config import load_config
 from experiments.cyclone_jax.data.interface import build_data
 from experiments.cyclone_jax.models import build_model
-from experiments.cyclone_jax.train.log import build_callbacks
+from experiments.cyclone_jax.train.log import build_callbacks, end_of_run
 from experiments.cyclone_jax.train.metrics import build_metrics_fns
 
 
@@ -99,12 +99,14 @@ def main(train_yaml, config_dir=None):
                          f"stream(s) — check split/batch_size.")
 
     callbacks = build_callbacks(cfg, data, logger)
-    trainer.fit(data.streams['train'], data.streams['val'],
-                step_callbacks=callbacks or None)
+    best_state = trainer.fit(data.streams['train'], data.streams['val'],
+                             step_callbacks=callbacks or None)
 
     test_metrics = {}
     if 'test' in data.streams:
         test_metrics = trainer.test(data.streams['test'])
+    end_of_run(cfg, data, logger, best_state,
+               global_step=trainer.global_step)
 
     trainer.logger.finalize('success')
     return trainer, test_metrics

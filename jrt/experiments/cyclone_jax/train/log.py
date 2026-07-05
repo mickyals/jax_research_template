@@ -42,6 +42,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import jax.numpy as jnp
 
@@ -51,7 +52,8 @@ from utils.registry import Registry
 
 from experiments.cyclone_jax.data.batching import collate
 from experiments.cyclone_jax.data.sparsity import network_sparsity
-from experiments.cyclone_jax.visualise.figures import storm_panel_figure
+from experiments.cyclone_jax.visualise.figures import (save_gif,
+                                                       storm_panel_figure)
 
 CALLBACKS = Registry('Callback')
 
@@ -89,6 +91,32 @@ def _domain_from_norms(norms):
         return None
     return {'lat': [norms.stats['lat']['min'], norms.stats['lat']['max']],
             'lon': [norms.stats['lon']['min'], norms.stats['lon']['max']]}
+
+
+def _render_fix(state, data, i, domain, basemap):
+    """One fix index -> titled truth-star/pred-ring panel. Shared by the
+    storm_panel callback and the end-of-run storm sequence."""
+    loader, targets = data.loader, data.targets
+    batch = collate([loader.build(i)], loader.inputs.pad_to)
+    pred = int(np.argmax(np.asarray(_predict(state, batch))[0]))
+    true = int(batch['y'][0])
+    meta, mask = batch['meta'], batch['X']['station_mask'][0]
+    lat = np.asarray(batch['X']['lat'][0])[mask]
+    lon = np.asarray(batch['X']['lon'][0])[mask]
+    if data.norms is not None:
+        lat, lon = data.norms.invert_coords(lat, lon)
+
+    n = int(meta['n_stations'][0])
+    title = (f"{meta['sid'][0]}  {str(meta['time'][0])[:16]}  "
+             f"true {targets.class_names[true]} vs "
+             f"pred {targets.class_names[pred]}  n={n}")
+    if domain:
+        r_km = network_sparsity(n, domain)['resolvable_km']
+        title += f"  resolvable {r_km:.0f} km"
+    return storm_panel_figure(
+        lon, lat, float(meta['lon'][0]), float(meta['lat'][0]),
+        true, pred, targets.n_classes, title=title,
+        domain=domain, basemap=basemap)
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +168,7 @@ def _confusion_matrix(ctx, split='val'):
 )
 def _storm_panel(ctx, split='val', basemap=True):
     data, logger = ctx['data'], ctx['logger']
-    loader, targets = data.loader, data.targets
+    loader = data.loader
     split_idx = np.asarray(data.splits[split])
 
     sel = (ctx.get('storm_panels') or {}).get(split, 'random')
@@ -158,26 +186,7 @@ def _storm_panel(ctx, split='val', basemap=True):
     def fn(state, epoch, global_step):
         rng = np.random.default_rng(global_step)      # reproducible pick
         i = int(rng.choice(pool))
-        batch = collate([loader.build(i)], loader.inputs.pad_to)
-        pred = int(np.argmax(np.asarray(_predict(state, batch))[0]))
-        true = int(batch['y'][0])
-        meta, mask = batch['meta'], batch['X']['station_mask'][0]
-        lat = np.asarray(batch['X']['lat'][0])[mask]
-        lon = np.asarray(batch['X']['lon'][0])[mask]
-        if data.norms is not None:
-            lat, lon = data.norms.invert_coords(lat, lon)
-
-        n = int(meta['n_stations'][0])
-        title = (f"{meta['sid'][0]}  {str(meta['time'][0])[:16]}  "
-                 f"true {targets.class_names[true]} vs "
-                 f"pred {targets.class_names[pred]}  n={n}")
-        if domain:
-            r_km = network_sparsity(n, domain)['resolvable_km']
-            title += f"  resolvable {r_km:.0f} km"
-        fig = storm_panel_figure(
-            lon, lat, float(meta['lon'][0]), float(meta['lat'][0]),
-            true, pred, targets.n_classes, title=title,
-            domain=domain, basemap=basemap)
+        fig = _render_fix(state, data, i, domain, basemap)
         _emit(fig, 'storm_panel', split, global_step,
               logger, ctx.get('run_dir'))
 
@@ -232,3 +241,74 @@ def build_callbacks(cfg, data, logger) -> list:
                            **(spec.get('kwargs') or {}))
         out.append((fn, int(every)))
     return out
+
+
+# ---------------------------------------------------------------------------
+# end_of_run — post-trainer.test() figures (train.py calls this once)
+# ---------------------------------------------------------------------------
+
+def end_of_run(cfg, data, logger, state, global_step,
+               n_frames=8, basemap=True):
+    """Test confusion matrix + storm sequence for the best state.
+
+    Runs after trainer.test(): (1) the confusion_matrix callback on the
+    test split, if a test stream exists; (2) for each sid named in the
+    data yaml's ``storm_panels: {test: ...}`` knob (sid | [sids] |
+    'random' -> one random test sid), the sid's test-split fixes are
+    time-ordered, evenly subsampled to ``n_frames``, rendered as panels,
+    and saved as ONE gif (run_dir/figures/storm_sequence_<sid>.gif,
+    logged as an artifact — gif only when there is a run_dir) plus
+    first/mid/last stills via the usual svg+png/log_figure path. The
+    remaining frames are closed here. ``state`` should be the BEST state
+    returned by fit; ``global_step`` the trainer's final step so these
+    land on the shared x-axis.
+    """
+    ctx = {'data': data, 'logger': logger,
+           'run_dir': cfg['trainer'].get('run_dir'),
+           'storm_panels': cfg['data'].get('storm_panels'),
+           'domain': cfg['data'].get('domain')}
+    if 'test' in data.streams:
+        CALLBACKS.get('confusion_matrix', ctx=ctx, split='test')(
+            state, 0, global_step)
+
+    sel = (ctx['storm_panels'] or {}).get('test')
+    if sel is None or data.loader is None or 'test' not in data.splits:
+        return
+    split_idx = np.asarray(data.splits['test'])
+    split_sids = np.asarray(data.loader.fixes['sid'])[split_idx]
+    if isinstance(sel, (list, tuple)):
+        sids = [str(s) for s in sel]
+    elif str(sel) == 'random':
+        rng = np.random.default_rng(global_step)
+        sids = [str(rng.choice(np.unique(split_sids)))]
+    else:
+        sids = [str(sel)]
+    domain = ctx['domain'] or _domain_from_norms(data.norms)
+    run_dir = ctx['run_dir']
+
+    for sid in sids:
+        pool = split_idx[split_sids == sid]
+        if not len(pool):
+            raise ValueError(
+                f"storm_panels['test'] = {sid!r} matches no fix in the "
+                f"test split — check the sid against the library.")
+        pool = pool[np.argsort(np.asarray(data.loader.fixes['time'])[pool])]
+        if len(pool) > n_frames:
+            keep = np.linspace(0, len(pool) - 1, n_frames).round().astype(int)
+            pool = pool[keep]
+
+        figs = [_render_fix(state, data, int(i), domain, basemap)
+                for i in pool]
+        if run_dir:
+            fig_dir = Path(run_dir) / 'figures'
+            fig_dir.mkdir(parents=True, exist_ok=True)
+            gif = save_gif(figs, str(fig_dir / f'storm_sequence_{sid}.gif'))
+            logger.log_artifact(f'storm_sequence_{sid}', gif,
+                                artifact_type='figure')
+        stills = sorted({0, len(figs) // 2, len(figs) - 1})
+        for k, fig in enumerate(figs):
+            if k in stills:      # _emit hands to the logger, which closes
+                _emit(fig, f'storm_sequence_{sid}_f{k}', 'test',
+                      global_step, logger, run_dir)
+            else:
+                plt.close(fig)

@@ -661,6 +661,13 @@ class Trainer:
         """The experiment logger (read-only)."""
         return self._logger
 
+    @property
+    def global_step(self) -> int:
+        """Optimiser steps completed so far (read-only) — post-training
+        hookups (end-of-run figures, test tables) log at this step so
+        everything shares one x-axis."""
+        return self._global_step
+
     def log_hyperparams(self, params: dict) -> None:
         """Log a hyperparameter dict to the experiment logger."""
         self._logger.log_hyperparams(params)
