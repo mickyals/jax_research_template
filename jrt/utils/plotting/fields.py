@@ -272,8 +272,8 @@ def plot_scatter_overlay(
     geo_opts = {} if geo is True else dict(geo) if isinstance(geo, dict) else None
 
     if geo_opts is not None:
-        from utils.plotting._geo import _make_geoaxes
-        fig, ax, transform = _make_geoaxes(
+        from utils.plotting.geo import make_geoaxes
+        fig, ax, transform = make_geoaxes(
             figsize=figsize, extent=extent, **geo_opts,
         )
         tkw = {"transform": transform}
@@ -420,8 +420,8 @@ def plot_categorical_scatter(
 
     geo_opts = {} if geo is True else dict(geo) if isinstance(geo, dict) else None
     if geo_opts is not None:
-        from utils.plotting._geo import _make_geoaxes
-        fig, ax, transform = _make_geoaxes(figsize=figsize, extent=extent, **geo_opts)
+        from utils.plotting.geo import make_geoaxes
+        fig, ax, transform = make_geoaxes(figsize=figsize, extent=extent, **geo_opts)
         tkw = {"transform": transform}
     else:
         fig, ax = plt.subplots(figsize=figsize)
@@ -573,6 +573,43 @@ def plot_heatmap(
     ax.set_ylabel(ylabel)
     fig.tight_layout()
     return fig
+
+
+def confusion_matrix_figure(
+    cm: np.ndarray,
+    class_names: Optional[list[str]] = None,
+    title: str = "confusion matrix",
+) -> plt.Figure:
+    """(C, C) counts (rows = true, cols = predicted) -> annotated heatmap.
+
+    The classification-standard specialisation of ``plot_heatmap``: integer
+    cell annotations, sequential 'Blues', predicted/true axis labels.
+    Model-agnostic — pass any accumulated confusion matrix (e.g. from
+    ``training.metrics.update_cm``). Moved here from
+    experiments/cyclone_jax/visualise (PR #5 DRY ruling).
+
+    Parameters
+    ----------
+    cm : np.ndarray
+        (C, C) confusion counts, rows = true class, cols = predicted.
+    class_names : list[str], optional
+        Tick labels for both axes; class indices when omitted.
+    title : str
+        Figure title.
+
+    Returns
+    -------
+    plt.Figure
+    """
+    cm = np.asarray(cm)
+    n = cm.shape[0]
+    names = list(class_names) if class_names else [str(i) for i in range(n)]
+    return plot_heatmap(
+        cm, row_labels=names, col_labels=names,
+        xlabel="predicted", ylabel="true", cmap="Blues",
+        title=title, colorbar_label="count",
+        annotate=True, fmt=".0f",
+    )
 
 
 def plot_mollweide(

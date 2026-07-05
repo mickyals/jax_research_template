@@ -385,9 +385,9 @@ def plot_attention_geographic(
                     "encoding requires storm_latlon=(lat, lon) — available "
                     "as batch['meta']['query_lat']/['query_lon']."
                 )
-            from utils.plotting._geo import _make_geoaxes
+            from utils.plotting.geo import make_geoaxes
             r_m = radius_km * 1000.0
-            fig, ax, _ = _make_geoaxes(
+            fig, ax, _ = make_geoaxes(
                 figsize=(7, 7),
                 extent=[-1.08 * r_m, 1.08 * r_m, -1.08 * r_m, 1.08 * r_m],
                 projection='azimuthal',

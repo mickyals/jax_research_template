@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from experiments.cyclone_jax.visualise.figures import (
-    class_colour, confusion_matrix_figure, save_gif,
+    class_colour, save_gif,
     storm_panel_figure, storm_sequence_figures,
 )
 
@@ -26,16 +26,8 @@ def _panel(true_class=2, pred_class=4):
         title='TEST 2024  true 2 vs pred 4', domain=DOMAIN, basemap=False)
 
 
-class TestConfusionMatrixFigure:
-
-    def test_annotations_and_labels(self):
-        cm = np.arange(9).reshape(3, 3)
-        fig = confusion_matrix_figure(cm, class_names=['a', 'b', 'c'])
-        ax = fig.axes[0]
-        assert len(ax.texts) == 9                       # one count per cell
-        assert ax.get_xlabel() == 'predicted' and ax.get_ylabel() == 'true'
-        assert [t.get_text() for t in ax.get_xticklabels()] == ['a', 'b', 'c']
-        plt.close('all')
+# confusion_matrix_figure moved to utils.plotting.fields (PR #5 DRY ruling);
+# its tests live in tests/utils/plotting/test_fields.py.
 
 
 class TestStormPanel:

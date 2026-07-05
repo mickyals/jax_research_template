@@ -39,7 +39,7 @@ from experiments.tc_perceiver_io.plotting.plotting import (
     plot_per_class_prediction_maps,
     plot_class_coverage_map,
 )
-from training.metrics import binary_pr_curve, per_class_pr_curves
+from experiments.tc_perceiver_io.train.full_set_metrics import binary_pr_curve, per_class_pr_curves
 from experiments.tc_perceiver_io.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
 from experiments.tc_perceiver_io.train.evaluate import domain_latlon_for_sample
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO

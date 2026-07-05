@@ -7,6 +7,7 @@ from matplotlib.figure import Figure
 from unittest.mock import patch
 
 from utils.plotting.fields import (
+    confusion_matrix_figure,
     plot_field_2d,
     plot_field_comparison_2d,
     plot_scatter_overlay,
@@ -331,6 +332,31 @@ class TestPlotHeatmap:
         assert colors["6.00"] == "white"
         assert colors["4.00"] == "black"
         plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# confusion_matrix_figure (moved from experiments/cyclone_jax/visualise, PR #5)
+# ---------------------------------------------------------------------------
+
+class TestConfusionMatrixFigure:
+
+    @patch("matplotlib.pyplot.show")
+    def test_annotations_and_labels(self, mock_show):
+        cm = np.arange(9).reshape(3, 3)
+        fig = confusion_matrix_figure(cm, class_names=['a', 'b', 'c'])
+        ax = fig.axes[0]
+        assert len(ax.texts) == 9                       # one count per cell
+        assert ax.get_xlabel() == 'predicted' and ax.get_ylabel() == 'true'
+        assert [t.get_text() for t in ax.get_xticklabels()] == ['a', 'b', 'c']
+        plt.close('all')
+
+    @patch("matplotlib.pyplot.show")
+    def test_integer_annotations_and_default_names(self, mock_show):
+        fig = confusion_matrix_figure(np.array([[3., 0.], [1., 2.]]))
+        ax = fig.axes[0]
+        assert {t.get_text() for t in ax.texts} == {'3', '0', '1', '2'}
+        assert [t.get_text() for t in ax.get_xticklabels()] == ['0', '1']
+        plt.close('all')
 
 
 # ---------------------------------------------------------------------------

@@ -1,14 +1,19 @@
 """
-utils/plotting/_geo.py
+utils/plotting/geo.py
 
-Private cartopy canvas factory for geo-capable renderers -- not part of
-the public API. Use the ``geo=`` argument on plotting functions
-(e.g. ``fields.plot_scatter_overlay``) instead of importing this module.
+Public cartopy canvas helpers for geo-capable figures. Promoted from the
+private ``_geo.py`` (PR #5 DRY ruling) so experiment figure modules build
+their basemaps here instead of re-implementing cartopy setup: use
+``cartopy_available()`` for an optional-basemap fallback, ``make_geoaxes``
+for the canvas, and ``add_map_features`` to decorate an existing GeoAxes.
+The ``geo=`` argument on plotting functions (e.g.
+``fields.plot_scatter_overlay``) remains the highest-level entry point.
 
 cartopy is an optional dependency and is imported lazily inside this
 module only -- nothing else in ``utils.plotting`` may import it. If
-cartopy is missing, ``_import_cartopy`` raises a clear ImportError with
-the installation command.
+cartopy is missing, ``import_cartopy`` raises a clear ImportError with
+the installation command; ``cartopy_available`` reports instead of
+raising.
 
 Projections: PlateCarree (default) and AzimuthalEquidistant
 (``projection='azimuthal'`` + ``center``). The azimuthal projection's
@@ -26,7 +31,7 @@ from typing import Optional
 import matplotlib.pyplot as plt
 
 
-def _import_cartopy():
+def import_cartopy():
     """Import cartopy lazily, with a clear error when it is not installed.
 
     Returns
@@ -46,15 +51,33 @@ def _import_cartopy():
     return ccrs, cfeature
 
 
-def _add_map_features(
+def cartopy_available() -> bool:
+    """True when cartopy is importable — the optional-basemap switch.
+
+    Figure functions with a plain-axes fallback (e.g. the cyclone_jax storm
+    panel) branch on this instead of try/excepting cartopy themselves.
+    """
+    try:
+        import_cartopy()
+    except ImportError:
+        return False
+    return True
+
+
+def add_map_features(
     ax,
     scale: str = "50m",
     color: str = "black",
     lw: float = 0.5,
+    fill: bool = False,
+    land_color: str = "#f2efe9",
+    ocean_color: str = "#dceaf3",
 ):
     """Add coastline, country-border, and state/province linework to ``ax``.
 
-    Linework only -- no land/ocean fill, so data colours stay readable.
+    Linework only by default -- no land/ocean fill, so data colours stay
+    readable; ``fill=True`` adds muted land/ocean face colours underneath
+    (basemap style for point/marker figures without a data field).
     Natural Earth shapefiles download on first *render* (draw/savefig),
     not when the feature is added.
 
@@ -70,12 +93,20 @@ def _add_map_features(
         Line colour for all features.
     lw : float
         Line width for all features.
+    fill : bool
+        If True, also fill LAND/OCEAN polygons with ``land_color`` /
+        ``ocean_color``.
+    land_color, ocean_color : str
+        Face colours used when ``fill=True``.
 
     Returns
     -------
     cartopy.mpl.geoaxes.GeoAxes
     """
-    _, cfeature = _import_cartopy()
+    _, cfeature = import_cartopy()
+    if fill:
+        ax.add_feature(cfeature.LAND.with_scale(scale), facecolor=land_color)
+        ax.add_feature(cfeature.OCEAN.with_scale(scale), facecolor=ocean_color)
     for feature in (cfeature.COASTLINE, cfeature.BORDERS, cfeature.STATES):
         ax.add_feature(
             feature.with_scale(scale),
@@ -84,7 +115,7 @@ def _add_map_features(
     return ax
 
 
-def _make_geoaxes(
+def make_geoaxes(
     figsize: tuple[int, int] = (10, 5),
     extent: Optional[list[float]] = None,
     scale: str = "50m",
@@ -93,6 +124,7 @@ def _make_geoaxes(
     gridlines: bool = True,
     projection: str = "platecarree",
     center: Optional[tuple[float, float]] = None,
+    fill: bool = False,
 ):
     """Create a figure with a GeoAxes, map features, and gridlines.
 
@@ -126,6 +158,9 @@ def _make_geoaxes(
         matplotlib transform (no ``transform=`` kwarg).
     center : (lat, lon), optional
         Projection centre in degrees. Required for 'azimuthal'.
+    fill : bool
+        Forwarded to ``add_map_features``: fill land/ocean underneath the
+        linework (basemap style).
 
     Returns
     -------
@@ -136,7 +171,7 @@ def _make_geoaxes(
         projection's native coordinates (azimuthal metres) should be
         plotted WITHOUT a transform kwarg.
     """
-    ccrs, _ = _import_cartopy()
+    ccrs, _ = import_cartopy()
     lonlat = ccrs.PlateCarree()
 
     if projection == "platecarree":
@@ -144,7 +179,7 @@ def _make_geoaxes(
     elif projection == "azimuthal":
         if center is None:
             raise ValueError(
-                "_make_geoaxes: projection='azimuthal' requires "
+                "make_geoaxes: projection='azimuthal' requires "
                 "center=(lat, lon)."
             )
         proj = ccrs.AzimuthalEquidistant(
@@ -153,14 +188,14 @@ def _make_geoaxes(
         )
     else:
         raise ValueError(
-            f"_make_geoaxes: unknown projection '{projection}' "
+            f"make_geoaxes: unknown projection '{projection}' "
             f"(expected 'platecarree' or 'azimuthal')."
         )
 
     fig, ax = plt.subplots(figsize=figsize, subplot_kw={"projection": proj})
     if extent is not None:
         ax.set_extent(extent, crs=proj)
-    _add_map_features(ax, scale=scale, color=color, lw=lw)
+    add_map_features(ax, scale=scale, color=color, lw=lw, fill=fill)
     if gridlines:
         gl = ax.gridlines(draw_labels=True, linestyle="--", alpha=0.4)
         gl.top_labels = False
