@@ -53,6 +53,20 @@ class TestHelpers:
                                  'metrics': ['accuracy', 'mae_class']})
         assert list(fns) == ['loss', 'accuracy', 'mae_class']
 
+    def test_loss_entry_is_a_stack(self):
+        from training.losses import LossStack
+        fns = build_metrics_fns({'loss': 'cross_entropy'})
+        assert isinstance(fns['loss'], LossStack)
+        assert fns['loss'].needs_model is False
+
+    def test_term_list_loss_supported(self):
+        fns = build_metrics_fns({'loss': [
+            {'name': 'cross_entropy'},
+            {'name': 'l1_params', 'weight': 1.0e-4},
+        ]})
+        assert fns['loss'].needs_model is True
+        assert fns['loss'].term_names == ('cross_entropy', 'l1_params')
+
     def test_metric_named_like_loss_not_duplicated(self):
         fns = build_metrics_fns({'metrics': ['loss', 'accuracy']})
         assert list(fns) == ['loss', 'accuracy']
@@ -103,6 +117,15 @@ class TestMain:
         assert np.isfinite(trainer._best_metric_value)
         assert (trainer._checkpoint_dir / 'best').exists()
         assert test_metrics == {}               # stratified split: no test
+
+    def test_fit_runs_with_term_list_loss(self, library_root, tmp_path):
+        """End-to-end: model term (l1_params) through the real train path."""
+        entry = _write_configs(
+            tmp_path / 'configs', library_root,
+            trainer={'loss': [{'name': 'cross_entropy'},
+                              {'name': 'l1_params', 'weight': 1.0e-4}]})
+        trainer, _ = main(entry, config_dir=tmp_path / 'configs')
+        assert np.isfinite(trainer._best_metric_value)
 
     def test_missing_model_pointer_raises(self, library_root, tmp_path):
         entry = _write_configs(tmp_path / 'configs', library_root)

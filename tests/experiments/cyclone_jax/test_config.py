@@ -151,6 +151,31 @@ class TestGuards:
         assert {'root', 'sshs_min', 'drop_subtropical', 'split',
                 'batch_size'} <= DATA_KEYS
 
+    # --- trainer.loss term-list surface ---
+    def test_loss_term_list_accepted(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x'},
+                       entry={'data': 's', 'trainer': {'loss': [
+                           {'name': 'cross_entropy', 'weight': 1.0},
+                           {'name': 'l1_params', 'weight': 1.0e-4,
+                            'kwargs': {}},
+                       ]}})
+        cfg = load_config(entry, config_dir=tmp_path)
+        assert len(cfg['trainer']['loss']) == 2
+
+    def test_loss_term_unknown_key_raises(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x'},
+                       entry={'data': 's', 'trainer': {'loss': [
+                           {'name': 'cross_entropy', 'wieght': 1.0}]}})
+        with pytest.raises(ValueError, match='wieght'):
+            load_config(entry, config_dir=tmp_path)
+
+    def test_loss_term_missing_name_raises(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x'},
+                       entry={'data': 's', 'trainer': {'loss': [
+                           {'weight': 1.0}]}})
+        with pytest.raises(ValueError, match='name'):
+            load_config(entry, config_dir=tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # Normalisation / domain / tags config surface

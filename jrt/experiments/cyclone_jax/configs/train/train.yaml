@@ -14,6 +14,12 @@ model: mlp                        # -> configs/models/<name>.yaml
 trainer:
   seed: 0                         # populates jax model init AND data order
 
+  # loss: a registered name (+ loss_kwargs), or a weighted term list —
+  #   loss:
+  #     - {name: cross_entropy, kwargs: {focal_gamma: 2.0}}
+  #     - {name: l1_params, weight: 1.0e-4}   # model term; weight 0 = monitor
+  # Terms resolve against jrt LOSSES/MODEL_TERMS; with a list, per-term
+  # curves are logged as train/loss/<term> and loss_kwargs must stay empty.
   loss: cross_entropy
   loss_kwargs: {}
 

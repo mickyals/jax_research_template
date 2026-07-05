@@ -47,6 +47,11 @@ TRAINER_KEYS = {'seed', 'loss', 'loss_kwargs', 'optimizer',
                 'patience', 'patience_metric', 'metrics', 'logger',
                 'logger_kwargs', 'run_dir'}
 
+# trainer.loss may be a bare string or a weighted term list; list items
+# are key-checked here (registry membership is checked where the names
+# are consumed — train/losses.py build_loss — keeping config jax-free).
+LOSS_TERM_KEYS = {'name', 'weight', 'kwargs'}
+
 # Per-model key sets (mirror the build_model factories — keep in sync;
 # names literal here so config loading never imports jax).
 _MODEL_KEYS_COMMON = {'name', 'tags', 'n_classes', 'station_features',
@@ -117,5 +122,13 @@ def load_config(train_yaml, config_dir=None):
 
     trainer = raw.get('trainer') or {}
     _check_keys(trainer, TRAINER_KEYS, 'trainer block')
+    if isinstance(trainer.get('loss'), list):
+        for term in trainer['loss']:
+            if not isinstance(term, dict) or not term.get('name'):
+                raise ValueError(
+                    f"trainer.loss list items must be dicts with a 'name' "
+                    f"(keys: {sorted(LOSS_TERM_KEYS)}), got {term!r}")
+            _check_keys(term, LOSS_TERM_KEYS,
+                        f"trainer.loss term {term['name']!r}")
 
     return {'data': data, 'model': model, 'trainer': trainer}
