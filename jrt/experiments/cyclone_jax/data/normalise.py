@@ -111,6 +111,20 @@ class NormSpec:
         x['level'] = self._fn(x['level'], *self._level).astype(np.float32)
         return x
 
+    def invert_coords(self, lat, lon) -> tuple[np.ndarray, np.ndarray]:
+        """Normalised [-1, 1] lat/lon back to degrees.
+
+        Inverse of apply_tail's minmax_11 coordinate scaling — for figures
+        that plot station positions from an already-normalised batch (the
+        storm panel callback; y/meta coordinates stay raw and never need
+        this).
+        """
+        la_lo, la_hi = self._lat
+        lo_lo, lo_hi = self._lon
+        lat = la_lo + (np.asarray(lat, np.float32) + 1.0) * (la_hi - la_lo) / 2.0
+        lon = lo_lo + (np.asarray(lon, np.float32) + 1.0) * (lo_hi - lo_lo) / 2.0
+        return lat.astype(np.float32), lon.astype(np.float32)
+
     # ------------------------------------------------------------------
     # Persistence (train.py -> run_dir/norm_stats.json; evaluate reads)
     # ------------------------------------------------------------------

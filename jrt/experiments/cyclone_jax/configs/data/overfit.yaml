@@ -36,3 +36,8 @@ normalise:                        # stats computed over the TRAIN split at
 # domain:                         # optional fixed FOV bounds for the coord
 #   lat: [lo, hi]                 # scaling; omitted = train-split min/max
 #   lon: [lo, hi]                 # (logged in the saved stats)
+
+# storm_panels:                   # storm_panel callback / end-of-run gif:
+#   train: random                 # 'random' or a sid pins the watched storm
+#   val: random                   # per split (which storm to watch is a
+#   test: <sid>                   # DATA property of the scenario)

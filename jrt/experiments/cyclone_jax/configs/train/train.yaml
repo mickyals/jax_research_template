@@ -39,7 +39,19 @@ trainer:
   patience: 50
   patience_metric: train/loss
 
+  # Per-batch REPORT metrics (jrt METRICS registry) — only linear metrics
+  # that average exactly across batches; macro precision/recall come
+  # EXACTLY from the confusion_matrix callback instead (PR #5 ruling).
   metrics: [cross_entropy, binary_accuracy, mae_class]
+
+  # During-training figure callbacks (train/log.py CALLBACKS registry).
+  # Step-based cadence: every defaults to the train stream's batches-per-
+  # epoch. Which storm the storm_panel watches lives in the DATA yaml
+  # (storm_panels block). e.g.
+  #     - {name: storm_panel, split: val, every: 200}
+  callbacks:
+    - {name: confusion_matrix, split: train}
+    - {name: confusion_matrix, split: val}
 
   logger: wandb                   # wandb | tensorboard | "null"
   run_dir: jrt/experiments/cyclone_jax/runs/dev   # gitignored (**/runs/)

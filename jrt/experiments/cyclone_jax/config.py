@@ -33,7 +33,13 @@ TOP_KEYS = {'data', 'model', 'trainer'}
 DATA_KEYS = {'root', 'sources', 'selection', 'max_stations', 'pad_to',
              'target', 'sshs_min', 'class_set', 'drop_subtropical',
              'source_id', 'timesteps', 'batch_size', 'split',
-             'normalise', 'domain', 'tags'}
+             'normalise', 'domain', 'tags', 'storm_panels'}
+
+# storm_panels: per-split storm selection for the storm_panel callback /
+# end-of-run sequence (a DATA property — which storm to watch belongs to
+# the scenario). Values ('random' | sid | list of sids) are consumed in
+# train/log.py.
+STORM_PANEL_KEYS = {'train', 'val', 'test'}
 
 SPLIT_KEYS = {'strategy', 'years', 'n_per_class', 'exclude_multistorm'}
 
@@ -45,7 +51,11 @@ TRAINER_KEYS = {'seed', 'loss', 'loss_kwargs', 'optimizer',
                 'optimizer_kwargs', 'scheduler', 'scheduler_kwargs',
                 'num_epochs', 'check_val_every_n_epoch', 'gradient_clip',
                 'patience', 'patience_metric', 'metrics', 'logger',
-                'logger_kwargs', 'run_dir'}
+                'logger_kwargs', 'run_dir', 'callbacks'}
+
+# trainer.callbacks list items (name from train/log.py CALLBACKS; 'every'
+# in steps, default = est. steps per epoch; kwargs go to the factory).
+CALLBACK_KEYS = {'name', 'every', 'split', 'kwargs'}
 
 # trainer.loss may be a bare string or a weighted term list; list items
 # are key-checked here (registry membership is checked where the names
@@ -106,6 +116,9 @@ def load_config(train_yaml, config_dir=None):
     if data.get('domain'):
         _check_keys(data['domain'], DOMAIN_KEYS,
                     f"data scenario {raw['data']!r} domain block")
+    if data.get('storm_panels'):
+        _check_keys(data['storm_panels'], STORM_PANEL_KEYS,
+                    f"data scenario {raw['data']!r} storm_panels block")
 
     model = None
     if raw.get('model'):
@@ -130,5 +143,13 @@ def load_config(train_yaml, config_dir=None):
                     f"(keys: {sorted(LOSS_TERM_KEYS)}), got {term!r}")
             _check_keys(term, LOSS_TERM_KEYS,
                         f"trainer.loss term {term['name']!r}")
+    if trainer.get('callbacks'):
+        for cb in trainer['callbacks']:
+            if not isinstance(cb, dict) or not cb.get('name'):
+                raise ValueError(
+                    f"trainer.callbacks items must be dicts with a 'name' "
+                    f"(keys: {sorted(CALLBACK_KEYS)}), got {cb!r}")
+            _check_keys(cb, CALLBACK_KEYS,
+                        f"trainer.callbacks entry {cb['name']!r}")
 
     return {'data': data, 'model': model, 'trainer': trainer}

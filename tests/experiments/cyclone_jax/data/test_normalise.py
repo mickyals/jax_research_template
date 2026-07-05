@@ -169,6 +169,13 @@ class TestAppliedLoader:
         for f in ('lat', 'lon', 'level', 'time', 'obs'):
             assert norm[f].dtype == np.float32
 
+    def test_invert_coords_roundtrip(self, raw_loader, norm_loader, spec):
+        """Normalised batch coords -> degrees (storm-panel plotting)."""
+        raw, norm = raw_loader.build(3)['x'], norm_loader.build(3)['x']
+        lat, lon = spec.invert_coords(norm['lat'], norm['lon'])
+        np.testing.assert_allclose(lat, raw['lat'], atol=1e-3)
+        np.testing.assert_allclose(lon, raw['lon'], atol=1e-3)
+
     def test_station_selection_unaffected(self, library, spec):
         """max_stations picks the SAME stations with norms on (haversine
         runs on real degrees — tail scaling is post-selection)."""

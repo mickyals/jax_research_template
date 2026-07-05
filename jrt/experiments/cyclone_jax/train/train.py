@@ -32,6 +32,7 @@ from training.trainer import Trainer
 from experiments.cyclone_jax.config import load_config
 from experiments.cyclone_jax.data.interface import build_data
 from experiments.cyclone_jax.models import build_model
+from experiments.cyclone_jax.train.log import build_callbacks
 from experiments.cyclone_jax.train.metrics import build_metrics_fns
 
 
@@ -97,7 +98,9 @@ def main(train_yaml, config_dir=None):
         raise ValueError(f"data scenario provides no {sorted(missing)} "
                          f"stream(s) — check split/batch_size.")
 
-    trainer.fit(data.streams['train'], data.streams['val'])
+    callbacks = build_callbacks(cfg, data, logger)
+    trainer.fit(data.streams['train'], data.streams['val'],
+                step_callbacks=callbacks or None)
 
     test_metrics = {}
     if 'test' in data.streams:

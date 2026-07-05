@@ -176,6 +176,44 @@ class TestGuards:
         with pytest.raises(ValueError, match='name'):
             load_config(entry, config_dir=tmp_path)
 
+    # --- trainer.callbacks + data storm_panels surface (step 4b) ---
+    def test_callbacks_list_accepted(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x'},
+                       entry={'data': 's', 'trainer': {'callbacks': [
+                           {'name': 'confusion_matrix', 'split': 'val'},
+                           {'name': 'storm_panel', 'every': 200,
+                            'kwargs': {'basemap': False}},
+                       ]}})
+        cfg = load_config(entry, config_dir=tmp_path)
+        assert len(cfg['trainer']['callbacks']) == 2
+
+    def test_callback_unknown_key_raises(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x'},
+                       entry={'data': 's', 'trainer': {'callbacks': [
+                           {'name': 'confusion_matrix', 'evrey': 5}]}})
+        with pytest.raises(ValueError, match='evrey'):
+            load_config(entry, config_dir=tmp_path)
+
+    def test_callback_missing_name_raises(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x'},
+                       entry={'data': 's', 'trainer': {'callbacks': [
+                           {'every': 5}]}})
+        with pytest.raises(ValueError, match='name'):
+            load_config(entry, config_dir=tmp_path)
+
+    def test_storm_panels_block_accepted(self, tmp_path):
+        entry = _write(tmp_path, 's',
+                       {'root': 'x', 'storm_panels': {'val': 'random',
+                                                      'test': '2024193N13260'}})
+        cfg = load_config(entry, config_dir=tmp_path)
+        assert cfg['data']['storm_panels']['val'] == 'random'
+
+    def test_storm_panels_unknown_split_raises(self, tmp_path):
+        entry = _write(tmp_path, 's',
+                       {'root': 'x', 'storm_panels': {'vla': 'random'}})
+        with pytest.raises(ValueError, match='vla'):
+            load_config(entry, config_dir=tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # Normalisation / domain / tags config surface
