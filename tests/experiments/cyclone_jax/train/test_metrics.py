@@ -4,6 +4,8 @@ test_train.py with the step-3 split; metric maths tested in
 tests/training/test_metrics.py).
 """
 
+import pytest
+
 from training.losses import LossStack
 
 from experiments.cyclone_jax.train.metrics import build_metrics_fns
@@ -33,9 +35,8 @@ class TestBuildMetricsFns:
         assert fns['loss'].needs_model is True
         assert fns['loss'].term_names == ('cross_entropy', 'l1_params')
 
-    def test_macro_precision_recall_selectable(self):
-        fns = build_metrics_fns({'metrics': ['accuracy', 'macro_precision',
-                                             'macro_recall']})
-        assert list(fns) == ['loss', 'accuracy', 'macro_precision',
-                             'macro_recall']
-        assert all(callable(f) for f in fns.values())
+    def test_macro_precision_recall_rejected(self):
+        # No longer registered (PR #5): ratios don't average across batches;
+        # exact values come from update_cm + compute_final_metrics instead.
+        with pytest.raises(ValueError):
+            build_metrics_fns({'metrics': ['accuracy', 'macro_precision']})

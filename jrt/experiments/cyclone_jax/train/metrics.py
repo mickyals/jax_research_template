@@ -9,11 +9,12 @@ trainer.metrics adds report-only metrics after it.
 
 Experiment-specific metrics REGISTER here into the jrt METRICS registry
 (the pattern established by tc_perceiver_io/train/metrics.py). None yet —
-accuracy, macro_precision, macro_recall, mae_class, binary_accuracy are
-jrt universals. Caveat worth knowing when reading wandb: macro_precision /
-macro_recall are per-batch approximations (ratios don't average across
-batches); exact split-level values are evaluate.py territory via
-accumulated training.metrics.per_class_counts.
+accuracy, mae_class, binary_accuracy are jrt universals. Only LINEAR
+metrics are registered (PR #5 ruling): macro precision/recall are NOT
+valid trainer.metrics values — ratios don't average across batches, so
+their exact split-level values come from the accumulated confusion matrix
+(training.metrics.update_cm + compute_final_metrics), surfaced by the
+confusion-matrix callback and evaluate.py.
 """
 
 from __future__ import annotations

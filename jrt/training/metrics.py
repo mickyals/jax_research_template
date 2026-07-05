@@ -7,8 +7,9 @@ glue (label-name maps, `build_metrics_fns` wiring) and should import from
 here rather than re-implementing these.
 
 Scaffolding, not an encyclopedia (jrt-v2 ruling, 2026-07-05): this module
-holds the METRICS registry, the atoms most classification metrics derive
-from (``per_class_counts``, ``confusion_counts``), and the universal metrics. Experiment-specific
+holds the METRICS registry, the confusion-matrix atom + accumulator most
+classification metrics derive from (``confusion_counts``, ``update_cm``,
+``compute_final_metrics``), and the universal metrics. Experiment-specific
 metrics register INTO the registry from the experiment's own metrics module
 (see experiments/tc_perceiver_io/train/metrics.py for the pattern); the
 full-set PR-curve machinery (mAP, pr_auc) moved to its only consumer,
@@ -21,21 +22,27 @@ across batches:
     logits : jax.Array  shape (B, n_classes)   raw model output
     labels : jax.Array  shape (B,)             int32 class indices
 
+Only LINEAR metrics — those whose batch average IS the split value — are
+registered (PR #5 ruling). Ratio-of-counts metrics (macro precision/recall,
+per-class anything) do NOT average across batches; they are derived exactly
+from an accumulated confusion matrix instead: a plain ``(C, C)`` array is
+the state, ``update_cm(cm, logits, labels)`` folds each batch in, and
+``compute_final_metrics(cm)`` derives the whole family (TP/TN/FP/FN, exact
+macro precision/recall, per-class + OVA accuracy, the pairwise accuracy
+matrix) once at the end. Consumers: the confusion-matrix logging callback
+(experiment log.py) and evaluate.py.
+
 Registered metrics
 ------------------
 cross_entropy    Softmax CE — training loss and patience metric
 accuracy         Overall top-1 accuracy (batch-averaging is EXACT)
-macro_precision  Macro precision over classes predicted in the batch —
-                 batch-averaged curves are an APPROXIMATION (ratios of
-                 counts don't average); exact split values come from
-                 summing per_class_counts over all batches
-macro_recall     Macro recall over classes present in the batch (same caveat)
 binary_accuracy  Thresholded binary accuracy (e.g. class 0 vs. class > 0)
 mae_class        Mean absolute error in class units — ordinal distance
 """
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optax.losses as _optax
@@ -110,54 +117,47 @@ def binary_accuracy(
     return jnp.mean(pred_positive == true_positive)
 
 
-def per_class_counts(
-    logits: jnp.ndarray, labels: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Per-class TP / FP / FN counts from argmax predictions.
-
-    THE atom most classification metrics derive from (accuracy, precision,
-    recall, F1, per-class anything). Counts SUM exactly across batches —
-    unlike the ratio metrics built on them — so exact split-level
-    precision/recall come from accumulating these and dividing once
-    (evaluate.py territory).
-
-    Parameters
-    ----------
-    logits : jax.Array  (B, n_classes)
-    labels : jax.Array  (B,) int32
-
-    Returns
-    -------
-    (tp, fp, fn) : each jax.Array (n_classes,) float32
-    """
-    n_classes = logits.shape[-1]
-    preds   = jnp.argmax(logits, axis=-1)
-    classes = jnp.arange(n_classes)
-    pred_1h = (preds[:, None]  == classes).astype(jnp.float32)   # (B, C)
-    true_1h = (labels[:, None] == classes).astype(jnp.float32)
-    tp = jnp.sum(pred_1h * true_1h, axis=0)
-    fp = jnp.sum(pred_1h * (1.0 - true_1h), axis=0)
-    fn = jnp.sum((1.0 - pred_1h) * true_1h, axis=0)
-    return tp, fp, fn
-
-
 def confusion_counts(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
     """Full (C, C) confusion-count matrix, rows = true class, cols = predicted.
 
-    Like per_class_counts, counts SUM exactly across batches, so a split
-    confusion matrix is the sum of per-batch matrices (how the
-    confusion-matrix logging callback accumulates it). per_class_counts is
-    recoverable from it (tp = diagonal, fp = col sums - tp, fn = row
-    sums - tp).
+    THE atom classification metrics derive from: counts SUM exactly across
+    batches, so a split confusion matrix is the sum of per-batch matrices
+    (``update_cm`` is that fold), and per-class TP/FP/FN are its slices
+    (tp = diagonal, fp = col sums - tp, fn = row sums - tp — see
+    ``compute_final_metrics``).
 
     Returns jax.Array (n_classes, n_classes) float32.
     """
     n_classes = logits.shape[-1]
-    preds   = jnp.argmax(logits, axis=-1)
-    classes = jnp.arange(n_classes)
-    pred_1h = (preds[:, None]  == classes).astype(jnp.float32)
-    true_1h = (labels[:, None] == classes).astype(jnp.float32)
-    return true_1h.T @ pred_1h
+    preds = jnp.argmax(logits, axis=-1)
+    idx   = labels.astype(jnp.int32) * n_classes + preds.astype(jnp.int32)
+    return (jnp.bincount(idx, length=n_classes * n_classes)
+               .reshape(n_classes, n_classes)
+               .astype(jnp.float32))
+
+
+@jax.jit
+def update_cm(
+    cm: jnp.ndarray, logits: jnp.ndarray, labels: jnp.ndarray,
+) -> jnp.ndarray:
+    """Fold one batch into an accumulated confusion matrix.
+
+    The plain ``(C, C)`` array IS the accumulator state — initialise with
+    ``jnp.zeros((n_classes, n_classes))``, thread through the batch stream,
+    then hand the result to ``compute_final_metrics`` (and/or the confusion
+    figure). Accumulation is exact, unlike averaging ratio metrics per batch.
+
+    Parameters
+    ----------
+    cm : jax.Array  (C, C)   running counts (any numeric dtype; preserved)
+    logits : jax.Array  (B, C)
+    labels : jax.Array  (B,) int32
+
+    Returns
+    -------
+    jax.Array  (C, C)  updated counts, same dtype as ``cm``.
+    """
+    return cm + confusion_counts(logits, labels).astype(cm.dtype)
 
 
 def _macro_over_valid(numer: jnp.ndarray, denom: jnp.ndarray) -> jnp.ndarray:
@@ -168,28 +168,67 @@ def _macro_over_valid(numer: jnp.ndarray, denom: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(n_valid > 0, jnp.sum(ratios) / n_valid, 0.0)
 
 
-def macro_precision(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
-    """Macro precision: mean of TP/(TP+FP) over classes PREDICTED in the
-    batch (classes never predicted have an undefined precision and are
-    skipped). Per-batch values averaged over an epoch are a noisy
-    APPROXIMATION of split-level macro precision — fine as a live training
-    curve; use accumulated per_class_counts for the exact number.
+def compute_final_metrics(cm: jnp.ndarray) -> dict[str, jnp.ndarray]:
+    """Derive the exact metric family from an accumulated confusion matrix.
 
-    Returns jax.Array scalar in [0, 1].
+    End-of-stream counterpart of ``update_cm``: one call at callback /
+    evaluation time replaces every per-batch ratio approximation. Classes
+    with a zero denominator (never predicted for precision, no support for
+    recall) hold 0.0 in the per-class arrays and are EXCLUDED from the
+    macro means.
+
+    Parameters
+    ----------
+    cm : jax.Array  (C, C)  accumulated counts, rows = true, cols = predicted.
+
+    Returns
+    -------
+    dict[str, jax.Array]
+        tp, tn, fp, fn        (C,)  one-vs-all count primitives
+        support               (C,)  true samples per class (row sums)
+        precision, recall     (C,)  exact per-class ratios; ``recall`` IS the
+                                    per-class accuracy (diagonal / row sum)
+        macro_precision, macro_recall   scalars over valid classes
+        accuracy              scalar  trace / total
+        ova_accuracy          (C,)  one-vs-all binary accuracy
+                                    (tp_k + tn_k) / total
+        pairwise_accuracy     (C, C) restricted two-class accuracy: of the
+                                    samples of classes i and j predicted as
+                                    i or j, the fraction predicted right —
+                                    (cm_ii + cm_jj) / (cm_ii + cm_jj +
+                                    cm_ij + cm_ji). Off-diagonals are the
+                                    informative entries (how separable the
+                                    pair is); the diagonal is trivially 1.
+                                    Pairs with no such samples give 0.0.
     """
-    tp, fp, _ = per_class_counts(logits, labels)
-    return _macro_over_valid(tp, tp + fp)
+    cm    = jnp.asarray(cm, jnp.float32)
+    tp    = jnp.diag(cm)
+    fn    = jnp.sum(cm, axis=1) - tp
+    fp    = jnp.sum(cm, axis=0) - tp
+    total = jnp.sum(cm)
+    tn    = total - tp - fp - fn
 
+    precision = jnp.where(tp + fp > 0, tp / jnp.maximum(tp + fp, 1.0), 0.0)
+    recall    = jnp.where(tp + fn > 0, tp / jnp.maximum(tp + fn, 1.0), 0.0)
 
-def macro_recall(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
-    """Macro recall: mean of TP/(TP+FN) over classes PRESENT in the batch
-    truth (absent classes are skipped). Same batch-averaging caveat as
-    macro_precision.
+    pair_correct  = tp[:, None] + tp[None, :]
+    pair_confused = cm + cm.T - jnp.diag(2.0 * tp)   # zero self-confusion
+    pair_total    = pair_correct + pair_confused
+    pairwise = jnp.where(pair_total > 0,
+                         pair_correct / jnp.maximum(pair_total, 1.0), 0.0)
 
-    Returns jax.Array scalar in [0, 1].
-    """
-    tp, _, fn = per_class_counts(logits, labels)
-    return _macro_over_valid(tp, tp + fn)
+    return {
+        'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn,
+        'support': tp + fn,
+        'precision': precision,
+        'recall': recall,
+        'macro_precision': _macro_over_valid(tp, tp + fp),
+        'macro_recall':    _macro_over_valid(tp, tp + fn),
+        'accuracy': jnp.where(total > 0, jnp.sum(tp) / jnp.maximum(total, 1.0), 0.0),
+        'ova_accuracy': jnp.where(total > 0,
+                                  (tp + tn) / jnp.maximum(total, 1.0), 0.0),
+        'pairwise_accuracy': pairwise,
+    }
 
 
 def mae_class(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
@@ -240,16 +279,6 @@ def _binary_accuracy_metric(threshold: int = 1):
     if threshold == 1:
         return binary_accuracy
     return lambda logits, labels: binary_accuracy(logits, labels, threshold)
-
-
-@METRICS.register("macro_precision", description="Macro precision over predicted-in-batch classes (per-batch approximation; exact via per_class_counts)")
-def _macro_precision_metric():
-    return macro_precision
-
-
-@METRICS.register("macro_recall", description="Macro recall over present-in-batch classes (per-batch approximation; exact via per_class_counts)")
-def _macro_recall_metric():
-    return macro_recall
 
 
 @METRICS.register("mae_class", description="Mean absolute class-index error (ordinal distance)")
