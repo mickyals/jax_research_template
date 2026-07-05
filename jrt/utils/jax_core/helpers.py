@@ -230,6 +230,9 @@ def standardise(
 ) -> jax.Array:
     """Standardise an array to zero mean and unit variance.
 
+    Device-side (jax). The numpy twin for data loaders / worker paths is
+    utils/normalise.py (NORMALISERS registry + stats accumulation).
+
     If ``mean`` and ``std`` are not provided they are computed from ``x``.
     Pass pre-computed statistics when standardising a test set using
     training set statistics.

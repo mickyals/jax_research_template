@@ -28,7 +28,7 @@ from typing import Optional
 import numpy as np
 
 from experiments.tc_perceiver_io.data.sources.insitu_land import DEFAULT_OBS_VARS
-from experiments.tc_perceiver_io.data.transforms.normalise import (
+from utils.normalise import (
     NORMALISERS, get_normaliser,
 )
 from experiments.tc_perceiver_io.data.transforms.encoding import (
@@ -52,7 +52,7 @@ class InputSpec:
         names (see data/transforms/derived.py); their source columns are
         fetched automatically. F = len(obs_vars).
     normalisation : str
-        Normaliser name (data/transforms/normalise.py). Applied to
+        Normaliser name (utils/normalise.py registry). Applied to
         station_obs when obs_bounds is provided.
     obs_bounds : dict[str, (a, b)] or None
         Per-variable bounds keyed by obs_vars: (min, max) for the minmax

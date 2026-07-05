@@ -1,6 +1,6 @@
 """
 Tests for experiments/tc_perceiver_io/data/inputs.py and the swappable
-input transforms (data/transforms/normalise.py + derived.py).
+input transforms (utils/normalise.py registry + transforms/derived.py).
 
 No real data files required — InputSpec is pure-declarative; the transforms
 operate on small in-memory arrays / frames.
@@ -12,7 +12,7 @@ import pytest
 
 from experiments.tc_perceiver_io.data.inputs import InputSpec, resolve_input
 from experiments.tc_perceiver_io.data.sources.insitu_land import DEFAULT_OBS_VARS
-from experiments.tc_perceiver_io.data.transforms.normalise import (
+from utils.normalise import (
     NORMALISERS, get_normaliser,
 )
 from experiments.tc_perceiver_io.data.transforms.derived import (
