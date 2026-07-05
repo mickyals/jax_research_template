@@ -549,7 +549,7 @@ plt.show()
 
 **Interpretation:**
 - **`binary_accuracy` is base-rate-dependent.** A model that always predicts class 0 scores `binary_accuracy ≈ (1 − eval tc_fraction)` — ≈0.5 with the default balanced val/test (`tc_fraction 0.5`, which is exactly why eval is balanced), but ≈0.90 if you eval at `tc_fraction = 0.1` — while detecting nothing. So check it against the eval background fraction, and lean on `pr_auc`, the confusion matrix (is the TC row bleeding into class 0?), and `mae_class` for real signal.
-- `val/mAP` and `val/pr_auc` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py` / the eval-plots callback, via `training.metrics.compute_full_set_metrics`), not per-batch — they integrate a precision-recall curve over the whole split, so they cannot live in the per-batch `metrics_fns`. They live in the separate `FULL_SET_METRICS` registry. `mAP` is the imbalance-robust multiclass headline; `pr_auc` is the TC-vs-background detection scalar.
+- `val/mAP` and `val/pr_auc` are FULL-SET metrics (computed over the accumulated val predictions in `evaluate.py` / the eval-plots callback, via `train/full_set_metrics.py` (moved from jrt 2026-07-05)), not per-batch — they integrate a precision-recall curve over the whole split, so they cannot live in the per-batch `metrics_fns`. They live in the separate `FULL_SET_METRICS` registry. `mAP` is the imbalance-robust multiclass headline; `pr_auc` is the TC-vs-background detection scalar.
 - `val/attn_entropy` starts high (latents attend near-uniformly over the M stations) and is expected to fall as the model learns which stations matter; padded station columns are masked out of the Read attention so they do not contribute.
 
 ---

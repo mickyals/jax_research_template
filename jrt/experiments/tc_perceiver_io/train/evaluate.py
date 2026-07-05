@@ -50,7 +50,7 @@ from experiments.tc_perceiver_io.data.datamodule import TCDataModule
 from experiments.tc_perceiver_io.data.transforms.encoding import decode_domain
 from experiments.tc_perceiver_io.data.sources.ibtracs import CLASS_NAMES, N_CLASSES
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
-from training.metrics import (
+from experiments.tc_perceiver_io.train.full_set_metrics import (
     binary_pr_curve,
     compute_full_set_metrics,
     per_class_pr_curves,

@@ -47,10 +47,8 @@ from experiments.tc_perceiver_io.train._config import (
 from experiments.tc_perceiver_io.train.metrics import build_metrics_fns
 from experiments.tc_perceiver_io.train.model import TCPerceiverIO
 from datasets.class_weights import class_weights_from_counts
-from training.metrics import (
-    compute_full_set_metrics,
-    cross_entropy,
-)
+from experiments.tc_perceiver_io.train.full_set_metrics import compute_full_set_metrics
+from training.metrics import cross_entropy
 from training.trainer import Trainer, TrainState
 from utils.jax_core.diagnostics import (
     model_tabulate,

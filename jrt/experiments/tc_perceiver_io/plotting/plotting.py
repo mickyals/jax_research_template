@@ -120,7 +120,7 @@ def plot_pr_curve(
     Parameters
     ----------
     curve : dict
-        Output of ``training.metrics.binary_pr_curve`` —
+        Output of ``train.full_set_metrics.binary_pr_curve`` —
         {'precision', 'recall', 'ap', 'base_rate'}. The figure's AP is the
         same number logged as the ``pr_auc`` scalar (shared code path).
     """
@@ -151,7 +151,7 @@ def plot_pr_curves_per_class(
     Parameters
     ----------
     curves : dict[int, dict]
-        Output of ``training.metrics.per_class_pr_curves`` — keyed by class
+        Output of ``train.full_set_metrics.per_class_pr_curves`` — keyed by class
         index, each value a ``precision_recall_curve`` dict. Each class's AP
         (in the legend) is exactly its contribution to ``mAP``.
     class_names : list[str]
