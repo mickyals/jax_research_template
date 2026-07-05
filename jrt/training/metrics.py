@@ -7,8 +7,8 @@ glue (label-name maps, `build_metrics_fns` wiring) and should import from
 here rather than re-implementing these.
 
 Scaffolding, not an encyclopedia (jrt-v2 ruling, 2026-07-05): this module
-holds the METRICS registry, the atom most classification metrics derive
-from (``per_class_counts``), and the universal metrics. Experiment-specific
+holds the METRICS registry, the atoms most classification metrics derive
+from (``per_class_counts``, ``confusion_counts``), and the universal metrics. Experiment-specific
 metrics register INTO the registry from the experiment's own metrics module
 (see experiments/tc_perceiver_io/train/metrics.py for the pattern); the
 full-set PR-curve machinery (mAP, pr_auc) moved to its only consumer,
@@ -139,6 +139,25 @@ def per_class_counts(
     fp = jnp.sum(pred_1h * (1.0 - true_1h), axis=0)
     fn = jnp.sum((1.0 - pred_1h) * true_1h, axis=0)
     return tp, fp, fn
+
+
+def confusion_counts(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
+    """Full (C, C) confusion-count matrix, rows = true class, cols = predicted.
+
+    Like per_class_counts, counts SUM exactly across batches, so a split
+    confusion matrix is the sum of per-batch matrices (how the
+    confusion-matrix logging callback accumulates it). per_class_counts is
+    recoverable from it (tp = diagonal, fp = col sums - tp, fn = row
+    sums - tp).
+
+    Returns jax.Array (n_classes, n_classes) float32.
+    """
+    n_classes = logits.shape[-1]
+    preds   = jnp.argmax(logits, axis=-1)
+    classes = jnp.arange(n_classes)
+    pred_1h = (preds[:, None]  == classes).astype(jnp.float32)
+    true_1h = (labels[:, None] == classes).astype(jnp.float32)
+    return true_1h.T @ pred_1h
 
 
 def _macro_over_valid(numer: jnp.ndarray, denom: jnp.ndarray) -> jnp.ndarray:

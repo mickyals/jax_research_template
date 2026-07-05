@@ -288,3 +288,27 @@ class TestMacroPrecisionRecall:
     def test_registered(self):
         assert callable(get_metric('macro_precision'))
         assert callable(get_metric('macro_recall'))
+
+class TestConfusionCounts:
+
+    def test_known_matrix(self):
+        from training.metrics import confusion_counts
+        # truth [0,0,1], preds [0,1,1]
+        cm = confusion_counts(_logits_for_preds([0, 1, 1]),
+                              jnp.array([0, 0, 1]))
+        assert cm.shape == (N_CLS, N_CLS)
+        assert float(cm[0, 0]) == 1. and float(cm[0, 1]) == 1.
+        assert float(cm[1, 1]) == 1. and float(cm.sum()) == 3.
+
+    def test_sums_across_batches_and_diag_is_tp(self):
+        from training.metrics import confusion_counts, per_class_counts
+        rng = np.random.default_rng(3)
+        preds  = rng.integers(0, N_CLS, 32)
+        labels = jnp.array(rng.integers(0, N_CLS, 32), dtype=jnp.int32)
+        logits = _logits_for_preds(preds)
+        whole = confusion_counts(logits, labels)
+        assert jnp.allclose(whole,
+                            confusion_counts(logits[:16], labels[:16])
+                            + confusion_counts(logits[16:], labels[16:]))
+        tp, _, _ = per_class_counts(logits, labels)
+        assert jnp.allclose(jnp.diag(whole), tp)
