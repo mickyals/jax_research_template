@@ -8,12 +8,13 @@ import pytest
 import yaml
 
 from experiments.cyclone_jax.config import (
-    CONFIG_DIR, DATA_KEYS, load_config,
+    CONFIG_DIR, DATA_KEYS, MODEL_KEYS, load_config,
 )
 from experiments.cyclone_jax.data.inputs import resolve_input
 from experiments.cyclone_jax.data.targets import resolve_target
 
 SHIPPED_SCENARIOS = sorted(p.stem for p in (CONFIG_DIR / 'data').glob('*.yaml'))
+SHIPPED_MODELS = sorted(p.stem for p in (CONFIG_DIR / 'models').glob('*.yaml'))
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +26,7 @@ class TestShippedConfigs:
     def test_train_entry_point_loads(self):
         cfg = load_config(CONFIG_DIR / 'train' / 'train.yaml')
         assert set(cfg) == {'data', 'model', 'trainer'}
-        assert cfg['model'] is None                  # no models built yet
+        assert cfg['model']['name'] == 'mlp'         # the gate baseline
         assert cfg['trainer']['seed'] == 0
         assert cfg['data']['split']['strategy'] == 'stratified'
 
@@ -43,6 +44,18 @@ class TestShippedConfigs:
     def test_expected_scenarios_shipped(self):
         assert SHIPPED_SCENARIOS == ['multistorm', 'overfit', 'test',
                                      'train']
+
+    @pytest.mark.parametrize('name', SHIPPED_MODELS)
+    def test_every_shipped_model_config_validates(self, name, tmp_path):
+        """Key-set validation passes for every shipped model yaml (the
+        build/run round-trip lives in models/test_registry.py)."""
+        entry = tmp_path / 'entry.yaml'
+        entry.write_text(yaml.safe_dump({'data': 'overfit', 'model': name}))
+        cfg = load_config(entry, config_dir=CONFIG_DIR)
+        assert cfg['model']['name'] == name
+
+    def test_shipped_model_names_all_key_checked(self):
+        assert set(SHIPPED_MODELS) == set(MODEL_KEYS)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +108,42 @@ class TestGuards:
                        entry={'data': 's',
                               'trainer': {'seed': 0, 'lr': 1e-3}})
         with pytest.raises(ValueError, match='lr'):
+            load_config(entry, config_dir=tmp_path)
+
+    def test_unknown_model_key_raises(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x'},
+                       entry={'data': 's', 'model': 'm'})
+        (tmp_path / 'models').mkdir()
+        (tmp_path / 'models' / 'm.yaml').write_text(yaml.safe_dump(
+            {'name': 'mlp', 'hidden_featuers': 8}))
+        with pytest.raises(ValueError, match='hidden_featuers'):
+            load_config(entry, config_dir=tmp_path)
+
+    def test_unknown_model_name_raises(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x'},
+                       entry={'data': 's', 'model': 'm'})
+        (tmp_path / 'models').mkdir()
+        (tmp_path / 'models' / 'm.yaml').write_text(yaml.safe_dump(
+            {'name': 'perceiver'}))
+        with pytest.raises(ValueError, match='perceiver'):
+            load_config(entry, config_dir=tmp_path)
+
+    def test_unknown_encoding_key_raises(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x'},
+                       entry={'data': 's', 'model': 'm'})
+        (tmp_path / 'models').mkdir()
+        (tmp_path / 'models' / 'm.yaml').write_text(yaml.safe_dump(
+            {'name': 'mlp', 'encoding': {'mdoe': 'concat'}}))
+        with pytest.raises(ValueError, match='mdoe'):
+            load_config(entry, config_dir=tmp_path)
+
+    def test_siren_rejects_mlp_only_keys(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x'},
+                       entry={'data': 's', 'model': 'm'})
+        (tmp_path / 'models').mkdir()
+        (tmp_path / 'models' / 'm.yaml').write_text(yaml.safe_dump(
+            {'name': 'siren', 'encoding': {'mode': 'concat'}}))
+        with pytest.raises(ValueError, match='encoding'):
             load_config(entry, config_dir=tmp_path)
 
     def test_data_keys_cover_interface_reads(self):

@@ -1,0 +1,22 @@
+# =============================================================================
+# cyclone_jax model: MLP baseline
+# =============================================================================
+# Shared per-station perceptron -> flat concat (pad_to x station_features)
+# -> core MLP body -> logits. Self-contained (no yaml inheritance);
+# keys validated by config.MODEL_KEYS, values by models.build_model.
+# n_classes STAYS null — injected from TargetSpec at build.
+
+name: mlp                         # MODELS registry key
+tags: [mlp, baseline]             # -> wandb run tags
+
+n_classes: null
+station_features: 64
+hidden_features: 256
+n_layers: 3
+activation: relu                  # relu | gelu | silu | leaky_relu
+dropout_rate: 0.0                 # keep 0 for the memorisation gate
+
+encoding:
+  mode: concat                    # concat | additive
+  embedding: null                 # null = raw coords; or a core/embeddings
+  embedding_kwargs: {}            #   name (e.g. GAUSSIAN_POSITIONAL)

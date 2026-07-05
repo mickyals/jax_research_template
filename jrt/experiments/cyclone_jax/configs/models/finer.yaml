@@ -1,0 +1,17 @@
+# =============================================================================
+# cyclone_jax model: FINER-on-SIREN (Liu et al. 2024)
+# =============================================================================
+# SIREN skeleton + FINER activation everywhere and U(-bias_k, bias_k)
+# bias init (the adaptive-frequency mechanism). n_classes injected at
+# build.
+
+name: finer
+tags: [finer, siren, inr]
+
+n_classes: null
+station_features: 64
+hidden_features: 256
+n_layers: 3
+first_omega: 30.0
+hidden_omega: 30.0
+bias_k: 1.0

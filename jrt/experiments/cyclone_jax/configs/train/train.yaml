@@ -9,7 +9,7 @@
 # drive train loss -> 0.
 
 data: overfit                     # -> configs/data/<name>.yaml
-model: null                       # -> configs/models/<name>.yaml (none built yet)
+model: mlp                        # -> configs/models/<name>.yaml
 
 trainer:
   seed: 0                         # populates jax model init AND data order

@@ -15,8 +15,9 @@ load_config resolves the pointers and validates every block against its
 known-key set — an unknown key is an ERROR (typo guard), a missing pointer
 file fails with the resolved path. Value-level validation lives where
 values are consumed (resolve_input / resolve_target / build_data /
-Trainer); this module only guards the config surface. Model blocks are
-not key-checked yet — each model defines its own keys when it lands.
+build_model / Trainer); this module only guards the config surface.
+Model blocks are keyed per model name (MODEL_KEYS) — yaml-only here, no
+model imports, so config loading stays jax-free.
 """
 
 from __future__ import annotations
@@ -39,7 +40,19 @@ TRAINER_KEYS = {'seed', 'loss', 'loss_kwargs', 'optimizer',
                 'optimizer_kwargs', 'scheduler', 'scheduler_kwargs',
                 'num_epochs', 'check_val_every_n_epoch', 'gradient_clip',
                 'patience', 'patience_metric', 'metrics', 'logger',
-                'run_dir'}
+                'logger_kwargs', 'run_dir'}
+
+# Per-model key sets (mirror the build_model factories — keep in sync;
+# names literal here so config loading never imports jax).
+_MODEL_KEYS_COMMON = {'name', 'tags', 'n_classes', 'station_features',
+                      'hidden_features', 'n_layers'}
+MODEL_KEYS = {
+    'mlp':   _MODEL_KEYS_COMMON | {'activation', 'dropout_rate', 'encoding'},
+    'siren': _MODEL_KEYS_COMMON | {'first_omega', 'hidden_omega'},
+    'finer': _MODEL_KEYS_COMMON | {'first_omega', 'hidden_omega', 'bias_k'},
+}
+
+ENCODING_KEYS = {'mode', 'embedding', 'embedding_kwargs'}
 
 
 def _load_yaml(path):
@@ -81,6 +94,15 @@ def load_config(train_yaml, config_dir=None):
     model = None
     if raw.get('model'):
         model = _load_yaml(config_dir / 'models' / f"{raw['model']}.yaml")
+        name = model.get('name')
+        if name not in MODEL_KEYS:
+            raise ValueError(f"model config {raw['model']!r} has unknown "
+                             f"name {name!r} — known: {sorted(MODEL_KEYS)}")
+        _check_keys(model, MODEL_KEYS[name],
+                    f"model config {raw['model']!r}")
+        if model.get('encoding'):
+            _check_keys(model['encoding'], ENCODING_KEYS,
+                        f"model config {raw['model']!r} encoding block")
 
     trainer = raw.get('trainer') or {}
     _check_keys(trainer, TRAINER_KEYS, 'trainer block')
