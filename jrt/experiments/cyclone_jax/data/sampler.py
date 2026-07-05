@@ -23,6 +23,14 @@ station pressure, marine: SLP, upper: z) — finite by the build-time
 vertical gate. Channels a source lacks ride NaN -> 0 with missing False,
 so every variable owns one fixed union position (inputs.CHANNEL_ORDER).
 
+Normalisation (normalise.NormSpec, attached by interface.build_data as
+loader.norms; None = raw): obs are scaled INSIDE _source_x, before the
+NaN->0 missingness fill, so a filled zero sits at the channel mean (the
+scaling is NaN-propagating — the mask is unaffected). lat/lon/time/level
+are scaled at the END of build, after max_stations selection, because
+haversine needs real degrees. y is NEVER normalised (eval metadata).
+Everything x carries after build is float32 either way.
+
 Leakage allowlist holds by construction: x is built from obs volumes plus
 fix position/time only — no CYC_TARGETS field enters x.
 
@@ -70,10 +78,13 @@ class Loader:
     """
 
     def __init__(self, lib, inputs, targets, sshs_min=TROPICAL_STORM,
-                 drop_subtropical=False):
+                 drop_subtropical=False, norms=None):
         self.lib     = lib
         self.inputs  = inputs
         self.targets = targets
+        # build_data attaches this AFTER computing train-split stats (the
+        # stats pass itself needs raw samples, i.e. norms is None).
+        self.norms   = norms
 
         self.fixes = get_fixes(lib['volumes']['cyclone'], sshs_min=sshs_min,
                                drop_subtropical=drop_subtropical)
@@ -113,6 +124,8 @@ class Loader:
             cols = (np.asarray(obs[c][lo:hi]) for c in d.columns)
             for channel, arr in zip(d.channels, d.compute(*cols)):
                 vals[:, ch[channel]] = arr
+        if self.norms is not None:
+            vals = self.norms.obs(vals)      # pre-fill: zero-fill == mean
         vals, missing = build_missingness(vals)
 
         dt = ((np.asarray(obs['report_timestamp'][lo:hi]).astype('int64')
@@ -142,6 +155,9 @@ class Loader:
                              x['lat'], x['lon'])
             keep = np.argsort(d, kind='stable')[:k]
             x = {f: v[keep] for f, v in x.items()}
+
+        if self.norms is not None:
+            x = self.norms.apply_tail(x)     # post-selection: coords/time/level
 
         return {'x': x, 'y': self.targets.build_y(self.fixes, i)}
 

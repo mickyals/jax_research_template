@@ -70,6 +70,28 @@ batch['meta']    # sid list, lat/lon/time arrays, n_stations
 | `multistorm` | — | `{'test': ...}` = all fixes at multi-driver timestamps (OOD) |
 | *(absent)* | — | `{'all': ...}` for exploration |
 
+## Normalisation (`cfg['normalise']` + `cfg['domain']`)
+
+`normalise: {method: standardise|minmax_01|minmax_11, stats: auto|inline}`;
+no block or `method: none` = raw values. Mechanics live in
+`utils/normalise` (shared registry); policy in `normalise.py` (NormSpec —
+third sibling of Input/TargetSpec).
+
+- **Stats are properties of a training distribution**: `stats: auto`
+  computes them over the TRAIN split (or `all`) inside `build_data`, and
+  train.py saves them to `run_dir/norm_stats.json` (+ wandb config +
+  manifest). Evaluation must REUSE a training run's saved stats.
+- **Scenarios with no train split** (multistorm) cannot self-compute —
+  `build_data` raises with instructions. Provide inline stats in the yaml
+  or point evaluation at the training run (`--stats <run_dir>`), i.e. say
+  WHICH training distribution the stress test is relative to.
+- Coverage: obs per-channel by `method` **before** the NaN->0 fill (so
+  zero-fill == mean-fill); level by `method`; time / lookback -> [-1, 0];
+  lat/lon -> [-1, 1] over `domain:` bounds (fallback: train min/max,
+  logged). `y` and `meta` stay RAW — they are eval metadata.
+- `domain: {lat: [lo, hi], lon: [lo, hi]}` pins the FOV for coord scaling;
+  station selection (haversine) always runs on real degrees regardless.
+
 ## Rebuilding the library
 
 ```python

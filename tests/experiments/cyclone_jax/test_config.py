@@ -150,3 +150,34 @@ class TestGuards:
         """Keys build_data/interface reads must be declared known."""
         assert {'root', 'sshs_min', 'drop_subtropical', 'split',
                 'batch_size'} <= DATA_KEYS
+
+
+# ---------------------------------------------------------------------------
+# Normalisation / domain / tags config surface
+# ---------------------------------------------------------------------------
+
+class TestNormaliseConfigSurface:
+
+    def test_shipped_scenarios_carry_the_new_blocks(self):
+        for name in SHIPPED_SCENARIOS:
+            block = yaml.safe_load(
+                (CONFIG_DIR / 'data' / f'{name}.yaml').read_text())
+            assert block['normalise'] == {'method': 'standardise',
+                                          'stats': 'auto'}
+            assert block['tags']                     # every scenario tagged
+
+    def test_unknown_normalise_key_raises(self, tmp_path):
+        entry = _write(tmp_path, 's',
+                       {'root': 'x', 'normalise': {'methdo': 'standardise'}})
+        with pytest.raises(ValueError, match='methdo'):
+            load_config(entry, config_dir=tmp_path)
+
+    def test_unknown_domain_key_raises(self, tmp_path):
+        entry = _write(tmp_path, 's',
+                       {'root': 'x', 'domain': {'alt': [0, 1]}})
+        with pytest.raises(ValueError, match='alt'):
+            load_config(entry, config_dir=tmp_path)
+
+    def test_tags_key_accepted(self, tmp_path):
+        entry = _write(tmp_path, 's', {'root': 'x', 'tags': ['a']})
+        assert load_config(entry, config_dir=tmp_path)['data']['tags'] == ['a']

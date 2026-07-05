@@ -26,3 +26,13 @@ batch_size: 16
 split:
   strategy: stratified
   n_per_class: 8                  # 48 fixes total — small enough to memorise
+
+tags: [overfit, stratified, memorisation-gate]    # -> wandb, with model tags
+
+normalise:                        # stats computed over the TRAIN split at
+  method: standardise             # build time and SAVED with the run
+  stats: auto                     # (run_dir/norm_stats.json); coords ->
+                                  # [-1,1], time -> [-1,0], obs/level z-score
+# domain:                         # optional fixed FOV bounds for the coord
+#   lat: [lo, hi]                 # scaling; omitted = train-split min/max
+#   lon: [lo, hi]                 # (logged in the saved stats)

@@ -30,3 +30,10 @@ split:
             2020]
     val:  [2021, 2022]
     test: [2023, 2024]
+
+tags: [year-split]                # -> wandb, with model tags
+
+normalise:
+  method: standardise
+  stats: auto                     # computed over THIS train split, saved
+                                  # to run_dir/norm_stats.json

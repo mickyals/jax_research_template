@@ -40,6 +40,7 @@ import numpy as np
 from experiments.cyclone_jax.data.sources.library import load_library
 from experiments.cyclone_jax.data.inputs import InputSpec, resolve_input
 from experiments.cyclone_jax.data.targets import TargetSpec, resolve_target
+from experiments.cyclone_jax.data.normalise import NormSpec, resolve_normalise
 from experiments.cyclone_jax.data.sampler import (
     Loader, Sampler, split_by_year, stratified_fixes,
 )
@@ -90,6 +91,7 @@ class DataBundle:
     loader:  Loader
     splits:  dict[str, np.ndarray]        # split name -> fix indices
     streams: dict[str, BatchStream] = field(default_factory=dict)
+    norms:   NormSpec | None = None       # ALSO attached as loader.norms
 
 
 def _multistorm_mask(loader):
@@ -147,6 +149,7 @@ def build_data(cfg, seed=0, check_fresh=True):
                     drop_subtropical=bool(cfg.get('drop_subtropical', False)))
 
     splits = _resolve_splits(cfg, loader, seed)
+    norms = _resolve_norms(cfg, loader, splits)
 
     streams = {}
     batch_size = cfg.get('batch_size')
@@ -160,4 +163,32 @@ def build_data(cfg, seed=0, check_fresh=True):
                                         drop_last=train)
 
     return DataBundle(lib=lib, inputs=inputs, targets=targets,
-                      loader=loader, splits=splits, streams=streams)
+                      loader=loader, splits=splits, streams=streams,
+                      norms=norms)
+
+
+def _resolve_norms(cfg, loader, splits):
+    """normalise block -> NormSpec attached to the loader (or None).
+
+    'stats: auto' computes over the TRAIN split (the 'all' split when no
+    split block exists) — stats are properties of a training distribution
+    and get saved with the run (train.py -> run_dir/norm_stats.json).
+    """
+    policy = resolve_normalise(cfg)
+    if policy is None:
+        return None
+    if policy.auto:
+        idx = splits.get('train', splits.get('all'))
+        if idx is None or not len(idx):
+            raise ValueError(
+                "normalise: stats: auto, but this scenario has no train/all "
+                "split to compute statistics from. A stress-test scenario "
+                "must name WHICH training distribution it is relative to: "
+                "either paste inline stats into its normalise.stats block, "
+                "or evaluate it with the training run's saved stats "
+                "(run_dir/norm_stats.json — evaluate's --stats pointer).")
+        norms = policy.materialise(loader, idx)
+    else:
+        norms = policy.materialise(loader)
+    loader.norms = norms
+    return norms

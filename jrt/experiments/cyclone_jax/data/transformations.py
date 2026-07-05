@@ -7,8 +7,8 @@ array-level operations they resolve to.
 
 Wind decomposition lives in utils/geoscience/met_conversions
 (wind_to_components — meteorological FROM convention, calm -> (0, 0));
-normalisation utilities live in utils/jax_core/helpers. Neither is
-duplicated here.
+numpy normalisation mechanics live in utils/normalise (policy in this
+package's normalise.py). Neither is duplicated here.
 """
 
 from __future__ import annotations

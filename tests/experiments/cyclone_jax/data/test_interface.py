@@ -139,3 +139,48 @@ class TestStreams:
         n = len(data.splits['all'])
         assert len(data.streams['all']) == n // 4     # train-style drop_last
         assert isinstance(data.streams['all'], BatchStream)
+
+
+# ---------------------------------------------------------------------------
+# Normalisation through build_data (policy detail: test_normalise.py)
+# ---------------------------------------------------------------------------
+
+NORM = {'normalise': {'method': 'standardise', 'stats': 'auto'}}
+
+
+class TestBuildDataNormalisation:
+
+    def test_no_block_means_raw(self, library_root):
+        data = build_data(_cfg(library_root))
+        assert data.norms is None and data.loader.norms is None
+
+    def test_norms_attached_and_shared(self, library_root):
+        data = build_data(_cfg(library_root, **NORM))
+        assert data.norms is not None
+        assert data.loader.norms is data.norms
+
+    def test_stats_come_from_the_train_split_only(self, library_root):
+        """Different train splits -> different stats (they are properties
+        of a training distribution, computed + logged per run)."""
+        full = build_data(_cfg(library_root, **NORM))
+        sub = build_data(_cfg(
+            library_root, **NORM,
+            split={'strategy': 'stratified', 'n_per_class': 2}))
+        assert (full.norms.stats['obs']['slp']['count']
+                > sub.norms.stats['obs']['slp']['count'])
+
+    def test_batches_are_normalised(self, library_root):
+        data = build_data(_cfg(library_root, **NORM))
+        batch = next(iter(data.streams['all']))
+        obs = batch['X']['obs'][batch['X']['missing']]
+        assert abs(float(obs.mean())) < 0.5           # z-scored, not Pa
+        lat = batch['X']['lat'][batch['X']['station_mask']]
+        assert float(lat.min()) >= -1.0 and float(lat.max()) <= 1.0
+
+    def test_scenario_without_train_split_raises_instructive(
+            self, library_root):
+        """The documented rule: a stress-test scenario must NAME its
+        training distribution (inline stats or the run's saved stats)."""
+        with pytest.raises(ValueError, match='norm_stats.json'):
+            build_data(_cfg(library_root, **NORM,
+                            split={'strategy': 'multistorm'}))

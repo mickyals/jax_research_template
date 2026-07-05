@@ -23,3 +23,15 @@ timesteps: 1
 batch_size: 32
 split:
   strategy: multistorm
+
+tags: [multistorm, ood]           # -> wandb, with model tags
+
+normalise:
+  method: standardise
+  stats: auto                     # !! This scenario has NO train split, so
+                                  # stats: auto FAILS at build_data — by
+                                  # design. A stress test must name which
+                                  # TRAINING distribution it is relative to:
+                                  # paste that run's stats inline here, or
+                                  # evaluate with --stats <run_dir> to reuse
+                                  # its saved norm_stats.json.

@@ -31,3 +31,12 @@ split:
             2020]
     val:  [2021, 2022]
     test: [2023, 2024]
+
+tags: [test-years, eval]          # -> wandb, with model tags
+
+normalise:
+  method: standardise
+  stats: auto                     # this scenario HAS a train split (same
+                                  # years as train.yaml) so auto works;
+                                  # evaluation should still prefer the
+                                  # TRAINING RUN's saved norm_stats.json

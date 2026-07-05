@@ -32,9 +32,14 @@ TOP_KEYS = {'data', 'model', 'trainer'}
 
 DATA_KEYS = {'root', 'sources', 'selection', 'max_stations', 'pad_to',
              'target', 'sshs_min', 'class_set', 'drop_subtropical',
-             'source_id', 'timesteps', 'batch_size', 'split'}
+             'source_id', 'timesteps', 'batch_size', 'split',
+             'normalise', 'domain', 'tags'}
 
 SPLIT_KEYS = {'strategy', 'years', 'n_per_class', 'exclude_multistorm'}
+
+NORMALISE_KEYS = {'method', 'stats'}
+
+DOMAIN_KEYS = {'lat', 'lon'}
 
 TRAINER_KEYS = {'seed', 'loss', 'loss_kwargs', 'optimizer',
                 'optimizer_kwargs', 'scheduler', 'scheduler_kwargs',
@@ -90,6 +95,12 @@ def load_config(train_yaml, config_dir=None):
     if data.get('split'):
         _check_keys(data['split'], SPLIT_KEYS,
                     f"data scenario {raw['data']!r} split block")
+    if data.get('normalise'):
+        _check_keys(data['normalise'], NORMALISE_KEYS,
+                    f"data scenario {raw['data']!r} normalise block")
+    if data.get('domain'):
+        _check_keys(data['domain'], DOMAIN_KEYS,
+                    f"data scenario {raw['data']!r} domain block")
 
     model = None
     if raw.get('model'):
