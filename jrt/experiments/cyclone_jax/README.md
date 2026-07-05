@@ -11,11 +11,11 @@ cyclone_jax/
 ├── config.py        # load_config: resolves train-config pointers, validates keys
 ├── configs/         # composable yaml — see configs/usage_doc.md
 │   ├── data/        #   run scenarios: overfit / train / test / multistorm
-│   ├── models/      #   one yaml per model (empty until models land)
+│   ├── models/      #   one yaml per model: mlp / siren / finer (+ wandb tags)
 │   └── train/       #   entry points: train.yaml points at {data, model}
 ├── data/            # the whole data side — see data/usage_doc.md
-├── models/          # (next phase) MLP baseline ladder -> Perceiver-IO
-├── train/           # (next phase) train/evaluate/tune entry points
+├── models/          # MODELS registry + build_model — see models/usage_doc.md
+├── train/           # train.py entry point (evaluate/tune: next phase)
 ├── visualise/       # (next phase) plotting
 └── runs/            # run artifacts, gitignored (**/runs/)
 ```
@@ -31,6 +31,17 @@ data = build_data(cfg['data'], seed=cfg['trainer']['seed'])
 
 sample = data.loader.build(0)          # one named ragged sample {'x', 'y'}
 batch  = next(iter(data.streams['train']))   # device-ready batch
+
+from experiments.cyclone_jax.models import build_model
+model, tags = build_model(cfg['model'], data.targets)   # tags -> wandb
+```
+
+## Training (CLI)
+
+```bash
+export PYTHONPATH=jrt
+python -m experiments.cyclone_jax.train.train \
+    jrt/experiments/cyclone_jax/configs/train/train.yaml
 ```
 
 ## Principles

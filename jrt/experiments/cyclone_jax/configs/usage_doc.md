@@ -16,7 +16,12 @@ configs/
 │   #  train.yaml       year split, multi-driver fixes excluded  !! edit year lists
 │   #  test.yaml        same years, evaluation passes            !! keep in sync
 │   #  multistorm.yaml  the excluded multi-driver fixes as OOD test
-├── models/   # one yaml per model (empty until the models phase)
+├── models/   # one yaml per model, self-contained + wandb tags:
+│   #  mlp.yaml    StationMLP baseline (activation relu|gelu|silu|leaky_relu,
+│   #              encoding: concat|additive, embedding null = raw coords)
+│   #  siren.yaml  StationSIREN — raw coords, omegas
+│   #  finer.yaml  StationFINER — siren keys + bias_k
+│   #  n_classes stays null — injected from TargetSpec by models.build_model
 └── train/    # train.yaml: data: <scenario>, model: <name|null>, trainer: {...}
 ```
 
@@ -25,7 +30,8 @@ Rules enforced by `config.py`:
 - Pointers resolve to `configs/data/<name>.yaml` / `configs/models/<name>.yaml`;
   a missing file fails with the resolved path.
 - Every block is key-set validated — an unknown key (typo) is an ERROR.
-  Extend `DATA_KEYS` / `SPLIT_KEYS` / `TRAINER_KEYS` when adding config surface.
+  Extend `DATA_KEYS` / `SPLIT_KEYS` / `TRAINER_KEYS` / `MODEL_KEYS` when
+  adding config surface (model blocks are keyed per model name).
 - Value-level validation lives with the consumers
   (`resolve_input` / `resolve_target` / `build_data` / Trainer).
 - `trainer.seed` is THE seed: jax model init + numpy data order.
