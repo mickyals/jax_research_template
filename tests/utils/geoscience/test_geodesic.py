@@ -274,7 +274,7 @@ class TestVincentyJax:
 
 
 # ---------------------------------------------------------------------------
-# spherical_box_area
+# latlon_box_area
 # ---------------------------------------------------------------------------
 
 class TestSphericalBoxArea:
@@ -282,29 +282,29 @@ class TestSphericalBoxArea:
     R = 6371.0088
 
     def test_whole_sphere(self):
-        from utils.geoscience.geodesic import spherical_box_area
-        assert spherical_box_area(-180, 180, -90, 90) == pytest.approx(
+        from utils.geoscience.geodesic import latlon_box_area
+        assert latlon_box_area(-180, 180, -90, 90) == pytest.approx(
             4.0 * np.pi * self.R ** 2, rel=1e-12)
 
     def test_hemisphere(self):
-        from utils.geoscience.geodesic import spherical_box_area
-        assert spherical_box_area(-180, 180, 0, 90) == pytest.approx(
+        from utils.geoscience.geodesic import latlon_box_area
+        assert latlon_box_area(-180, 180, 0, 90) == pytest.approx(
             2.0 * np.pi * self.R ** 2, rel=1e-12)
 
     def test_north_south_symmetry(self):
-        from utils.geoscience.geodesic import spherical_box_area
-        n = spherical_box_area(-100, -30, 10, 30)
-        s = spherical_box_area(-100, -30, -30, -10)
+        from utils.geoscience.geodesic import latlon_box_area
+        n = latlon_box_area(-100, -30, 10, 30)
+        s = latlon_box_area(-100, -30, -30, -10)
         assert n == pytest.approx(s, rel=1e-12)
 
     def test_high_latitude_box_smaller_than_equatorial(self):
         # Same lon/lat extents; the spherical box shrinks toward the pole
         # (the flat-map rectangle would not).
-        from utils.geoscience.geodesic import spherical_box_area
-        eq   = spherical_box_area(0, 10, -5, 5)
-        high = spherical_box_area(0, 10, 60, 70)
+        from utils.geoscience.geodesic import latlon_box_area
+        eq   = latlon_box_area(0, 10, -5, 5)
+        high = latlon_box_area(0, 10, 60, 70)
         assert high < eq
 
     def test_unit_sphere_radius(self):
-        from utils.geoscience.geodesic import spherical_box_area
-        assert spherical_box_area(-180, 180, -90, 90, radius=1.0) ==             pytest.approx(4.0 * np.pi, rel=1e-12)
+        from utils.geoscience.geodesic import latlon_box_area
+        assert latlon_box_area(-180, 180, -90, 90, radius=1.0) ==             pytest.approx(4.0 * np.pi, rel=1e-12)

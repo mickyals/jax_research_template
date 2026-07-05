@@ -15,7 +15,7 @@ future additions):
                                      number for a data-limited basin)
 
 The FOV is the data yaml's domain block ({lat: [lo, hi], lon: [lo, hi]});
-its area is exact on the sphere (utils.geoscience.spherical_box_area).
+its area is exact on the sphere (utils.geoscience.latlon_box_area).
 n_stations means DISTINCT sensor locations in the sample/window, not
 observation rows. Consumers: EDA notebooks now; per-sample prediction-table
 columns when train/evaluate.py lands.
@@ -23,7 +23,7 @@ columns when train/evaluate.py lands.
 
 from __future__ import annotations
 
-from utils.geoscience.geodesic import spherical_box_area
+from utils.geoscience.geodesic import latlon_box_area
 
 
 def network_sparsity(n_stations: int, domain: dict) -> dict:
@@ -44,7 +44,7 @@ def network_sparsity(n_stations: int, domain: dict) -> dict:
           (spacing/resolvable are inf when n_stations == 0).
     """
     lat, lon = domain['lat'], domain['lon']
-    area = spherical_box_area(lon[0], lon[1], lat[0], lat[1])
+    area = latlon_box_area(lon[0], lon[1], lat[0], lat[1])
     n = int(n_stations)
     spacing = (area / n) ** 0.5 if n > 0 else float('inf')
     return {

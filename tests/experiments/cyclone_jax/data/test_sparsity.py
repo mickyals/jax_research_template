@@ -4,7 +4,7 @@ Tests for data/sparsity.py — Nyquist-style network sparsity over the FOV.
 
 import pytest
 
-from utils.geoscience.geodesic import spherical_box_area
+from utils.geoscience.geodesic import latlon_box_area
 
 from experiments.cyclone_jax.data.sparsity import network_sparsity
 
@@ -18,7 +18,7 @@ class TestNetworkSparsity:
         assert set(out) == {'n_stations', 'area_km2', 'spacing_km',
                             'resolvable_km'}
         assert out['area_km2'] == pytest.approx(
-            spherical_box_area(-100, -30, 0, 30))
+            latlon_box_area(-100, -30, 0, 30))
 
     def test_spacing_is_sqrt_area_over_n(self):
         out = network_sparsity(100, DOMAIN)

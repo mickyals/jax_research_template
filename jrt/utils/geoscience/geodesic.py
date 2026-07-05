@@ -493,7 +493,7 @@ def vincenty_jax(
 # Spherical areas
 # ---------------------------------------------------------------------------
 
-def spherical_box_area(lon_min, lon_max, lat_min, lat_max,
+def latlon_box_area(lon_min, lon_max, lat_min, lat_max,
                        radius: float = _AVG_EARTH_RADIUS_KM) -> float:
     """EXACT area of a lon/lat box on the sphere (like haversine is the
     exact great-circle distance, this is the exact spherical-surface area
