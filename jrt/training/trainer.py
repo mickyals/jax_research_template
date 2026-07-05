@@ -175,6 +175,11 @@ class Trainer:
         (pred, target) -> scalar.  The key specified by config['loss_key']
         (default: first key) is differentiated during training.  All keys
         are evaluated during validation and test.
+        The loss entry may also be a training.losses.LossStack (or any
+        callable with ``needs_model=True``): it is then called with
+        ``params/apply_fn/batch`` keywords so model terms (weight-space
+        penalties, physics residuals) can participate; multi-term stacks
+        get their per-term values logged under ``<loss_key>/<term>``.
     config : dict
         The YAML  trainer:  block loaded into a plain dict.
     """
@@ -314,10 +319,26 @@ class Trainer:
         has_batch_stats is resolved once so JAX specialises the correct branch.
         The training loss is metrics_fns[loss_key]; all metrics are evaluated
         in eval_step.
+
+        Loss functions that carry ``needs_model=True`` (e.g. a
+        training.losses.LossStack with model terms) are called with
+        ``params/apply_fn/batch`` keywords in both steps, so terms can
+        penalise parameters or re-differentiate through the model; plain
+        ``(pred, y)`` losses keep the unchanged path. A multi-term stack's
+        ``detailed`` method additionally surfaces per-term values in the
+        step metrics under ``<loss_key>/<term>`` (single-term stacks emit
+        no redundant extra curve). Both are resolved here, at build time,
+        as compile-time constants.
         """
         model       = self.model
         metrics_fns = self.metrics_fns
         loss_key    = self._loss_key
+
+        loss_fn     = metrics_fns[loss_key]
+        needs_model = bool(getattr(loss_fn, "needs_model", False))
+        detailed    = getattr(loss_fn, "detailed", None)
+        log_terms   = (detailed is not None
+                       and len(getattr(loss_fn, "term_names", ())) > 1)
 
         def train_step(state: TrainState, batch: dict):
             rng, dropout_rng = jax.random.split(state.rng)
@@ -337,10 +358,15 @@ class Trainer:
                         batch["X"], train=True, rngs=rngs,
                     )
                     new_batch_stats = None
-                loss = metrics_fns[loss_key](pred, batch["y"])
-                return loss, new_batch_stats
+                kw = ({"params": params, "apply_fn": model.apply,
+                       "batch": batch} if needs_model else {})
+                if log_terms:
+                    loss, term_vals = detailed(pred, batch["y"], **kw)
+                else:
+                    loss, term_vals = loss_fn(pred, batch["y"], **kw), {}
+                return loss, (new_batch_stats, term_vals)
 
-            (loss, new_batch_stats), grads = jax.value_and_grad(
+            (loss, (new_batch_stats, term_vals)), grads = jax.value_and_grad(
                 compute_loss, has_aux=True
             )(state.params)
 
@@ -349,14 +375,24 @@ class Trainer:
                 batch_stats = new_batch_stats,
                 rng         = rng,
             )
-            return new_state, {loss_key: loss}
+            step_metrics = {loss_key: loss}
+            step_metrics.update(
+                {f"{loss_key}/{k}": v for k, v in term_vals.items()})
+            return new_state, step_metrics
 
         def eval_step(state: TrainState, batch: dict):
             variables = {"params": state.params}
             if has_batch_stats:
                 variables["batch_stats"] = state.batch_stats
             pred = model.apply(variables, batch["X"], train=False)
-            return {k: fn(pred, batch["y"]) for k, fn in metrics_fns.items()}
+            out = {}
+            for k, fn in metrics_fns.items():
+                if k == loss_key and needs_model:
+                    out[k] = fn(pred, batch["y"], params=state.params,
+                                apply_fn=model.apply, batch=batch)
+                else:
+                    out[k] = fn(pred, batch["y"])
+            return out
 
         self._train_step = jax.jit(train_step)
         self._eval_step  = jax.jit(eval_step)
@@ -437,6 +473,11 @@ class Trainer:
                     for k, v in self._eval_step(state, batch).items()
                 }
                 all_metrics[self._loss_key] = loss_val
+                # Per-term loss values (multi-term LossStack) ride along from
+                # the backward pass under '<loss_key>/<term>'.
+                for k, v in step_metrics.items():
+                    if k != self._loss_key:
+                        all_metrics[k] = float(v)
                 log_dict = {f"train/{k}": v for k, v in all_metrics.items()}
                 log_dict['train/lr'] = float(self._schedule(self._global_step))
                 self._logger.log_metrics(log_dict, step=self._global_step)
