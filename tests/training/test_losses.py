@@ -392,6 +392,23 @@ class TestModelTerms:
         assert jnp.allclose(grads['dense']['kernel'],
                             jnp.array([0.2, -0.2, 0.2]))
 
+    def test_l2_params_registered(self):
+        assert 'L2_PARAMS' in MODEL_TERMS
+
+    def test_l2_params_manual_value(self, toy_params):
+        # sum(w^2) = 1+4+9+16+0 = 30 over 5 elements -> mean 6.0
+        term = MODEL_TERMS.get('l2_params')
+        out  = term(toy_params, None, None, None)
+        assert float(out) == pytest.approx(6.0)
+        assert out.shape == ()
+
+    def test_l2_params_grad_wrt_params(self, toy_params):
+        term = MODEL_TERMS.get('l2_params')
+        grads = jax.grad(lambda p: term(p, None, None, None))(toy_params)
+        # d(mean w^2)/dw = 2w/n, n=5
+        assert jnp.allclose(grads['dense']['kernel'],
+                            jnp.array([0.4, -0.8, 1.2]))
+
     def test_register_model_term_duplicate_raises(self):
         with pytest.raises(ValueError, match="already registered"):
             @register_model_term('l1_params')

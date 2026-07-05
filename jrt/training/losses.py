@@ -28,8 +28,11 @@ the kind declared by where the name is registered:
   * **prediction terms** (this LOSSES registry): ``(pred, y) -> scalar``.
   * **model terms** (MODEL_TERMS registry): ``(params, apply_fn, batch, pred)
     -> scalar`` — penalties/objectives over model internals (weight-space
-    penalties like ``l1_params``; future physics residuals that re-run
-    ``apply_fn`` under ``jax.jvp`` for input gradients).
+    penalties ``l1_params``/``l2_params``; future physics residuals that
+    re-run ``apply_fn`` under ``jax.jvp`` for input gradients). NOTE:
+    ``l2_params`` is coupled L2 through the loss; adamw ``weight_decay`` is
+    decoupled decay outside the gradient — configure one or the other, not
+    both.
 
 The Trainer detects model terms via the stack's ``needs_model`` attribute and
 passes ``params/apply_fn/batch`` as keywords (plain ``(pred, y)`` losses have
@@ -332,6 +335,28 @@ def _l1_params() -> Callable:
     return term
 
 
+@register_model_term(
+    "l2_params",
+    description=(
+        "Mean squared value over all parameter leaves — COUPLED L2 "
+        "regularisation (the penalty flows through the loss gradient, so "
+        "adaptive optimizers rescale it per-parameter). Deliberately "
+        "distinct from adamw weight_decay, which is DECOUPLED decay applied "
+        "outside the gradient (Loshchilov & Hutter 2019). WARNING: use adamw "
+        "weight_decay OR this term, not both — combining them double-"
+        "penalises weight magnitude. Uses only params; ignores "
+        "apply_fn/batch/pred."
+    ),
+)
+def _l2_params() -> Callable:
+    def term(params, apply_fn, batch, pred) -> jax.Array:
+        leaves = jax.tree_util.tree_leaves(params)
+        total  = sum(jnp.sum(jnp.square(leaf)) for leaf in leaves)
+        n      = sum(leaf.size for leaf in leaves)
+        return total / n
+    return term
+
+
 # ---------------------------------------------------------------------------
 # LossStack — a weighted term list folded into one callable
 # ---------------------------------------------------------------------------
@@ -383,7 +408,7 @@ class LossStack:
             value = (fn(pred, y) if kind == "prediction"
                      else fn(params, apply_fn, batch, pred))
             values[name] = value
-            total = total + weight * value
+            total += weight * value
         return total, values
 
     def __call__(
