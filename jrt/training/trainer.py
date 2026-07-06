@@ -207,6 +207,11 @@ class Trainer:
         self._num_epochs      = config.get("num_epochs", 1_000)
         self._num_steps       = config.get("num_steps",  float("inf"))
         self._patience        = config.get("patience",   10)
+        # validate every N epochs (always on the final budgeted epoch);
+        # skipped-val epochs do not tick patience unless the patience
+        # metric is train-side (train metrics exist every epoch).
+        self._check_val_every = max(
+            1, int(config.get("check_val_every_n_epoch") or 1))
         self._patience_metric = config.get(
             "patience_metric", f"val/{self._loss_key}"
         )
@@ -843,7 +848,13 @@ class Trainer:
             state, train_metrics = self._train_epoch(
                 state, train_loader, epoch, step_callbacks=step_callbacks
             )
-            val_metrics = self._eval_model(state, val_loader, prefix="val")
+            # check_val_every_n_epoch: skip val on off-cadence epochs
+            # (train == val scenarios make every val pass a full extra
+            # sweep); the final budgeted epoch always validates.
+            run_val = ((epoch + 1) % self._check_val_every == 0
+                       or epoch == self._num_epochs - 1)
+            val_metrics = (self._eval_model(state, val_loader, prefix="val")
+                           if run_val else {})
 
             # Epoch-level log — use global_step so all metrics share one x-axis
             # with the step-level train/loss and attention entropy curves.
@@ -857,17 +868,24 @@ class Trainer:
 
             epoch_metrics = {**train_metrics, **val_metrics}
             if self._patience_metric not in epoch_metrics:
-                raise KeyError(
-                    f"patience_metric '{self._patience_metric}' not found in "
-                    f"epoch metrics. Available: {list(epoch_metrics.keys())}. "
-                    "Check patience_metric in config."
-                )
-            current  = epoch_metrics[self._patience_metric]
-            improved = self.is_better(current, best_metric)
+                if run_val:
+                    raise KeyError(
+                        f"patience_metric '{self._patience_metric}' not found "
+                        f"in epoch metrics. Available: "
+                        f"{list(epoch_metrics.keys())}. "
+                        "Check patience_metric in config."
+                    )
+                # val skipped and the patience metric is val-side: no
+                # patience tick, no best update — just save-latest + budget
+                # checks below.
+                current, improved = None, False
+            else:
+                current  = epoch_metrics[self._patience_metric]
+                improved = self.is_better(current, best_metric)
 
             # optuna pruning: report intermediate value and stop early if
             # the trial looks unpromising.  Lazy import keeps optuna optional.
-            if trial is not None:
+            if trial is not None and current is not None:
                 import optuna as _optuna
                 trial.report(float(current), epoch)
                 if trial.should_prune():
@@ -879,7 +897,7 @@ class Trainer:
                 best_state     = state
                 patience_count = 0
                 self.save_checkpoint(state)
-            else:
+            elif current is not None:
                 patience_count += 1
 
             # Save latest state + metadata every epoch (enables resume)
@@ -887,10 +905,11 @@ class Trainer:
                               best_metric, patience_count)
 
             train_key = f"train/{self._loss_key}"
+            current_str = "skipped" if current is None else f"{current:.5f}"
             summary = (
                 f"epoch {epoch:4d} | "
                 f"{train_key} {train_metrics[train_key]:.5f} | "
-                f"{self._patience_metric} {current:.5f} | "
+                f"{self._patience_metric} {current_str} | "
                 f"patience {patience_count}/{self._patience}"
                 + (" [best]" if improved else "")
             )
@@ -898,7 +917,8 @@ class Trainer:
             if use_tqdm and epoch_bar is not None:
                 epoch_bar.set_postfix({
                     f"tr/{self._loss_key}": f"{train_metrics[train_key]:.4f}",
-                    "val":       f"{current:.4f}",
+                    "val": ("skipped" if current is None
+                            else f"{current:.4f}"),
                     "patience":  f"{patience_count}/{self._patience}",
                 })
             else:

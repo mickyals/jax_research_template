@@ -725,6 +725,64 @@ class TestFit:
 
 
 # ---------------------------------------------------------------------------
+# TestCheckValEvery — check_val_every_n_epoch cadence + patience semantics
+# ---------------------------------------------------------------------------
+
+class _CountingValLoader:
+    """Re-iterable wrapper counting how many val passes fit() runs."""
+
+    def __init__(self, loader):
+        self._loader = loader
+        self.n_iters = 0
+
+    def __len__(self):
+        return len(self._loader)
+
+    def __iter__(self):
+        self.n_iters += 1
+        return iter(self._loader)
+
+
+class TestCheckValEvery:
+
+    def test_val_runs_on_cadence_only(self, tmp_path, train_loader, val_arrs):
+        vl = _CountingValLoader(_make_loader(val_arrs, shuffle=False))
+        cfg = _base_config(tmp_path, num_epochs=4, patience=100,
+                           check_val_every_n_epoch=2,
+                           patience_metric="train/mse")
+        Trainer(_TinyMLP(), _METRICS, cfg).fit(train_loader, vl)
+        assert vl.n_iters == 2                      # epochs 1 and 3
+
+    def test_final_epoch_always_validates(self, tmp_path, train_loader,
+                                          val_arrs):
+        vl = _CountingValLoader(_make_loader(val_arrs, shuffle=False))
+        cfg = _base_config(tmp_path, num_epochs=3, patience=100,
+                           check_val_every_n_epoch=5,
+                           patience_metric="train/mse")
+        Trainer(_TinyMLP(), _METRICS, cfg).fit(train_loader, vl)
+        assert vl.n_iters == 1                      # final epoch only
+
+    def test_skipped_val_with_val_patience_metric_no_error(
+            self, tmp_path, train_loader, val_loader, capsys):
+        """Skipped-val epochs must not raise for a val-side patience metric
+        and must not tick patience — they print 'skipped' instead."""
+        cfg = _base_config(tmp_path, num_epochs=2, patience=100,
+                           check_val_every_n_epoch=2)     # val/mse patience
+        result = Trainer(_TinyMLP(), _METRICS, cfg).fit(train_loader,
+                                                        val_loader)
+        assert isinstance(result, TrainState)
+        out = capsys.readouterr().out
+        assert "skipped" in out and "patience 0/" in out
+
+    def test_default_cadence_validates_every_epoch(self, tmp_path,
+                                                   train_loader, val_arrs):
+        vl = _CountingValLoader(_make_loader(val_arrs, shuffle=False))
+        cfg = _base_config(tmp_path, num_epochs=3, patience=100)
+        Trainer(_TinyMLP(), _METRICS, cfg).fit(train_loader, vl)
+        assert vl.n_iters == 3
+
+
+# ---------------------------------------------------------------------------
 # TestResume
 # ---------------------------------------------------------------------------
 
