@@ -30,9 +30,16 @@ v1 callbacks:
     confusion_matrix  accumulate training.metrics.update_cm over the whole
                       split stream -> exact macro precision/recall scalars
                       (the metrics deregistered from per-batch METRICS) +
-                      the annotated figure
+                      TWO annotated figures (counts + row-% — same matrix,
+                      two readings)
     storm_panel       one fix (random | pinned sid per the data yaml knob)
                       -> truth-star/pred-ring map via visualise.figures
+
+end_of_run additionally writes the per-fix prediction record for every
+distinct split (predictions_<split>.csv: which fixes the model got right
+and wrong), aggregates it per storm (per_storm_accuracy_<split>.csv,
+worst-first: which storms are memorised vs hard), and emits the spatial
+accuracy hexbin (where over the FOV the model is right/wrong).
 
 Figures go to logger.log_figure (all backends) AND run_dir/figures/ as
 svg + png (editable-vector workflow). The logger closes each figure.
@@ -40,6 +47,9 @@ svg + png (editable-vector workflow). The logger closes each figure.
 
 from __future__ import annotations
 
+import csv
+import json
+import logging
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -53,11 +63,18 @@ from utils.plotting.fields import confusion_matrix_figure
 from utils.registry import Registry
 
 from experiments.cyclone_jax.data.batching import collate
+from experiments.cyclone_jax.data.identifiability import input_collisions
 from experiments.cyclone_jax.data.sparsity import network_sparsity
-from experiments.cyclone_jax.visualise.figures import (save_gif,
-                                                       storm_panel_figure)
+from experiments.cyclone_jax.models.features import TOKEN_FIELDS
+from experiments.cyclone_jax.visualise.figures import (
+    SOURCE_STYLE, accuracy_hexbin_figure, save_gif, storm_panel_figure,
+)
 
 CALLBACKS = Registry('Callback')
+
+# The run's text record — train.py configures handlers (stdout + run.log)
+# before anything trains; unconfigured (tests, notebooks) it propagates.
+RUN_LOG = logging.getLogger('cyclone_jax.run')
 
 _CALLBACK_SPEC_KEYS = {'name', 'every', 'split', 'kwargs'}
 
@@ -94,8 +111,22 @@ def _domain_from_norms(norms):
             'lon': [norms.stats['lon']['min'], norms.stats['lon']['max']]}
 
 
+def _storm_track(fixes, sid, until):
+    """The storm's fixes up to and incl. `until`, time-ordered -> (lon,
+    lat) trail arrays, or (None, None) when the fix table lacks coords
+    (fakes)."""
+    if 'lat' not in fixes or 'lon' not in fixes:
+        return None, None
+    sel = ((np.asarray(fixes['sid']) == sid)
+           & (np.asarray(fixes['time']) <= until))
+    order = np.argsort(np.asarray(fixes['time'])[sel])
+    return (np.asarray(fixes['lon'])[sel][order],
+            np.asarray(fixes['lat'])[sel][order])
+
+
 def _render_fix(state, data, i, domain, basemap):
-    """One fix index -> titled truth-star/pred-ring panel. Shared by the
+    """One fix index -> titled truth-star/pred-ring panel (with the track
+    so far and the per-source station breakdown). Shared by the
     storm_panel callback and the end-of-run storm sequence."""
     loader, targets = data.loader, data.targets
     batch = collate([loader.build(i)], loader.inputs.pad_to)
@@ -108,17 +139,29 @@ def _render_fix(state, data, i, domain, basemap):
     if data.norms is not None:
         lat, lon = data.norms.invert_coords(lat, lon)
 
+    sid, t = str(meta['sid'][0]), meta['time'][0]
+    track_lon, track_lat = _storm_track(loader.fixes, sid, t)
+    name = (str(loader.fixes['name'][i]).strip()
+            if 'name' in loader.fixes else '')
+    codes = np.rint(ids).astype(int)
+    counts = {label: int((codes == code).sum())
+              for code, (label, _) in SOURCE_STYLE.items()}
     n = int(meta['n_stations'][0])
-    title = (f"{meta['sid'][0]}  {str(meta['time'][0])[:16]}  "
+    title = (f"{sid}{' ' + name if name else ''} ({str(t)[:4]})  "
+             f"{str(t)[:16]}Z\n"
              f"true {targets.class_names[true]} vs "
-             f"pred {targets.class_names[pred]}  n={n}")
+             f"pred {targets.class_names[pred]}   "
+             f"land {counts['land']} | marine {counts['marine']} | "
+             f"upper {counts['upper']}  (total {n})")
     if domain:
         r_km = network_sparsity(n, domain)['resolvable_km']
-        title += f"  resolvable {r_km:.0f} km"
+        title += f"   resolvable {r_km:.0f} km"
     return storm_panel_figure(
         lon, lat, float(meta['lon'][0]), float(meta['lat'][0]),
         true, pred, targets.n_classes, title=title,
-        domain=domain, basemap=basemap, station_id=ids)
+        domain=domain, basemap=basemap, station_id=ids,
+        class_names=targets.class_names,
+        track_lon=track_lon, track_lat=track_lat)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +201,12 @@ def _confusion_matrix(ctx, split='val'):
             np.asarray(cm), class_names=targets.class_names,
             title=f'{split} confusion — step {global_step}')
         _emit(fig, 'confusion_matrix', split, global_step,
+              logger, ctx.get('run_dir'))
+        fig = confusion_matrix_figure(
+            np.asarray(cm), class_names=targets.class_names,
+            title=f'{split} confusion (row %) — step {global_step}',
+            normalise=True)
+        _emit(fig, 'confusion_matrix_pct', split, global_step,
               logger, ctx.get('run_dir'))
 
     return fn
@@ -249,15 +298,169 @@ def build_callbacks(cfg, data, logger) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Prediction records — which fixes/storms/places the model gets right
+# ---------------------------------------------------------------------------
+
+def _sweep_split(state, data, idx, batch_size):
+    """Deterministic full sweep over fix indices -> (pred, true,
+    n_stations) arrays. Chunked at the training batch size so the
+    compiled forward is reused (one extra trace for the tail chunk)."""
+    loader = data.loader
+    pad_to = loader.inputs.pad_to
+    preds = np.empty(len(idx), np.int64)
+    trues = np.empty(len(idx), np.int64)
+    n_stations = np.empty(len(idx), np.int64)
+    for s in range(0, len(idx), batch_size):
+        chunk = idx[s:s + batch_size]
+        batch = collate([loader.build(int(i)) for i in chunk], pad_to)
+        preds[s:s + len(chunk)] = np.argmax(
+            np.asarray(_predict(state, batch)), axis=-1)
+        trues[s:s + len(chunk)] = np.asarray(batch['y'])
+        n_stations[s:s + len(chunk)] = np.asarray(
+            batch['meta']['n_stations'])
+    return preds, trues, n_stations
+
+
+def _per_storm(sids, correct):
+    """[(sid, accuracy, n_fixes), ...] worst-first (ties: bigger storm
+    first — more evidence of difficulty)."""
+    out = []
+    for sid in np.unique(sids):
+        m = sids == sid
+        out.append((str(sid), float(correct[m].mean()), int(m.sum())))
+    return sorted(out, key=lambda r: (r[1], -r[2]))
+
+
+def _write_predictions_csv(path, fixes, idx, preds, trues, n_stations,
+                           class_names):
+    """One row per fix: identity + true/pred/correct — THE record for
+    finding exactly which fixes the model fails on."""
+    storm_names = fixes.get('name')
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(['sid', 'name', 'time', 'lat', 'lon', 'n_stations',
+                    'true', 'pred', 'correct'])
+        for k, i in enumerate(idx):
+            w.writerow([
+                fixes['sid'][i],
+                (str(storm_names[i]).strip()
+                 if storm_names is not None else ''),
+                str(fixes['time'][i]),
+                f"{float(fixes['lat'][i]):.4f}",
+                f"{float(fixes['lon'][i]):.4f}",
+                int(n_stations[k]),
+                class_names[trues[k]], class_names[preds[k]],
+                int(preds[k] == trues[k]),
+            ])
+
+
+def _write_per_storm_csv(path, sids, correct, storm_names=None):
+    """Per-storm accuracy, worst-first — which storms are memorised and
+    which resist (comparable across runs at fixed split)."""
+    storm_names = storm_names or {}
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(['sid', 'name', 'n_fixes', 'n_correct', 'accuracy'])
+        for sid, acc, n in _per_storm(sids, correct):
+            w.writerow([sid, storm_names.get(sid, ''), n,
+                        int(round(acc * n)), f"{acc:.4f}"])
+
+
+def _prediction_records(cfg, data, logger, state, global_step, basemap):
+    """Per-fix predictions for every DISTINCT split (memorise: val ==
+    train — swept once): predictions_<split>.csv +
+    per_storm_accuracy_<split>.csv under run_dir, the spatial accuracy
+    hexbin via the usual emit path, the identifiability ceiling
+    (input_collisions — a second sample-build pass, deliberate: the
+    ceiling belongs in the run record next to the accuracy it bounds;
+    scalars to the logger, conflict groups to
+    identifiability_<split>.json), and a summary line on the run log."""
+    fixes = data.loader.fixes
+    if 'lat' not in fixes or 'lon' not in fixes:
+        return                               # fix table without coords
+    batch_size = int(cfg['data'].get('batch_size') or 256)
+    domain = cfg['data'].get('domain') or _domain_from_norms(data.norms)
+    run_dir = cfg['trainer'].get('run_dir')
+    class_names = data.targets.class_names
+    # the ceiling hashes ONLY what the model consumes: its encoding.fields
+    # (default: every token field) + position — an x field the model never
+    # sees must not make two fixes count as distinguishable
+    encoding = (cfg.get('model') or {}).get('encoding') or {}
+    consumed = tuple(encoding.get('fields') or TOKEN_FIELDS) + ('lat', 'lon')
+    seen = {}
+    for split, idx in data.splits.items():
+        idx = np.asarray(idx)
+        if not len(idx):
+            continue
+        key = idx.tobytes()
+        if key in seen:
+            RUN_LOG.info(f"  [predictions] {split}: same fixes as "
+                         f"{seen[key]!r} — one sweep covers both")
+            continue
+        seen[key] = split
+        preds, trues, n_st = _sweep_split(state, data, idx, batch_size)
+        correct = preds == trues
+        sids = np.asarray(fixes['sid'])[idx]
+        report = input_collisions(data.loader, idx, fields=consumed)
+
+        if run_dir:
+            out = Path(run_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            storm_names = (dict(zip(sids.tolist(),
+                                    np.asarray(fixes['name'])[idx]))
+                           if 'name' in fixes else None)
+            _write_predictions_csv(out / f'predictions_{split}.csv',
+                                   fixes, idx, preds, trues, n_st,
+                                   class_names)
+            _write_per_storm_csv(out / f'per_storm_accuracy_{split}.csv',
+                                 sids, correct, storm_names)
+            (out / f'identifiability_{split}.json').write_text(json.dumps(
+                {k: report[k] for k in ('n_fixes', 'n_unique_inputs',
+                                        'n_unmemorisable', 'max_accuracy',
+                                        'conflicts')}, indent=2))
+            # the records belong ON the run page, not just the run_dir
+            for stem, kind in ((f'predictions_{split}', 'csv'),
+                               (f'per_storm_accuracy_{split}', 'csv'),
+                               (f'identifiability_{split}', 'json')):
+                logger.log_artifact(stem, out / f'{stem}.{kind}',
+                                    artifact_type='predictions')
+        acc = float(correct.mean())
+        logger.log_metrics(
+            {f'{split}/memorisation_ceiling': float(report['max_accuracy']),
+             f'{split}/n_unmemorisable': int(report['n_unmemorisable']),
+             f'{split}/n_unique_inputs': int(report['n_unique_inputs'])},
+            step=global_step)
+        per_storm = _per_storm(sids, correct)
+        hardest = ', '.join(f'{s} {a:.2f}' for s, a, _ in per_storm[:5])
+        RUN_LOG.info(
+            f"  [predictions] {split}: {int(correct.sum())}/{len(idx)} "
+            f"correct ({acc:.4f})  ceiling {report['max_accuracy']:.4f} "
+            f"({report['n_unmemorisable']} unmemorisable)  "
+            f"storms fully memorised "
+            f"{sum(a == 1.0 for _, a, _ in per_storm)}/{len(per_storm)}  "
+            f"hardest: {hardest}")
+        fig = accuracy_hexbin_figure(
+            np.asarray(fixes['lon'])[idx], np.asarray(fixes['lat'])[idx],
+            correct, domain=domain, basemap=basemap,
+            title=f'{split} prediction correctness — step {global_step}  '
+                  f'accuracy {acc:.4f} (ceiling '
+                  f'{report["max_accuracy"]:.4f})')
+        _emit(fig, 'accuracy_hexbin', split, global_step, logger, run_dir)
+
+
+# ---------------------------------------------------------------------------
 # end_of_run — post-trainer.test() figures (train.py calls this once)
 # ---------------------------------------------------------------------------
 
 def end_of_run(cfg, data, logger, state, global_step,
                n_frames=8, basemap=True):
-    """Test confusion matrix + storm sequence for the best state.
+    """Test confusion matrix + prediction records + storm sequences for
+    the best state.
 
     Runs after trainer.test(): (1) the confusion_matrix callback on the
-    test split, if a test stream exists; (2) for each sid named in the
+    test split, if a test stream exists; (1b) the per-fix prediction
+    records (_prediction_records: CSVs + per-storm accuracy + spatial
+    accuracy hexbin) for every distinct split; (2) for each sid named in the
     data yaml's ``storm_panels: {test: ...}`` knob (sid | [sids] |
     'random' -> one random sid), the sid's fixes — from the test split,
     or the train split when no test split exists (memorise) — are
@@ -276,6 +479,8 @@ def end_of_run(cfg, data, logger, state, global_step,
     if 'test' in data.streams:
         CALLBACKS.get('confusion_matrix', ctx=ctx, split='test')(
             state, 0, global_step)
+    if data.loader is not None:
+        _prediction_records(cfg, data, logger, state, global_step, basemap)
 
     sel = (ctx['storm_panels'] or {}).get('test')
     if sel is None or data.loader is None:

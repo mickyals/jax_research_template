@@ -358,6 +358,22 @@ class TestConfusionMatrixFigure:
         assert [t.get_text() for t in ax.get_xticklabels()] == ['0', '1']
         plt.close('all')
 
+    @patch("matplotlib.pyplot.show")
+    def test_normalise_row_percentages(self, mock_show):
+        fig = confusion_matrix_figure(np.array([[3., 0.], [1., 2.]]),
+                                      normalise=True)
+        assert {t.get_text() for t in fig.axes[0].texts} \
+            == {'100.0', '0.0', '33.3', '66.7'}
+        plt.close('all')
+
+    @patch("matplotlib.pyplot.show")
+    def test_normalise_zero_row_stays_zero(self, mock_show):
+        fig = confusion_matrix_figure(np.array([[0., 0.], [1., 3.]]),
+                                      normalise=True)
+        assert {t.get_text() for t in fig.axes[0].texts} \
+            == {'0.0', '25.0', '75.0'}
+        plt.close('all')
+
 
 # ---------------------------------------------------------------------------
 # plot_mollweide

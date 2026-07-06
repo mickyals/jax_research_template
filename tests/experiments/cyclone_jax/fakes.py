@@ -51,14 +51,18 @@ class FakeLogger:
 
 
 class FakeLoader:
-    """loader surface storm_panel/end_of_run touch: fixes['sid'/'time'],
+    """loader surface storm_panel/end_of_run touch: fixes['sid'/'time'/
+    'lat'/'lon'] (coords feed the panel trail + prediction records),
     build(i) -> collatable sample, inputs.pad_to."""
 
     def __init__(self, sids=('S0', 'S1', 'S2', 'S3'), times=None):
         if times is None:
             times = [np.datetime64('2024-07-01T00') + np.timedelta64(6 * i, 'h')
                      for i in range(len(sids))]
-        self.fixes = {'sid': np.asarray(sids), 'time': np.asarray(times)}
+        n = len(sids)
+        self.fixes = {'sid': np.asarray(sids), 'time': np.asarray(times),
+                      'lat': np.float32(13.0 + 0.5 * np.arange(n)),
+                      'lon': np.float32(-58.0 - 0.5 * np.arange(n))}
         self.inputs = SimpleNamespace(pad_to=8)
 
     def build(self, i):

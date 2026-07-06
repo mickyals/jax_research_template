@@ -176,6 +176,15 @@ class TestAddMapFeatures:
         assert _count_feature_artists(ax) == 5
         plt.close(fig)
 
+    def test_zorder_applied_to_linework(self):
+        # re-drawing coastlines ABOVE a data layer (accuracy hexbin path)
+        fig, ax = plt.subplots(subplot_kw={"projection": ccrs.PlateCarree()})
+        add_map_features(ax, zorder=3)
+        artists = [c for c in ax.get_children()
+                   if isinstance(c, FeatureArtist)]
+        assert artists and all(a.get_zorder() == 3 for a in artists)
+        plt.close(fig)
+
 
 # ---------------------------------------------------------------------------
 # plot_scatter_overlay(geo=...)

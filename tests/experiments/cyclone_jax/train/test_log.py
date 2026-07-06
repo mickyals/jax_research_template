@@ -101,16 +101,20 @@ class TestConfusionMatrixCallback:
         assert m[f'val/class_acc/{names[0]}'] == pytest.approx(0.5)
         assert m[f'val/class_acc/{names[1]}'] == pytest.approx(1.0)
 
-    def test_figure_logged_and_stills_saved(self, tmp_path):
+    def test_count_and_pct_figures_logged_with_stills(self, tmp_path):
         logger = self._run(str(tmp_path))
-        assert logger.figures == [('val/confusion_matrix', 10)]
+        assert logger.figures == [('val/confusion_matrix', 10),
+                                  ('val/confusion_matrix_pct', 10)]
         stills = sorted(p.name for p in (tmp_path / 'figures').iterdir())
-        assert stills == ['confusion_matrix_val_step0000010.png',
+        assert stills == ['confusion_matrix_pct_val_step0000010.png',
+                          'confusion_matrix_pct_val_step0000010.svg',
+                          'confusion_matrix_val_step0000010.png',
                           'confusion_matrix_val_step0000010.svg']
 
     def test_no_run_dir_still_logs(self):
         logger = self._run(None)
-        assert logger.figures == [('val/confusion_matrix', 10)]
+        assert logger.figures == [('val/confusion_matrix', 10),
+                                  ('val/confusion_matrix_pct', 10)]
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +139,9 @@ class TestStormPanelCallback:
         # class index 2 in class_set (3..8) = category 5 = 'Cat 2'
         title, = logger.titles
         assert 'true' in title and 'pred Cat 2' in title
-        assert 'n=3' in title and 'resolvable' in title
+        # FakeLoader ids -1/1/0 -> one station per source
+        assert 'land 1 | marine 1 | upper 1  (total 3)' in title
+        assert 'resolvable' in title
         stills = {p.suffix for p in (tmp_path / 'figures').iterdir()}
         assert stills == {'.svg', '.png'}
 
@@ -268,30 +274,37 @@ class TestEndOfRun:
 
     def test_test_cm_logged(self):
         logger = self._run()
-        (m, step), = logger.metrics
+        m, step = logger.metrics[0]        # CM scalars logged first
         assert step == 99 and 'test/macro_precision' in m
         assert ('test/confusion_matrix', 99) in logger.figures
 
     def test_no_test_stream_skips_cm(self):
         logger = self._run(with_test_stream=False,
                            storm_panels={'test': 'B'})
-        assert logger.metrics == []
+        # no CM scalars — only the prediction-record identifiability ones
+        assert not any('test/macro_precision' in m
+                       for m, _ in logger.metrics)
+        assert any('test/memorisation_ceiling' in m
+                   for m, _ in logger.metrics)
 
     def test_no_storm_panels_test_key_skips_sequence(self):
         logger = self._run(storm_panels={'val': 'A'})
-        assert [t for t, _ in logger.figures] == ['test/confusion_matrix']
+        assert [t for t, _ in logger.figures] == [
+            'test/confusion_matrix', 'test/confusion_matrix_pct',
+            'test/accuracy_hexbin']
 
     def test_sequence_gif_and_artifact(self, tmp_path):
         logger = self._run(run_dir=str(tmp_path), storm_panels={'test': 'B'})
         gif = tmp_path / 'figures' / 'storm_sequence_B.gif'
         assert gif.exists()
-        assert logger.artifacts == [('storm_sequence_B', str(gif), 'figure')]
+        assert [a for a in logger.artifacts if a[2] == 'figure']             == [('storm_sequence_B', str(gif), 'figure')]
 
     def test_stills_first_mid_last_time_ordered(self, tmp_path):
         logger = self._run(run_dir=str(tmp_path), storm_panels={'test': 'B'})
         seq = [t for t in logger.titles if t.startswith('B')]
         assert len(seq) == 3                       # 3 B-fixes -> 3 stills
-        hours = [t.split()[1][11:13] for t in seq]  # HH of the iso time
+        # title head: "B (2024)  2024-07-01T..Z" -> HH of the iso time
+        hours = [t.split()[2][11:13] for t in seq]
         assert hours == ['00', '06', '18']
 
     def test_no_run_dir_no_gif_but_stills_logged(self):
@@ -309,7 +322,7 @@ class TestEndOfRun:
     def test_sid_list_renders_each(self, tmp_path):
         logger = self._run(run_dir=str(tmp_path),
                            storm_panels={'test': ['A', 'B']})
-        names = [n for n, _, _ in logger.artifacts]
+        names = [n for n, _, t in logger.artifacts if t == 'figure']
         assert names == ['storm_sequence_A', 'storm_sequence_B']
 
     def test_random_picks_one_test_sid(self):
@@ -339,7 +352,109 @@ class TestEndOfRun:
         # stills tagged with the split they actually came from
         assert sum(t.startswith('train/storm_sequence_B') for t, _ in
                    logger.figures) == 3
-        assert logger.metrics == []             # still no test CM
+        # still no test CM — only prediction-record identifiability scalars
+        assert not any('test/macro_precision' in m
+                       for m, _ in logger.metrics)
+
+
+# ---------------------------------------------------------------------------
+# end_of_run — per-fix prediction records / per-storm accuracy / hexbin
+# ---------------------------------------------------------------------------
+
+class TestPredictionRecords:
+    """Fix layout: sids B/A/B/B/A, targets i % N_CLS = 0..4; _dual_state
+    predicts class 2 everywhere -> only fix 2 (a B fix) is correct."""
+
+    def _run(self, run_dir=None, splits=None):
+        data = _bundle({}, loader=FakeLoader(('B', 'A', 'B', 'B', 'A')),
+                       splits=splits if splits is not None
+                       else {'test': np.arange(5)})
+        logger = FakeLogger()
+        cfg = {'data': {'domain': DOMAIN, 'batch_size': 2}, 'model': None,
+               'trainer': {'run_dir': run_dir}}
+        end_of_run(cfg, data, logger, _dual_state(pred=2), global_step=5,
+                   basemap=False)
+        return logger
+
+    def _rows(self, path):
+        import csv
+        return list(csv.DictReader(path.read_text().splitlines()))
+
+    def test_predictions_csv_identifies_failed_fixes(self, tmp_path):
+        self._run(str(tmp_path))
+        rows = self._rows(tmp_path / 'predictions_test.csv')
+        assert [r['sid'] for r in rows] == ['B', 'A', 'B', 'B', 'A']
+        assert [r['correct'] for r in rows] == ['0', '0', '1', '0', '0']
+        assert rows[2]['true'] == 'Cat 2' and rows[2]['pred'] == 'Cat 2'
+        assert rows[0]['pred'] == 'Cat 2'   # every miss names its pred
+        assert rows[0]['n_stations'] == '3'
+        assert rows[0]['lat'] and rows[0]['time']    # identity present
+
+    def test_per_storm_accuracy_worst_first(self, tmp_path):
+        self._run(str(tmp_path))
+        rows = self._rows(tmp_path / 'per_storm_accuracy_test.csv')
+        assert [(r['sid'], r['n_fixes'], r['accuracy']) for r in rows] \
+            == [('A', '2', '0.0000'), ('B', '3', '0.3333')]
+
+    def test_hexbin_logged_even_without_run_dir(self):
+        logger = self._run(None)
+        assert ('test/accuracy_hexbin', 5) in logger.figures
+        assert logger.artifacts == []          # no files -> no artifacts
+
+    def test_records_logged_as_run_artifacts(self, tmp_path):
+        logger = self._run(str(tmp_path))
+        assert [(n, t) for n, _, t in logger.artifacts] == [
+            ('predictions_test', 'predictions'),
+            ('per_storm_accuracy_test', 'predictions'),
+            ('identifiability_test', 'predictions')]
+
+    def test_identical_splits_swept_once(self, tmp_path):
+        """memorise: val is a copy of train — one sweep, one CSV pair."""
+        idx = np.arange(5)
+        logger = self._run(str(tmp_path),
+                           splits={'train': idx, 'val': idx.copy()})
+        assert (tmp_path / 'predictions_train.csv').exists()
+        assert (tmp_path / 'per_storm_accuracy_train.csv').exists()
+        assert not (tmp_path / 'predictions_val.csv').exists()
+        assert [t for t, _ in logger.figures] == ['train/accuracy_hexbin']
+
+    def test_identifiability_ceiling_logged(self, tmp_path):
+        """FakeLoader inputs are unique per fix -> ceiling 1.0, logged to
+        the metrics backend and recorded as json."""
+        import json
+        logger = self._run(str(tmp_path))
+        (m, step), = [e for e in logger.metrics
+                      if 'test/memorisation_ceiling' in e[0]]
+        assert step == 5
+        assert m['test/memorisation_ceiling'] == 1.0
+        assert m['test/n_unmemorisable'] == 0
+        assert m['test/n_unique_inputs'] == 5
+        rep = json.loads(
+            (tmp_path / 'identifiability_test.json').read_text())
+        assert rep['max_accuracy'] == 1.0 and rep['conflicts'] == []
+
+    def test_conflicting_inputs_cap_the_ceiling(self, tmp_path):
+        """All five fixes present the SAME input but different targets:
+        majority group size 1 -> ceiling 1/5."""
+        class CollidingLoader(FakeLoader):
+            def build(self, i):
+                s = super().build(0)               # identical x for all i
+                s['y']['target'] = np.int32(i % N_CLS)
+                s['y']['sid'] = str(self.fixes['sid'][i])
+                return s
+
+        data = _bundle({}, loader=CollidingLoader(('B', 'A', 'B', 'B', 'A')),
+                       splits={'test': np.arange(5)})
+        logger = FakeLogger()
+        cfg = {'data': {'domain': DOMAIN, 'batch_size': 2}, 'model': None,
+               'trainer': {'run_dir': str(tmp_path)}}
+        end_of_run(cfg, data, logger, _dual_state(pred=2), global_step=5,
+                   basemap=False)
+        (m, _), = [e for e in logger.metrics
+                   if 'test/memorisation_ceiling' in e[0]]
+        assert m['test/memorisation_ceiling'] == pytest.approx(0.2)
+        assert m['test/n_unmemorisable'] == 4
+        assert m['test/n_unique_inputs'] == 1
 
 
 # ---------------------------------------------------------------------------

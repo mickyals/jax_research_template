@@ -162,12 +162,45 @@ class TestHelpers:
 
 class TestMain:
 
+    @pytest.fixture(autouse=True)
+    def _no_basemap(self, monkeypatch):
+        # end_of_run renders the accuracy hexbin: force plain axes so
+        # cartopy never draws (Natural Earth downloads at render time)
+        import experiments.cyclone_jax.visualise.figures as figs
+        monkeypatch.setattr(figs, 'cartopy_available', lambda: False)
+
     def test_fit_runs_and_checkpoints(self, library_root, tmp_path):
         entry = _write_configs(tmp_path / 'configs', library_root)
         trainer, test_metrics = main(entry, config_dir=tmp_path / 'configs')
         assert np.isfinite(trainer._best_metric_value)
         assert (trainer._checkpoint_dir / 'best').exists()
         assert test_metrics == {}               # stratified split: no test
+
+    def test_prediction_records_written(self, library_root, tmp_path):
+        """end_of_run: per-fix predictions + per-storm accuracy CSVs for
+        the distinct splits (stratified: val == train, swept once)."""
+        entry = _write_configs(tmp_path / 'configs', library_root)
+        main(entry, config_dir=tmp_path / 'configs')
+        run = tmp_path / 'configs' / 'run'
+        header, *rows = (run / 'predictions_train.csv').read_text() \
+            .strip().splitlines()
+        assert header == ('sid,name,time,lat,lon,n_stations,'
+                          'true,pred,correct')
+        assert len(rows) > 0
+        assert not (run / 'predictions_val.csv').exists()
+        assert (run / 'per_storm_accuracy_train.csv').exists()
+
+    def test_run_log_written_before_tables(self, library_root, tmp_path):
+        """Logging begins first: every banner line lands in
+        run_dir/logs/run.log, not just the terminal."""
+        entry = _write_configs(tmp_path / 'configs', library_root)
+        main(entry, config_dir=tmp_path / 'configs')
+        text = (tmp_path / 'configs' / 'run' / 'logs' / 'run.log') \
+            .read_text(encoding='utf-8')
+        assert '[run] tiny-tiny-s0' in text
+        assert '[data] train:' in text
+        assert '[model] X per sample' in text
+        assert 'params' in text
 
     def test_fit_runs_with_term_list_loss(self, library_root, tmp_path):
         """End-to-end: model term (l1_params) through the real train path."""
@@ -206,7 +239,9 @@ class TestMain:
         main(entry, config_dir=tmp_path / 'configs')
         out = capsys.readouterr().out
         assert '[data] train:' in out
+        assert '[data] channels (' in out      # the resolved union, named
         assert '[norm] standardise' in out
+        assert '[model] X per sample' in out    # what enters the model
         assert '[model] mlp' in out and 'params' in out
         assert 'flatten_mlp' in out.lower() or 'Dense' in out  # tabulate
 

@@ -72,6 +72,7 @@ def add_map_features(
     fill: bool = False,
     land_color: str = "#f2efe9",
     ocean_color: str = "#dceaf3",
+    zorder: Optional[float] = None,
 ):
     """Add coastline, country-border, and state/province linework to ``ax``.
 
@@ -98,6 +99,10 @@ def add_map_features(
         ``ocean_color``.
     land_color, ocean_color : str
         Face colours used when ``fill=True``.
+    zorder : float, optional
+        Explicit zorder for the LINEWORK (fill keeps cartopy's default
+        low zorder). Use to re-draw coastlines ABOVE a data layer that
+        covers the map (e.g. a hexbin field).
 
     Returns
     -------
@@ -107,10 +112,11 @@ def add_map_features(
     if fill:
         ax.add_feature(cfeature.LAND.with_scale(scale), facecolor=land_color)
         ax.add_feature(cfeature.OCEAN.with_scale(scale), facecolor=ocean_color)
+    line_kwargs = {} if zorder is None else {"zorder": zorder}
     for feature in (cfeature.COASTLINE, cfeature.BORDERS, cfeature.STATES):
         ax.add_feature(
             feature.with_scale(scale),
-            edgecolor=color, facecolor="none", linewidth=lw,
+            edgecolor=color, facecolor="none", linewidth=lw, **line_kwargs,
         )
     return ax
 

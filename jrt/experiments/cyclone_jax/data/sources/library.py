@@ -185,6 +185,8 @@ def get_fixes(cyc_vol, sshs_min=TROPICAL_STORM, drop_subtropical=False):
         'sid'        : np.asarray(obs['sid'])[m],
         CYC_SSHS     : np.asarray(obs[CYC_SSHS])[m],
     }
+    if 'name' in obs:        # human storm name (v2 volumes) — plot titles
+        fixes['name'] = np.asarray(obs['name'])[m]
     for k in CYC_TARGETS:
         if k in obs:
             fixes[k] = np.asarray(obs[k])[m]

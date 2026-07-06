@@ -579,6 +579,7 @@ def confusion_matrix_figure(
     cm: np.ndarray,
     class_names: Optional[list[str]] = None,
     title: str = "confusion matrix",
+    normalise: bool = False,
 ) -> plt.Figure:
     """(C, C) counts (rows = true, cols = predicted) -> annotated heatmap.
 
@@ -596,19 +597,29 @@ def confusion_matrix_figure(
         Tick labels for both axes; class indices when omitted.
     title : str
         Figure title.
+    normalise : bool
+        Row-normalise to percentages (each true-class row sums to 100;
+        all-zero rows stay 0). Cells annotate ``.1f``, colorbar 'row %',
+        colour scale fixed 0..100 so figures compare across steps/runs.
 
     Returns
     -------
     plt.Figure
     """
-    cm = np.asarray(cm)
+    cm = np.asarray(cm, dtype=float)
     n = cm.shape[0]
     names = list(class_names) if class_names else [str(i) for i in range(n)]
+    fmt, cbar, vmin, vmax = ".0f", "count", None, None
+    if normalise:
+        row = cm.sum(axis=1, keepdims=True)
+        cm = np.divide(100.0 * cm, row, out=np.zeros_like(cm),
+                       where=row > 0)
+        fmt, cbar, vmin, vmax = ".1f", "row %", 0.0, 100.0
     return plot_heatmap(
         cm, row_labels=names, col_labels=names,
         xlabel="predicted", ylabel="true", cmap="Blues",
-        title=title, colorbar_label="count",
-        annotate=True, fmt=".0f",
+        title=title, colorbar_label=cbar, vmin=vmin, vmax=vmax,
+        annotate=True, fmt=fmt,
     )
 
 

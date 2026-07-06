@@ -20,11 +20,18 @@ The logger is built HERE, not inside the Trainer, so the model config's
 wandb `tags` reach the run; trainer.logger_kwargs (project, offline, ...)
 passes through. patience_metric train/loss is supported by the Trainer
 (memorisation gate: watch the train loss go to ~0).
+
+LOGGING BEGINS FIRST: before anything prints the banner/tabulate/data
+metrics, _setup_run_logging wires the 'cyclone_jax.run' logger to stdout
+AND run_dir/logs/run.log — every startup line (and the end-of-run
+prediction summaries) is on disk, not just in the terminal scrollback.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -40,6 +47,31 @@ from experiments.cyclone_jax.data.interface import build_data
 from experiments.cyclone_jax.models import build_model
 from experiments.cyclone_jax.train.log import build_callbacks, end_of_run
 from experiments.cyclone_jax.train.metrics import build_metrics_fns
+
+
+def _setup_run_logging(run_dir):
+    """Wire the run's text record BEFORE anything prints: the
+    'cyclone_jax.run' logger (shared with train/log.py's RUN_LOG) gets a
+    plain stdout handler plus, when there is a run_dir, a
+    run_dir/logs/run.log file handler (utf-8 — the tabulate box glyphs).
+    Handlers are reset each call so repeated main() calls (tests) never
+    double-log."""
+    log = logging.getLogger('cyclone_jax.run')
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    for h in list(log.handlers):
+        h.close()
+        log.removeHandler(h)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(logging.Formatter('%(message)s'))
+    log.addHandler(sh)
+    if run_dir:
+        log_dir = Path(run_dir) / 'logs'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_dir / 'run.log', encoding='utf-8')
+        fh.setFormatter(logging.Formatter('%(asctime)s  %(message)s'))
+        log.addHandler(fh)
+    return log
 
 
 def build_trainer_config(cfg: dict) -> dict:
@@ -125,52 +157,62 @@ def write_run_records(cfg: dict, data, run_dir) -> None:
         (run / 'norm_stats.json').write_text(
             json.dumps(data.norms.to_json(), indent=2))
     (run / 'data_manifest.json').write_text(
-        json.dumps({'splits': _split_summary(data), 'config': cfg},
+        json.dumps({'splits': _split_summary(data),
+                    'sources': list(data.inputs.sources),
+                    'channels': list(data.inputs.channels),   # the RESOLVED
+                    'config': cfg},                           # union
                    indent=2))
 
 
-def print_startup_banner(cfg, data, model, seed) -> None:
+def print_startup_banner(cfg, data, model, seed, log=None) -> None:
     """Pre-tqdm run summary — the experiment side; the jrt Trainer prints
-    its own block (_print_startup_summary) after this.
+    its own block (_print_startup_summary) after this. Emits through the
+    run logger (stdout + run.log) — logging begins before any table.
 
     Lines: run name, scenario + sources, per-split size/class counts,
-    normalisation method + coord bounds, model name + param count
-    (jax.eval_shape — no FLOPs) + the nn.tabulate architecture table.
+    normalisation method + coord bounds, per-sample X field shapes (what
+    actually enters the model), model name + param count (jax.eval_shape
+    — no FLOPs) + the nn.tabulate architecture table.
     """
     import jax
     import flax.linen as nn
     from experiments.cyclone_jax.data.batching import collate
 
+    log = log or logging.getLogger('cyclone_jax.run')
     names = cfg.get('names') or {}
-    print(f"  [run] {names.get('model')}-{names.get('data')}-s{seed}")
+    log.info(f"  [run] {names.get('model')}-{names.get('data')}-s{seed}")
     srcs = '+'.join(cfg['data'].get('sources') or ('land', 'marine'))
-    print(f"  [data] scenario {names.get('data')!r}  sources {srcs}")
+    log.info(f"  [data] scenario {names.get('data')!r}  sources {srcs}")
+    ch = data.inputs.channels
+    log.info(f"  [data] channels ({len(ch)}): {', '.join(ch)}")
     for name, info in _split_summary(data).items():
-        print(f"  [data] {name}: {info['size']} fixes  "
-              f"{info['class_counts']}")
+        log.info(f"  [data] {name}: {info['size']} fixes  "
+                 f"{info['class_counts']}")
     if data.norms is not None:
         s = data.norms.stats
-        print(f"  [norm] {data.norms.method}  "
-              f"lat [{s['lat']['min']:g}, {s['lat']['max']:g}]  "
-              f"lon [{s['lon']['min']:g}, {s['lon']['max']:g}]")
+        log.info(f"  [norm] {data.norms.method}  "
+                 f"lat [{s['lat']['min']:g}, {s['lat']['max']:g}]  "
+                 f"lon [{s['lon']['min']:g}, {s['lon']['max']:g}]")
     else:
-        print("  [norm] raw (no normalise block)")
+        log.info("  [norm] raw (no normalise block)")
 
     idx = next((v for v in data.splits.values() if len(v)), None)
     if idx is None:      # all splits empty — main()'s stream check reports
         return
     X = collate([data.loader.build(int(idx[0]))], data.inputs.pad_to)['X']
+    log.info("  [model] X per sample  "
+             + '  '.join(f"{k} {tuple(v.shape[1:])}" for k, v in X.items()))
     rng = jax.random.PRNGKey(seed)
     shapes = jax.eval_shape(lambda x: model.init(rng, x, train=False), X)
     n_params = sum(int(np.prod(p.shape))
                    for p in jax.tree_util.tree_leaves(shapes))
-    print(f"  [model] {cfg['model'].get('name')}  {n_params:,} params")
+    log.info(f"  [model] {cfg['model'].get('name')}  {n_params:,} params")
     import warnings
     with warnings.catch_warnings():
         # flax summary.py calls jnp.shape on non-array module attributes
         # (activation callables) — its noise, not ours
         warnings.simplefilter('ignore', DeprecationWarning)
-        print(nn.tabulate(model, rng)(X, train=False))
+        log.info(nn.tabulate(model, rng)(X, train=False))
 
 
 def main(train_yaml, config_dir=None):
@@ -183,11 +225,15 @@ def main(train_yaml, config_dir=None):
 
     data = build_data(cfg['data'], seed=seed)
     model, tags = build_model(cfg['model'], data.targets, seed=seed)
-    print_startup_banner(cfg, data, model, seed)
+
+    # logging first: run.log + backend logger exist BEFORE the banner,
+    # tabulate table or any data metric prints
+    run_log = _setup_run_logging(cfg['trainer'].get('run_dir'))
+    logger = build_logger(cfg, tags, norms=data.norms)
+    print_startup_banner(cfg, data, model, seed, log=run_log)
 
     if cfg['trainer'].get('run_dir'):
         write_run_records(cfg, data, cfg['trainer']['run_dir'])
-    logger = build_logger(cfg, tags, norms=data.norms)
     trainer = Trainer(model, build_metrics_fns(cfg['trainer']),
                       build_trainer_config(cfg), logger=logger)
 

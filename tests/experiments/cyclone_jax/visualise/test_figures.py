@@ -9,11 +9,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from experiments.cyclone_jax.visualise.figures import (
-    SOURCE_STYLE, class_colour, save_gif,
-    storm_panel_figure, storm_sequence_figures,
+    SOURCE_STYLE, SSHS_COLORS, accuracy_hexbin_figure, class_colour,
+    save_gif, storm_panel_figure, storm_sequence_figures,
 )
 
 N_CLS = 6
+CLASS_NAMES = ('Tropical Storm', 'Cat 1', 'Cat 2', 'Cat 3', 'Cat 4', 'Cat 5')
 DOMAIN = {'lat': [0, 30], 'lon': [-100, -30]}
 
 
@@ -49,6 +50,54 @@ class TestStormPanel:
         assert ax.get_title() == 'TEST 2024  true 2 vs pred 4'
         assert tuple(ax.get_xlim()) == (-100, -30)      # domain extent
         assert ax.get_legend() is None                  # no ids -> no legend
+        assert fig.legends == []              # no class_names -> no legend
+        plt.close('all')
+
+    def test_class_names_switch_to_sshs_palette(self):
+        fig = storm_panel_figure(
+            np.array([-60.0]), np.array([12.0]), -58.0, 13.0,
+            true_class=0, pred_class=5, n_classes=N_CLS,
+            class_names=CLASS_NAMES, basemap=False)
+        ax = fig.axes[0]
+        _, ring, star = ax.collections[:3]
+        assert np.allclose(star.get_facecolor()[0], matplotlib.colors
+                           .to_rgba(SSHS_COLORS['Tropical Storm']))
+        assert np.allclose(ring.get_edgecolor()[0], matplotlib.colors
+                           .to_rgba(SSHS_COLORS['Cat 5']))
+        plt.close('all')
+
+    def test_unknown_class_name_falls_back_to_viridis(self):
+        assert (class_colour(1, N_CLS, ('weird', 'names') + CLASS_NAMES[2:])
+                == plt.get_cmap('viridis')(1 / (N_CLS - 1)))
+
+    def test_class_legend_separate_from_source_legend(self):
+        fig = storm_panel_figure(
+            np.array([-60.0]), np.array([12.0]), -58.0, 13.0,
+            true_class=0, pred_class=1, n_classes=N_CLS,
+            class_names=CLASS_NAMES, station_id=np.float32([-1]),
+            basemap=False)
+        ax = fig.axes[0]
+        # sources on the axes, classes on the FIGURE — never one shared box
+        assert [t.get_text() for t in ax.get_legend().get_texts()] == ['land']
+        (cls_leg,) = fig.legends
+        assert ([t.get_text() for t in cls_leg.get_texts()]
+                == list(CLASS_NAMES))
+        plt.close('all')
+
+    def test_track_draws_grey_trail(self):
+        fig = storm_panel_figure(
+            np.array([-60.0]), np.array([12.0]), -58.0, 13.0,
+            true_class=0, pred_class=0, n_classes=N_CLS, basemap=False,
+            track_lon=np.array([-61.0, -59.5, -58.0]),
+            track_lat=np.array([11.0, 12.0, 13.0]))
+        (trail,) = fig.axes[0].lines
+        assert trail.get_xdata().shape == (3,)
+        assert trail.get_color() == 'grey'
+        plt.close('all')
+
+    def test_no_track_no_lines(self):
+        fig = _panel()
+        assert len(fig.axes[0].lines) == 0
         plt.close('all')
 
     def test_no_stations_still_draws(self):
@@ -89,6 +138,31 @@ class TestStormPanel:
         labels = [t.get_text() for t in
                   fig.axes[0].get_legend().get_texts()]
         assert labels == ['id 7']
+        plt.close('all')
+
+
+class TestAccuracyHexbin:
+
+    def test_bins_hold_mean_correctness(self):
+        # two far-apart clusters: one all-correct, one half-correct
+        lon = np.array([-80.0, -80.0, -80.0, -40.0, -40.0])
+        lat = np.array([10.0, 10.0, 10.0, 25.0, 25.0])
+        correct = np.array([1, 1, 1, 1, 0], float)
+        fig = accuracy_hexbin_figure(lon, lat, correct, domain=DOMAIN,
+                                     basemap=False, gridsize=8,
+                                     title='val correctness')
+        ax = fig.axes[0]
+        vals = np.asarray(ax.collections[0].get_array())
+        assert sorted(vals.tolist()) == [0.5, 1.0]      # mean per bin
+        assert ax.get_title() == 'val correctness'
+        assert tuple(ax.get_xlim()) == (-100, -30)      # domain extent
+        plt.close('all')
+
+    def test_bool_correct_and_no_domain(self):
+        fig = accuracy_hexbin_figure(
+            np.array([-60.0, -61.0]), np.array([12.0, 13.0]),
+            np.array([True, False]), basemap=False)
+        assert len(fig.axes[0].collections) == 1
         plt.close('all')
 
 
