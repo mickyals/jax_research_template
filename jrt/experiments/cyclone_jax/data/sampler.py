@@ -118,12 +118,18 @@ class Loader:
         vals = np.full((n, self.inputs.n_channels), np.nan, np.float32)
         ch = self.inputs.channel_index
         schema = SOURCE_SCHEMAS[s]
+        # channels the yaml's `channels:` filtered out are simply skipped
         for col, channel in schema.direct.items():
-            vals[:, ch[channel]] = np.asarray(obs[col][lo:hi], np.float32)
+            if channel in ch:
+                vals[:, ch[channel]] = np.asarray(obs[col][lo:hi],
+                                                  np.float32)
         for d in schema.derived:
+            if not any(c in ch for c in d.channels):
+                continue
             cols = (np.asarray(obs[c][lo:hi]) for c in d.columns)
             for channel, arr in zip(d.channels, d.compute(*cols)):
-                vals[:, ch[channel]] = arr
+                if channel in ch:
+                    vals[:, ch[channel]] = arr
         if self.norms is not None:
             vals = self.norms.obs(vals)      # pre-fill: zero-fill == mean
         vals, missing = build_missingness(vals)

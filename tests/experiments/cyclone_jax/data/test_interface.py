@@ -31,6 +31,13 @@ class TestBuildData:
         assert set(data.splits) == {'all'}          # no split block
         assert set(data.streams) == {'all'}
 
+    def test_channels_subset_builds(self, library_root):
+        ch = ['slp', 'air_temp', 'dewpoint', 'u_wind', 'v_wind']
+        data = build_data(_cfg(library_root, channels=ch))
+        assert data.inputs.channels == tuple(ch)
+        x = data.loader.build(0)['x']
+        assert x['obs'].shape[1] == 5 and x['missing'].shape[1] == 5
+
     def test_year_split(self, library_root):
         data = build_data(_cfg(
             library_root,

@@ -11,7 +11,7 @@ import pytest
 
 from experiments.cyclone_jax.data.inputs import (
     CHANNEL_ORDER, DEFAULT_SOURCE_ID, SOURCE_SCHEMAS, WIND_UV,
-    InputSpec, resolve_input, union_channels,
+    InputSpec, resolve_input, select_channels, union_channels,
 )
 
 
@@ -110,6 +110,40 @@ class TestResolveInput:
         spec = resolve_input(_cfg())
         with pytest.raises(dataclasses.FrozenInstanceError):
             spec.pad_to = 64
+
+
+class TestChannelSelection:
+
+    def test_channels_key_filters_the_union(self):
+        spec = resolve_input(_cfg(channels=['slp', 'u_wind', 'v_wind']))
+        assert spec.channels == ('slp', 'u_wind', 'v_wind')
+        assert spec.n_channels == 3
+
+    def test_yaml_order_does_not_matter(self):
+        # result keeps CANONICAL order regardless of listing order
+        assert select_channels(('land', 'marine'),
+                               ['v_wind', 'slp', 'u_wind']) \
+            == ('slp', 'u_wind', 'v_wind')
+
+    def test_full_union_listed_explicitly_is_identity(self):
+        spec = resolve_input(_cfg(channels=list(CHANNEL_ORDER)))
+        assert spec.channels == CHANNEL_ORDER
+
+    def test_channel_outside_source_union_raises(self):
+        # land contributes no sst — an all-NaN channel is a config lie
+        with pytest.raises(ValueError, match='sst'):
+            select_channels(('land',), ['slp', 'sst'])
+
+    def test_unknown_channel_raises(self):
+        with pytest.raises(ValueError, match='geopotential'):
+            select_channels(('land', 'marine'), ['slp', 'geopotential'])
+
+    def test_empty_list_raises(self):
+        with pytest.raises(ValueError, match='at least one'):
+            resolve_input(_cfg(channels=[]))
+
+    def test_omitted_key_gives_full_union(self):
+        assert resolve_input(_cfg()).channels == CHANNEL_ORDER
 
 
 class TestInputSpecGuards:

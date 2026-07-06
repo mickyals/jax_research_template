@@ -46,6 +46,39 @@ s['y']   # {'target', 'sid', 'lat', 'lon', 'time'}
 - `y['target']` is what the loss consumes; the identity fields are
   eval/plot metadata, never model input.
 
+## Observation channels (`cfg['channels']`)
+
+What each source can contribute to `x['obs']` (`SOURCE_SCHEMAS`; canonical
+column order = `CHANNEL_ORDER`):
+
+| channel | land | marine | upper (deferred) |
+|---|---|---|---|
+| `station_pressure` | ✓ | — | — |
+| `slp` | ✓ | ✓ | — |
+| `air_temp` | ✓ | ✓ | ✓ |
+| `dewpoint` | ✓ | ✓ | ✓ |
+| `sst` | — | ✓ | — |
+| `u_wind` / `v_wind` | derived | derived | stored |
+
+(`u/v` are derived at assembly from `wind_speed` + `wind_dir`; upper joins
+once its pressure-coordinate encoding is designed.)
+
+- The model input is the **union** of the chosen sources' channels, in
+  canonical order; a channel one source lacks rides along as 0 + flag
+  (see Sample schema above).
+- `channels: [name, ...]` in the data yaml filters that union GLOBALLY
+  (one list for all sources — per-source absence is the flag's job).
+  Validated: subset of the sources' union, non-empty; canonical order is
+  kept regardless of listing order.
+- **Source-comparable recipe**: the land∩marine intersection
+  `[slp, air_temp, dewpoint, u_wind, v_wind]` gives the identical
+  5-channel vector across land-only / marine-only / land+marine
+  scenarios (same token width everywhere).
+- The startup banner prints `[data] channels (n): ...` and
+  `data_manifest.json` records the resolved list — every run states what
+  it saw. A channel subset is a NEW scenario: expect the identifiability
+  ceiling (`input_collisions`) to move.
+
 ## Batches
 
 ```python

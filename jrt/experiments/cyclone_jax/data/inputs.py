@@ -140,17 +140,42 @@ class InputSpec:
         return {c: j for j, c in enumerate(self.channels)}
 
 
+def select_channels(sources, selected) -> tuple[str, ...]:
+    """Filter the sources' channel union down to ``selected`` names.
+
+    GLOBAL selection (one list for all sources — per-source absence is
+    already the missingness mask's job): every name must exist in the
+    union the chosen sources contribute, otherwise the channel would be
+    all-NaN and the config is lying about its inputs. The result keeps
+    CANONICAL order regardless of the yaml's listing order.
+    """
+    if not selected:
+        raise ValueError("channels: must name at least one channel — "
+                         "omit the key entirely for the full union.")
+    union = union_channels(sources)
+    bad = set(selected) - set(union)
+    if bad:
+        raise ValueError(f"channels {sorted(bad)} not contributed by "
+                         f"sources {list(sources)} — union: {list(union)}")
+    keep = set(selected)
+    return tuple(c for c in union if c in keep)
+
+
 def resolve_input(config: dict) -> InputSpec:
     """Build the InputSpec from the data config block (configs/data/*.yaml).
 
-    Keys read: sources, selection, max_stations, pad_to, source_id —
-    defaults match the v1 land+marine setup.
+    Keys read: sources, channels, selection, max_stations, pad_to,
+    source_id — defaults match the v1 land+marine setup. ``channels``
+    (optional) restricts the union to an explicit list (see
+    select_channels); omitted = the full union.
     """
     sources = tuple(config.get('sources', ('land', 'marine')))
+    selected = config.get('channels')
     max_stations = config.get('max_stations')
     return InputSpec(
         sources=sources,
-        channels=union_channels(sources),
+        channels=(select_channels(sources, selected)
+                  if selected is not None else union_channels(sources)),
         source_id=dict(config.get('source_id', DEFAULT_SOURCE_ID)),
         selection=config.get('selection', 'all'),
         max_stations=int(max_stations) if max_stations else None,

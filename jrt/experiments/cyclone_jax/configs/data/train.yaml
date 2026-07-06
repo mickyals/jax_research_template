@@ -8,6 +8,11 @@
 root: "E:/Caribbean-Obs"          # shell CYCLONE_JAX_ROOT overrides
 
 sources: [land, marine]           # variants: train_land / train_marine
+# explicit channel list = the sources' full union (the run-record
+# default); trim it to ablate variables. Per-source absence (e.g.
+# sst on land) stays NaN + missing-flag — no per-source selection.
+channels: [station_pressure, slp, air_temp, dewpoint, sst,
+           u_wind, v_wind]
 selection: all
 max_stations: null
 pad_to: 1536

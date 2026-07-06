@@ -32,10 +32,10 @@ CONFIG_DIR = Path(__file__).resolve().parent / 'configs'
 # a shell CUDA_VISIBLE_DEVICES always wins) — device policy, not config.
 TOP_KEYS = {'data', 'model', 'trainer', 'gpu'}
 
-DATA_KEYS = {'root', 'sources', 'selection', 'max_stations', 'pad_to',
-             'target', 'sshs_min', 'class_set', 'drop_subtropical',
-             'source_id', 'timesteps', 'batch_size', 'split',
-             'normalise', 'domain', 'tags', 'storm_panels',
+DATA_KEYS = {'root', 'sources', 'channels', 'selection', 'max_stations',
+             'pad_to', 'target', 'sshs_min', 'class_set',
+             'drop_subtropical', 'source_id', 'timesteps', 'batch_size',
+             'split', 'normalise', 'domain', 'tags', 'storm_panels',
              'num_workers', 'prefetch_factor'}
 
 # storm_panels: per-split storm selection for the storm_panel callback /

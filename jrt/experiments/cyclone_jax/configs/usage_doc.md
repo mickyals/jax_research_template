@@ -22,6 +22,8 @@ configs/
 │   #  multistorm.yaml  the excluded multi-driver fixes as OOD test
 │   #  site overrides: shell CYCLONE_JAX_ROOT / CYCLONE_JAX_NUM_WORKERS
 │   #  beat the yaml root / num_workers (machine properties)
+│   #  channels: filters the sources' union (per-source availability
+│   #  table + source-comparable recipe: data/usage_doc.md)
 ├── models/   # one yaml per model, self-contained + wandb tags:
 │   #  mlp.yaml    StationMLP baseline (activation relu|gelu|silu|leaky_relu,
 │   #              encoding: concat|additive, embedding null = raw coords)

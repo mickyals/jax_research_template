@@ -11,6 +11,10 @@
 root: "E:/Caribbean-Obs"          # shell CYCLONE_JAX_ROOT overrides
 
 sources: [land, marine]
+# explicit channel list = the sources' full union (the run-record
+# default); trim it to ablate variables. Per-source absence (e.g.
+# sst on land) stays NaN + missing-flag — no per-source selection.
+channels: [slp, air_temp, u_wind, v_wind]
 selection: all
 max_stations: null
 pad_to: 1536
@@ -37,7 +41,9 @@ split:
 tags: [memorise, identifiability, y2005-2024]
 
 storm_panels:
-  train: random                   # during-training panel: random fix
+  train: "2024181N09320"          # BERYL 2024 — SAME storm every run, so
+                                  # the panel shows the classification
+                                  # effect across runs, not a lottery
   test:                           # end-of-run sequences (sids from the library)
     - "2024181N09320"             # BERYL 2024
     - "2017242N16333"             # IRMA 2017
