@@ -1,13 +1,15 @@
 # =============================================================================
-# cyclone_jax data scenario: TRAIN — full year-split training
+# cyclone_jax data scenario: TRAIN_LAND — year-split training, LAND only
 # =============================================================================
-# Disjoint year lists; fixes at multi-driver timestamps are EXCLUDED
-# (ambiguous supervision) — they form the multistorm.yaml OOD scenario.
-# !! EDIT the year lists to the library's real coverage before training.
+# Dataset variant of train.yaml (see it for the knobs' semantics): same
+# splits/normalisation, sources restricted to the land network. pad_to
+# stays 1536 across the land / marine / land+marine variants — the MLP
+# input width is pad_to x F (features.flatten), so a shared pad_to keeps
+# the architectures identical (fair comparison) and the jit shape single.
 
 root: "E:/Caribbean-Obs"          # shell CYCLONE_JAX_ROOT overrides
 
-sources: [land, marine]           # variants: train_land / train_marine
+sources: [land]
 selection: all
 max_stations: null
 pad_to: 1536
@@ -22,8 +24,6 @@ timesteps: 1
 
 batch_size: 32
 
-# TRAIN-stream multiprocess assembly (see memorise.yaml for the knobs'
-# semantics). 0 = synchronous; >0 for Linux/fork multi-CPU boxes.
 num_workers: 0                    # shell CYCLONE_JAX_NUM_WORKERS overrides
 prefetch_factor: 2
 
@@ -37,9 +37,8 @@ split:
     val:  [2021, 2022]
     test: [2023, 2024]
 
-tags: [year-split]                # -> wandb, with model tags
+tags: [year-split, land-only]
 
 normalise:
   method: standardise
-  stats: auto                     # computed over THIS train split, saved
-                                  # to run_dir/norm_stats.json
+  stats: auto

@@ -139,6 +139,35 @@ class TestWorkerSharding:
 
 
 # ---------------------------------------------------------------------------
+# Site overrides — machine properties beat the yaml (transfer story:
+# identical configs on every box, the shell names the site)
+# ---------------------------------------------------------------------------
+
+class TestSiteOverrides:
+
+    def test_env_root_overrides_yaml(self, library_root, monkeypatch):
+        monkeypatch.setenv('CYCLONE_JAX_ROOT', str(library_root))
+        data = build_data(_cfg('Z:/nowhere'))       # yaml path never touched
+        assert len(data.loader) > 0
+
+    def test_env_num_workers_overrides_yaml(self, library_root, monkeypatch):
+        monkeypatch.setenv('CYCLONE_JAX_NUM_WORKERS', '3')
+        data = build_data(_cfg(
+            library_root, num_workers=0,
+            split={'strategy': 'stratified', 'n_per_class': 2}))
+        assert data.streams['train']._num_workers == 3
+        assert data.streams['val']._num_workers == 0    # eval stays sync
+
+    def test_empty_env_falls_back_to_yaml(self, library_root, monkeypatch):
+        monkeypatch.setenv('CYCLONE_JAX_ROOT', '')
+        monkeypatch.setenv('CYCLONE_JAX_NUM_WORKERS', '')
+        data = build_data(_cfg(library_root, num_workers=2,
+                               split={'strategy': 'stratified',
+                                      'n_per_class': 2}))
+        assert data.streams['train']._num_workers == 2
+
+
+# ---------------------------------------------------------------------------
 # Streams
 # ---------------------------------------------------------------------------
 

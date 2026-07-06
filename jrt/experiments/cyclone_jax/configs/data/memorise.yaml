@@ -12,9 +12,9 @@
 # train == val every val pass is a full extra sweep of the dataset.
 # Capacity ladder = clone the model yaml at increasing hidden_features.
 
-root: "E:/Caribbean-Obs"
+root: "E:/Caribbean-Obs"          # shell CYCLONE_JAX_ROOT overrides
 
-sources: [land, marine]
+sources: [land, marine]           # variants: memorise_land / memorise_marine
 selection: all
 max_stations: null
 pad_to: 1536
@@ -33,7 +33,7 @@ batch_size: 32
 # val/test always synchronous). 0 = sync. >0 on Linux/fork boxes: tune to
 # ~CPU cores; batch CONTENTS identical to sync, epoch batch ORDER becomes
 # queue-arrival order. Keep 0 on Windows (spawn would pickle the mmaps).
-num_workers: 0
+num_workers: 0                    # shell CYCLONE_JAX_NUM_WORKERS overrides
 prefetch_factor: 2
 
 split:

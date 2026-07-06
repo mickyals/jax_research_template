@@ -60,6 +60,44 @@ python -m experiments.cyclone_jax.train.train \
   sequence gif per the data yaml's `storm_panels` block).
 - Full-dataset memorisation probe: `data: memorise`; run
   `data.identifiability.input_collisions` first for the accuracy ceiling.
+- Dataset variants: `train` / `memorise` (land+marine) have `_land` /
+  `_marine` clones — swap the entry yaml's `data:` pointer. All variants
+  share `pad_to: 1536` on purpose: the MLP input width is `pad_to × F`
+  (`features.flatten`), so a shared pad keeps architectures identical
+  across variants and the jit shape single.
+
+## Linux transfer (multi-CPU/GPU box)
+
+The configs are machine-agnostic; the shell names the site. Nothing in
+the code path is Windows-specific — the Windows-side caveats (workers,
+OneDrive/orbax) simply disappear on Linux.
+
+```bash
+conda env create -f environment.yaml        # name: jrt; jax[cuda13] default
+conda activate jrt
+pip install wandb                           # optional dep, needed for logging
+export PYTHONPATH=jrt
+export WANDB_API_KEY=...
+
+# site overrides — beat the yamls' root/num_workers (machine properties;
+# the yamls never need editing between boxes):
+export CYCLONE_JAX_ROOT=/data/Caribbean-Obs
+export CYCLONE_JAX_NUM_WORKERS=8            # ~CPU cores; fork = Linux payoff
+
+python -m experiments.cyclone_jax.train.train \
+    jrt/experiments/cyclone_jax/configs/train/train.yaml --gpu 0
+```
+
+- Copy the built library (volumes + bookshelf + `meta.json` sidecars) to
+  local disk — it is read via mmap, so network filesystems hurt.
+- `--gpu N` pins one device per run; run one process per GPU with
+  different `--gpu` values for parallel runs (a shell
+  `CUDA_VISIBLE_DEVICES` always wins over `--gpu`/yaml).
+- `num_workers > 0` uses fork workers that inherit the mmaps for free
+  (the reason it must stay 0 on Windows/spawn).
+- From a notebook: set `CUDA_VISIBLE_DEVICES` + `sys.path` in the FIRST
+  cell (JAX initialises once per kernel); fresh `run_dir` per run;
+  restart the kernel between big runs (device memory accumulates).
 
 ## Principles
 

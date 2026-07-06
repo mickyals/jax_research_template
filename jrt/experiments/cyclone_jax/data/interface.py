@@ -38,6 +38,7 @@ streams here (numpy) and the caller feeds the same seed to jax model init
 from __future__ import annotations
 
 import functools
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -186,10 +187,16 @@ def build_data(cfg, seed=0, check_fresh=True):
     only when batch_size is set (pure-inspection use skips it); empty
     splits get no stream. Train streams shuffle and drop the last partial
     batch; val/test streams are sequential and keep it (full coverage).
+
+    Site overrides: CYCLONE_JAX_ROOT and CYCLONE_JAX_NUM_WORKERS in the
+    shell beat the yaml's root / num_workers — library location and worker
+    count are MACHINE properties, not experiment properties (same
+    reasoning as the gpu pin), so the identical configs run on every box.
     """
     inputs  = resolve_input(cfg)
     targets = resolve_target(cfg)
-    lib = load_library(cfg['root'], names=tuple(inputs.sources) + ('cyclone',),
+    root = os.environ.get('CYCLONE_JAX_ROOT') or cfg['root']
+    lib = load_library(root, names=tuple(inputs.sources) + ('cyclone',),
                        check_fresh=check_fresh)
     loader = Loader(lib, inputs, targets,
                     sshs_min=int(cfg.get('sshs_min', 3)),
@@ -203,7 +210,9 @@ def build_data(cfg, seed=0, check_fresh=True):
     if batch_size:
         # multiprocess assembly on TRAIN streams only: val/test stay
         # synchronous (cheap, deterministic batch order for eval records)
-        workers = int(cfg.get('num_workers') or 0)
+        env_workers = os.environ.get('CYCLONE_JAX_NUM_WORKERS')
+        workers = (int(env_workers) if env_workers
+                   else int(cfg.get('num_workers') or 0))
         for name, idx in splits.items():
             if not len(idx):
                 continue
