@@ -34,6 +34,34 @@ class FakeLoader:
                 'y': {'target': _Y[i]}}
 
 
+class TimeFieldLoader:
+    """Fixes 0/1 differ ONLY in x['time'] (different targets): a model
+    that consumes time can tell them apart; one that doesn't cannot."""
+    fixes = {'sid': np.asarray(['A', 'B']),
+             'time': np.arange(2).astype('datetime64[h]')}
+
+    def __len__(self):
+        return 2
+
+    def build(self, i):
+        return {'x': {'lat': np.float32([1.0]),
+                      'obs': np.float32([[3.0]]),
+                      'time': np.float32([-600.0 * (i + 1)])},
+                'y': {'target': i}}
+
+
+class TestFieldsRestriction:
+
+    def test_unconsumed_field_cannot_distinguish(self):
+        # default (all fields): time makes both fixes unique
+        assert input_collisions(TimeFieldLoader())['max_accuracy'] == 1.0
+        # model consumes obs+coords only -> honest ceiling drops
+        r = input_collisions(TimeFieldLoader(),
+                             fields=('obs', 'lat', 'lon'))
+        assert r['n_unique_inputs'] == 1
+        assert r['max_accuracy'] == pytest.approx(0.5)
+
+
 class TestInputCollisions:
 
     @pytest.fixture()

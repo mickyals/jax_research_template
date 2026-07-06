@@ -27,10 +27,16 @@ import hashlib
 import numpy as np
 
 
-def _input_hash(x: dict) -> str:
-    """Byte-exact content hash of one sample's x dict (key-ordered)."""
+def _input_hash(x: dict, fields=None) -> str:
+    """Byte-exact content hash of one sample's x dict (key-ordered).
+
+    ``fields`` restricts the hash to the x fields the MODEL consumes
+    (encoding.fields + coords) — a field the model never sees must not
+    make two fixes count as distinguishable."""
     h = hashlib.sha1()
     for k in sorted(x):
+        if fields is not None and k not in fields:
+            continue
         arr = np.ascontiguousarray(np.asarray(x[k]))
         h.update(k.encode())
         h.update(str(arr.shape).encode())
@@ -38,7 +44,7 @@ def _input_hash(x: dict) -> str:
     return h.hexdigest()
 
 
-def input_collisions(loader, indices=None) -> dict:
+def input_collisions(loader, indices=None, fields=None) -> dict:
     """Group fixes by identical model input; flag different-target groups.
 
     Parameters
@@ -47,6 +53,10 @@ def input_collisions(loader, indices=None) -> dict:
         The scenario's loader (norms attached, as training will see it).
     indices : array-like, optional
         Fix indices to scan (a split); default = every fix.
+    fields : iterable of str, optional
+        x fields entering the hash — pass the model's consumed set
+        (encoding.fields + 'lat'/'lon') for an honest ceiling; default =
+        every x field (the most optimistic model).
 
     Returns
     -------
@@ -63,12 +73,13 @@ def input_collisions(loader, indices=None) -> dict:
     """
     idx = (np.arange(len(loader)) if indices is None
            else np.asarray(indices))
+    fields = set(fields) if fields is not None else None
     buckets: dict[str, list[int]] = {}
     targets: dict[int, int] = {}
     for i in idx:
         i = int(i)
         s = loader.build(i)
-        buckets.setdefault(_input_hash(s['x']), []).append(i)
+        buckets.setdefault(_input_hash(s['x'], fields), []).append(i)
         targets[i] = int(s['y']['target'])
 
     sids  = np.asarray(loader.fixes['sid'])

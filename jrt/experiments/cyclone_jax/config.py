@@ -75,7 +75,7 @@ MODEL_KEYS = {
     'finer': _MODEL_KEYS_COMMON | {'first_omega', 'hidden_omega', 'bias_k'},
 }
 
-ENCODING_KEYS = {'mode', 'embedding', 'embedding_kwargs'}
+ENCODING_KEYS = {'mode', 'embedding', 'embedding_kwargs', 'fields'}
 
 
 def _load_yaml(path):

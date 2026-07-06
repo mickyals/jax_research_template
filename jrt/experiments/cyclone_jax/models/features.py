@@ -38,10 +38,31 @@ TOKEN_FIELDS = ('level', 'time', 'id', 'obs', 'missing')
 COORD_FIELDS = ('lat', 'lon')
 
 
-def pack_tokens(X) -> jnp.ndarray:
+def select_fields(selected) -> tuple[str, ...]:
+    """Validate a model yaml ``encoding.fields`` list -> packing tuple.
+
+    The MODEL declares which x fields build its station vector (the
+    sample always carries everything — consumption is the model's
+    choice). Subset of TOKEN_FIELDS, non-empty; canonical order kept
+    regardless of listing order. Position (lat/lon) is NOT a field —
+    it always enters via the encoding mode.
+    """
+    if not selected:
+        raise ValueError("encoding.fields must name at least one of "
+                         f"{TOKEN_FIELDS} — omit the key for all.")
+    bad = set(selected) - set(TOKEN_FIELDS)
+    if bad:
+        raise ValueError(f"unknown encoding.fields {sorted(bad)} — "
+                         f"valid: {TOKEN_FIELDS} (lat/lon enter via the "
+                         f"encoding mode, never as fields).")
+    keep = set(selected)
+    return tuple(f for f in TOKEN_FIELDS if f in keep)
+
+
+def pack_tokens(X, fields=TOKEN_FIELDS) -> jnp.ndarray:
     """Named batch X -> (B, N, F) float32 tokens, TOKEN_FIELDS order."""
     cols = []
-    for f in TOKEN_FIELDS:
+    for f in fields:
         v = jnp.asarray(X[f], jnp.float32)
         cols.append(v[..., None] if v.ndim == 2 else v)
     return jnp.concatenate(cols, axis=-1)
@@ -71,16 +92,20 @@ class FeatureEncoder(nn.Module):
         mode is parameter-free).
     embedding : nn.Module, optional
         gamma(lat, lon) from core/embeddings. None = raw coords.
+    fields : tuple of str
+        Which x fields build the token (subset of TOKEN_FIELDS,
+        canonical order — see select_fields). Default: all of them.
     """
     mode:      str = 'concat'
     embedding: Optional[nn.Module] = None
+    fields:    tuple = TOKEN_FIELDS
 
     @nn.compact
     def __call__(self, X) -> jnp.ndarray:
         if self.mode not in ('concat', 'additive'):
             raise ValueError(f"encoding mode must be 'concat' or 'additive', "
                              f"got {self.mode!r}")
-        tokens = pack_tokens(X)
+        tokens = pack_tokens(X, self.fields)
         pos = pack_coords(X)
         if self.embedding is not None:
             B, N, _ = pos.shape
@@ -100,7 +125,8 @@ def build_encoder(encoding: dict | None = None, seed: int = 0) -> FeatureEncoder
     """encoding config block -> FeatureEncoder.
 
     Keys: mode ('concat' default), embedding (core registry name or null =
-    raw coords), embedding_kwargs. None/empty block = concat + raw coords
+    raw coords), embedding_kwargs, fields (x fields entering the token —
+    default all TOKEN_FIELDS). None/empty block = concat + raw coords
     (the SIREN/FINER front end).
 
     ``seed`` is the RUN seed (trainer.seed — the ONE-seed principle): it
@@ -120,4 +146,8 @@ def build_encoder(encoding: dict | None = None, seed: int = 0) -> FeatureEncoder
         emb = get_embedding(name, **kwargs)
         if _takes_latlon(emb):
             emb = LatLonEmbeddingWrapper(embedding=emb)
-    return FeatureEncoder(mode=encoding.get('mode', 'concat'), embedding=emb)
+    fields = encoding.get('fields')
+    return FeatureEncoder(mode=encoding.get('mode', 'concat'),
+                          embedding=emb,
+                          fields=(select_fields(fields)
+                                  if fields is not None else TOKEN_FIELDS))

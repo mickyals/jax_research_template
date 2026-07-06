@@ -10,7 +10,7 @@ import pytest
 from core.embeddings import LatLonEmbeddingWrapper
 from experiments.cyclone_jax.models.features import (
     COORD_FIELDS, TOKEN_FIELDS, FeatureEncoder, build_encoder, flatten,
-    pack_coords, pack_tokens,
+    pack_coords, pack_tokens, select_fields,
 )
 
 from .conftest import B, C, N
@@ -52,6 +52,31 @@ class TestPacking:
 # ---------------------------------------------------------------------------
 # Encoding modes
 # ---------------------------------------------------------------------------
+
+class TestFieldSelection:
+
+    def test_fields_shrink_the_token(self, X):
+        enc = FeatureEncoder(mode='concat', fields=('obs', 'missing'))
+        out = enc.apply(enc.init(jax.random.PRNGKey(0), X), X)
+        assert out.shape[-1] == 2 * C + 2       # obs + missing + raw coords
+
+    def test_yaml_order_does_not_matter(self):
+        assert select_fields(['missing', 'obs']) == ('obs', 'missing')
+
+    def test_unknown_field_raises(self):
+        with pytest.raises(ValueError, match='lat'):
+            select_fields(['obs', 'lat'])       # coords are not fields
+
+    def test_empty_raises(self):
+        with pytest.raises(ValueError, match='at least one'):
+            select_fields([])
+
+    def test_build_encoder_reads_fields(self, X):
+        enc = build_encoder({'mode': 'concat', 'fields': ['obs', 'missing']})
+        assert enc.fields == ('obs', 'missing')
+        enc = build_encoder({'mode': 'concat'})
+        assert enc.fields == TOKEN_FIELDS       # omitted = everything
+
 
 class TestFeatureEncoder:
 

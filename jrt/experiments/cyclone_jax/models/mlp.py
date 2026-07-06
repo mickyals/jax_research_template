@@ -4,10 +4,13 @@ experiments/cyclone_jax/models/mlp.py
 The MLP baseline ladder: all stations as input, no set logic.
 
     X -> FeatureEncoder -> (B, N, F') tokens
-      -> one SHARED per-station perceptron (Dense over the last axis)
+      -> one SHARED per-station perceptron (Dense over the last axis);
+         station_features: null SKIPS it — RAW encoded tokens flatten
+         directly ("can raw stations, positionally encoded, detect the
+         storm?" probe; pair with encoding concat)
       -> padding slots zeroed via station_mask (they carry no signal, not
          even the perceptron bias)
-      -> flat concat (B, pad_to * station_features)   [slot-sensitive]
+      -> flat concat (B, pad_to * width)              [slot-sensitive]
       -> core MLP body -> (B, n_classes) logits
 
 The flat vector is deliberately order/padding-sensitive — this is the
@@ -40,8 +43,9 @@ class StationMLP(nn.Module):
     ----------
     n_classes : int
         Logit count — ALWAYS TargetSpec.n_classes (build_model injects it).
-    station_features : int
-        Width of the shared per-station perceptron.
+    station_features : int, optional
+        Width of the shared per-station perceptron; None = no perceptron,
+        the encoded tokens flatten raw (masked all the same).
     hidden_features, n_layers : int
         core MLP body size.
     activation : str
@@ -52,7 +56,7 @@ class StationMLP(nn.Module):
         Positional-encoding front end; default concat + raw coords.
     """
     n_classes:        int
-    station_features: int
+    station_features: Optional[int]
     hidden_features:  int
     n_layers:         int
     activation:       str = 'relu'
@@ -67,9 +71,12 @@ class StationMLP(nn.Module):
         encoder = (self.encoder if self.encoder is not None
                    else FeatureEncoder())
         tokens = encoder(X)                                    # (B, N, F')
-        h = nn.Dense(self.station_features,
-                     name='station_perceptron')(tokens)        # shared
-        h = get_activation(self.activation)(h)
+        if self.station_features is None:      # raw-token probe: no
+            h = tokens                         # per-station embedding
+        else:
+            h = nn.Dense(self.station_features,
+                         name='station_perceptron')(tokens)    # shared
+            h = get_activation(self.activation)(h)
         h = h * jnp.asarray(X['station_mask'], h.dtype)[..., None]
         h = flatten(h)                                         # (B, N*d)
         return MLP(out_features=self.n_classes,

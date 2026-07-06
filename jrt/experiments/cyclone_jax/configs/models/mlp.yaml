@@ -7,16 +7,28 @@
 # n_classes STAYS null — injected from TargetSpec at build.
 
 name: mlp                         # MODELS registry key
-tags: [mlp, baseline]             # -> wandb run tags
+tags: [mlp, baseline, concat]     # -> wandb run tags
 
 n_classes: null
-station_features: 64
-hidden_features: 256
-n_layers: 3
+station_features: null            # null = NO per-station perceptron — raw
+                                  # encoded tokens flatten directly (the
+                                  # "raw stations, positionally encoded"
+                                  # probe; pair with encoding concat)
+hidden_features: 64
+n_layers: 1
 activation: relu                  # relu | gelu | silu | leaky_relu
 dropout_rate: 0.0                 # keep 0 for the memorisation gate
 
 encoding:
   mode: concat                    # concat | additive
-  embedding: null                 # null = raw coords; or a core/embeddings
-  embedding_kwargs: {}            #   name (e.g. GAUSSIAN_POSITIONAL)
+  # fields = which x fields build the station vector (the MODEL's input
+  # contract; the sample always carries everything). Ruled 2026-07-06:
+  # obs + missingness + position ONLY — level/time/id excluded so
+  # per-station timestamps can't make every vector trivially unique
+  # (identifiability must come from the weather, not the clock).
+  fields: [obs, missing]          # subset of level|time|id|obs|missing
+  embedding: GAUSSIAN_POSITIONAL  # null = raw coords; or a core/embeddings name
+  embedding_kwargs:
+    input_dim: 2                  # (lat, lon)
+    mapping_dim: 64               # even; mapping_dim/2 cos + sin pairs
+    scale: 1.0

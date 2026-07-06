@@ -36,6 +36,20 @@ class TestStationMLP:
         variables, _ = _logits(_make(), X)
         assert set(variables['params']) >= {'station_perceptron', 'body'}
 
+    def test_null_station_features_skips_perceptron(self, X):
+        # raw-token probe: encoded tokens flatten directly, no embedding
+        variables, out = _logits(_make(station_features=None), X)
+        assert 'station_perceptron' not in variables['params']
+        assert out.shape == (B, N_CLASSES)
+
+    def test_null_station_features_padding_still_inert(self, X):
+        model = _make(station_features=None)
+        variables, base = _logits(model, X)
+        X2 = dict(X)
+        pad = ~np.asarray(X['station_mask'])
+        X2['obs'] = np.where(pad[..., None], 9e9, np.asarray(X['obs']))
+        assert np.allclose(base, model.apply(variables, X2, train=False))
+
     @pytest.mark.parametrize('act', ACTIVATIONS)
     def test_every_ladder_activation_runs(self, X, act):
         _, out = _logits(_make(activation=act), X)
