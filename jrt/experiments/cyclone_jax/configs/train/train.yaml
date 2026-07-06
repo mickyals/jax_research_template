@@ -45,7 +45,7 @@ trainer:
   # Per-batch REPORT metrics (jrt METRICS registry) — only linear metrics
   # that average exactly across batches; macro precision/recall come
   # EXACTLY from the confusion_matrix callback instead (PR #5 ruling).
-  metrics: [cross_entropy, binary_accuracy, mae_class]
+  metrics: [cross_entropy, accuracy]
 
   # During-training figure callbacks (train/log.py CALLBACKS registry).
   # Step-based cadence: every defaults to the train stream's batches-per-
