@@ -32,20 +32,21 @@ def list_models() -> dict[str, str]:
 @register_model('mlp', description='StationMLP baseline (activation ladder '
                                    'relu|gelu|silu|leaky_relu)')
 def _mlp(n_classes, station_features, hidden_features, n_layers,
-         activation='relu', dropout_rate=0.0, encoding=None):
+         activation='relu', dropout_rate=0.0, encoding=None, seed=0):
     return StationMLP(n_classes=n_classes,
                       station_features=station_features,
                       hidden_features=hidden_features,
                       n_layers=n_layers,
                       activation=activation,
                       dropout_rate=dropout_rate,
-                      encoder=build_encoder(encoding))
+                      encoder=build_encoder(encoding, seed=seed))
 
 
 @register_model('siren', description='StationSIREN (Sitzmann et al. 2020; '
                                      'raw coords, no PE)')
 def _siren(n_classes, station_features, hidden_features, n_layers,
-           first_omega=30.0, hidden_omega=30.0):
+           first_omega=30.0, hidden_omega=30.0, seed=0):
+    # seed accepted for the uniform build_model contract; unused (no PE)
     return StationSIREN(n_classes=n_classes,
                         station_features=station_features,
                         hidden_features=hidden_features,
@@ -57,7 +58,8 @@ def _siren(n_classes, station_features, hidden_features, n_layers,
 @register_model('finer', description='StationFINER (Liu et al. 2024; '
                                      'FINER-on-SIREN, U(-k,k) bias)')
 def _finer(n_classes, station_features, hidden_features, n_layers,
-           first_omega=30.0, hidden_omega=30.0, bias_k=1.0):
+           first_omega=30.0, hidden_omega=30.0, bias_k=1.0, seed=0):
+    # seed accepted for the uniform build_model contract; unused (no PE)
     return StationFINER(n_classes=n_classes,
                         station_features=station_features,
                         hidden_features=hidden_features,
@@ -67,11 +69,14 @@ def _finer(n_classes, station_features, hidden_features, n_layers,
                         bias_k=bias_k)
 
 
-def build_model(model_cfg: dict, targets):
+def build_model(model_cfg: dict, targets, seed: int = 0):
     """cfg['model'] block + TargetSpec -> (flax module, wandb tags).
 
     Pops the non-arch keys (name/tags/n_classes), injects
-    targets.n_classes, and instantiates through the registry.
+    targets.n_classes, and instantiates through the registry. ``seed`` is
+    the RUN seed (trainer.seed) — threaded to seeded components (e.g.
+    the Gaussian Fourier positional embedding's B matrix); an explicit
+    ``encoding.embedding_kwargs.seed`` in the yaml wins.
     """
     cfg = dict(model_cfg)
     name = cfg.pop('name', None)
@@ -82,5 +87,5 @@ def build_model(model_cfg: dict, targets):
     if cfg.pop('n_classes', None) is not None:
         raise ValueError("n_classes is injected from the TargetSpec at "
                          "build — keep 'n_classes: null' in the model yaml.")
-    module = MODELS.get(name, n_classes=targets.n_classes, **cfg)
+    module = MODELS.get(name, n_classes=targets.n_classes, seed=seed, **cfg)
     return module, tags

@@ -30,7 +30,7 @@ from typing import Optional
 import jax.numpy as jnp
 import flax.linen as nn
 
-from core.embeddings import LatLonEmbeddingWrapper, get_embedding
+from core.embeddings import EMBEDDINGS, LatLonEmbeddingWrapper, get_embedding
 
 # The defined packing order. Scalar fields contribute one column each;
 # obs/missing contribute one per channel (inputs.CHANNEL_ORDER layout).
@@ -96,18 +96,28 @@ def _takes_latlon(module) -> bool:
     return params[1:3] == ['lat', 'lon']
 
 
-def build_encoder(encoding: dict | None = None) -> FeatureEncoder:
+def build_encoder(encoding: dict | None = None, seed: int = 0) -> FeatureEncoder:
     """encoding config block -> FeatureEncoder.
 
     Keys: mode ('concat' default), embedding (core registry name or null =
     raw coords), embedding_kwargs. None/empty block = concat + raw coords
     (the SIREN/FINER front end).
+
+    ``seed`` is the RUN seed (trainer.seed — the ONE-seed principle): it
+    becomes the embedding's seed when the embedding takes one (e.g. the
+    Gaussian Fourier B matrix) and the yaml does not pin
+    ``embedding_kwargs.seed`` (an explicit value wins — controlled
+    B-matrix ablations across runs).
     """
     encoding = encoding or {}
     emb = None
     name = encoding.get('embedding')
     if name:
-        emb = get_embedding(name, **(encoding.get('embedding_kwargs') or {}))
+        kwargs = dict(encoding.get('embedding_kwargs') or {})
+        if (name in EMBEDDINGS and 'seed' not in kwargs
+                and 'seed' in inspect.signature(EMBEDDINGS[name]).parameters):
+            kwargs['seed'] = seed
+        emb = get_embedding(name, **kwargs)
         if _takes_latlon(emb):
             emb = LatLonEmbeddingWrapper(embedding=emb)
     return FeatureEncoder(mode=encoding.get('mode', 'concat'), embedding=emb)

@@ -127,3 +127,46 @@ class TestBuildEncoder:
                                                   'mapping_dim': 8,
                                                   'scale': 1.0}})
         assert not isinstance(enc.embedding, LatLonEmbeddingWrapper)
+
+
+# ---------------------------------------------------------------------------
+# ONE-seed principle: the run seed reaches seeded embeddings
+# ---------------------------------------------------------------------------
+
+class TestSeedThreading:
+    """trainer.seed -> build_encoder(seed) -> the Gaussian B matrix,
+    unless embedding_kwargs pins its own seed (controlled ablations)."""
+
+    ENC = {'mode': 'concat', 'embedding': 'GAUSSIAN_POSITIONAL',
+           'embedding_kwargs': {'input_dim': 2, 'mapping_dim': 8,
+                                'scale': 1.0}}
+
+    def _out(self, enc_cfg, seed, X):
+        enc = build_encoder(enc_cfg, seed=seed)
+        v = enc.init(jax.random.PRNGKey(0), X)
+        return np.asarray(enc.apply(v, X))
+
+    def test_run_seed_reaches_the_embedding(self, X):
+        a = self._out(self.ENC, 0, X)
+        b = self._out(self.ENC, 1, X)
+        assert not np.allclose(a, b)            # different B matrices
+
+    def test_explicit_embedding_seed_wins(self, X):
+        pinned = {**self.ENC,
+                  'embedding_kwargs': {**self.ENC['embedding_kwargs'],
+                                       'seed': 7}}
+        a = self._out(pinned, 0, X)
+        b = self._out(pinned, 1, X)
+        np.testing.assert_array_equal(a, b)
+
+    def test_yaml_kwargs_not_mutated(self, X):
+        cfg = {'mode': 'concat', 'embedding': 'GAUSSIAN_POSITIONAL',
+               'embedding_kwargs': {'input_dim': 2, 'mapping_dim': 8,
+                                    'scale': 1.0}}
+        build_encoder(cfg, seed=3)
+        assert 'seed' not in cfg['embedding_kwargs']
+
+    def test_raw_coords_ignore_seed(self, X):
+        a = self._out({'mode': 'concat'}, 0, X)
+        b = self._out({'mode': 'concat'}, 1, X)
+        np.testing.assert_array_equal(a, b)

@@ -179,7 +179,7 @@ def main(train_yaml, config_dir=None):
     seed = cfg['trainer'].get('seed', 0)
 
     data = build_data(cfg['data'], seed=seed)
-    model, tags = build_model(cfg['model'], data.targets)
+    model, tags = build_model(cfg['model'], data.targets, seed=seed)
     print_startup_banner(cfg, data, model, seed)
 
     if cfg['trainer'].get('run_dir'):
