@@ -195,6 +195,21 @@ class TestMain:
         assert sum(tr['class_counts'].values()) == tr['size']
         assert man['config']['names'] == {'data': 'tiny', 'model': 'tiny'}
 
+    def test_startup_banner_prints_data_norm_model(self, library_root,
+                                                   tmp_path, capsys):
+        """Pre-tqdm banner: split sizes/class counts, norm line, model
+        name + param count + nn.tabulate architecture table."""
+        entry = _write_configs(
+            tmp_path / 'configs', library_root,
+            data_over={'normalise': {'method': 'standardise',
+                                     'stats': 'auto'}})
+        main(entry, config_dir=tmp_path / 'configs')
+        out = capsys.readouterr().out
+        assert '[data] train:' in out
+        assert '[norm] standardise' in out
+        assert '[model] mlp' in out and 'params' in out
+        assert 'flatten_mlp' in out.lower() or 'Dense' in out  # tabulate
+
     def test_missing_model_pointer_raises(self, library_root, tmp_path):
         entry = _write_configs(tmp_path / 'configs', library_root)
         raw = yaml.safe_load(entry.read_text())

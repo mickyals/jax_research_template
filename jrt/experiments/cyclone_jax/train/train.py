@@ -93,20 +93,8 @@ def build_logger(cfg: dict, tags: tuple, norms=None):
     return create_logger(backend, log_dir=log_dir, config=config, **kwargs)
 
 
-def write_run_records(cfg: dict, data, run_dir) -> None:
-    """run_dir/norm_stats.json + run_dir/data_manifest.json.
-
-    norm_stats.json is the record evaluation REUSES (stats are properties
-    of the training distribution — see data/usage_doc.md). The manifest
-    records what the run actually trained on: per-split sizes and class
-    counts, plus the merged config.
-    """
-    run = Path(run_dir)
-    run.mkdir(parents=True, exist_ok=True)
-    if data.norms is not None:
-        (run / 'norm_stats.json').write_text(
-            json.dumps(data.norms.to_json(), indent=2))
-
+def _split_summary(data) -> dict:
+    """Per-split sizes + class counts (manifest AND startup banner)."""
     sshs = np.rint(np.asarray(data.loader.fixes['usa_sshs'])).astype(int)
     names = data.targets.class_names
     splits = {}
@@ -117,11 +105,69 @@ def write_run_records(cfg: dict, data, run_dir) -> None:
             'class_counts': {names[pos]: int((vals == c).sum())
                              for pos, c in enumerate(data.targets.class_set)},
         }
+    return splits
+
+
+def write_run_records(cfg: dict, data, run_dir) -> None:
+    """run_dir/norm_stats.json + run_dir/data_manifest.json.
+
+    norm_stats.json is the record evaluation REUSES (stats are properties
+    of the training distribution — see data/usage_doc.md). The manifest
+    records what the run actually trained on: per-split sizes and class
+    counts, plus the merged config. Printing is the banner's job.
+    """
+    run = Path(run_dir)
+    run.mkdir(parents=True, exist_ok=True)
+    if data.norms is not None:
+        (run / 'norm_stats.json').write_text(
+            json.dumps(data.norms.to_json(), indent=2))
     (run / 'data_manifest.json').write_text(
-        json.dumps({'splits': splits, 'config': cfg}, indent=2))
-    for name, info in splits.items():       # startup banner (pre-tqdm)
+        json.dumps({'splits': _split_summary(data), 'config': cfg},
+                   indent=2))
+
+
+def print_startup_banner(cfg, data, model, seed) -> None:
+    """Pre-tqdm run summary — the experiment side; the jrt Trainer prints
+    its own block (_print_startup_summary) after this.
+
+    Lines: run name, scenario + sources, per-split size/class counts,
+    normalisation method + coord bounds, model name + param count
+    (jax.eval_shape — no FLOPs) + the nn.tabulate architecture table.
+    """
+    import jax
+    import flax.linen as nn
+    from experiments.cyclone_jax.data.batching import collate
+
+    names = cfg.get('names') or {}
+    print(f"  [run] {names.get('model')}-{names.get('data')}-s{seed}")
+    srcs = '+'.join(cfg['data'].get('sources') or ('land', 'marine'))
+    print(f"  [data] scenario {names.get('data')!r}  sources {srcs}")
+    for name, info in _split_summary(data).items():
         print(f"  [data] {name}: {info['size']} fixes  "
               f"{info['class_counts']}")
+    if data.norms is not None:
+        s = data.norms.stats
+        print(f"  [norm] {data.norms.method}  "
+              f"lat [{s['lat']['min']:g}, {s['lat']['max']:g}]  "
+              f"lon [{s['lon']['min']:g}, {s['lon']['max']:g}]")
+    else:
+        print("  [norm] raw (no normalise block)")
+
+    idx = next((v for v in data.splits.values() if len(v)), None)
+    if idx is None:      # all splits empty — main()'s stream check reports
+        return
+    X = collate([data.loader.build(int(idx[0]))], data.inputs.pad_to)['X']
+    rng = jax.random.PRNGKey(seed)
+    shapes = jax.eval_shape(lambda x: model.init(rng, x, train=False), X)
+    n_params = sum(int(np.prod(p.shape))
+                   for p in jax.tree_util.tree_leaves(shapes))
+    print(f"  [model] {cfg['model'].get('name')}  {n_params:,} params")
+    import warnings
+    with warnings.catch_warnings():
+        # flax summary.py calls jnp.shape on non-array module attributes
+        # (activation callables) — its noise, not ours
+        warnings.simplefilter('ignore', DeprecationWarning)
+        print(nn.tabulate(model, rng)(X, train=False))
 
 
 def main(train_yaml, config_dir=None):
@@ -134,6 +180,7 @@ def main(train_yaml, config_dir=None):
 
     data = build_data(cfg['data'], seed=seed)
     model, tags = build_model(cfg['model'], data.targets)
+    print_startup_banner(cfg, data, model, seed)
 
     if cfg['trainer'].get('run_dir'):
         write_run_records(cfg, data, cfg['trainer']['run_dir'])
