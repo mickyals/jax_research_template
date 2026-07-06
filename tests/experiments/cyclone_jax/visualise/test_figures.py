@@ -11,6 +11,7 @@ import numpy as np
 from experiments.cyclone_jax.visualise.figures import (
     SOURCE_STYLE, SSHS_COLORS, accuracy_hexbin_figure, class_colour,
     save_gif, storm_panel_figure, storm_sequence_figures,
+    storm_track_correctness_figure,
 )
 
 N_CLS = 6
@@ -163,6 +164,37 @@ class TestAccuracyHexbin:
             np.array([-60.0, -61.0]), np.array([12.0, 13.0]),
             np.array([True, False]), basemap=False)
         assert len(fig.axes[0].collections) == 1
+        plt.close('all')
+
+
+class TestStormTrackCorrectness:
+
+    def test_correct_and_wrong_split_into_collections(self):
+        lon = np.array([-80.0, -75.0, -70.0, -65.0])
+        lat = np.array([10.0, 12.0, 14.0, 16.0])
+        correct = np.array([True, True, False, True])
+        fig = storm_track_correctness_figure(
+            lon, lat, correct, domain=DOMAIN, basemap=False,
+            title='train B track')
+        ax = fig.axes[0]
+        assert len(ax.lines) == 1                       # the grey trail
+        ok, bad = ax.collections[:2]
+        assert ok.get_offsets().shape[0] == 3           # green dots
+        assert bad.get_offsets().shape[0] == 1          # red X
+        labels = [t.get_text() for t in ax.get_legend().get_texts()]
+        assert labels == ['correct', 'wrong']
+        assert ax.get_title() == 'train B track'
+        assert tuple(ax.get_xlim()) == (-100, -30)      # domain extent
+        plt.close('all')
+
+    def test_all_correct_has_no_wrong_collection(self):
+        fig = storm_track_correctness_figure(
+            np.array([-60.0, -59.0]), np.array([12.0, 13.0]),
+            np.array([1, 1]), basemap=False)
+        ax = fig.axes[0]
+        assert len(ax.collections) == 1
+        labels = [t.get_text() for t in ax.get_legend().get_texts()]
+        assert labels == ['correct']
         plt.close('all')
 
 

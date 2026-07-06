@@ -39,7 +39,9 @@ end_of_run additionally writes the per-fix prediction record for every
 distinct split (predictions_<split>.csv: which fixes the model got right
 and wrong), aggregates it per storm (per_storm_accuracy_<split>.csv,
 worst-first: which storms are memorised vs hard), and emits the spatial
-accuracy hexbin (where over the FOV the model is right/wrong).
+accuracy hexbin (where over the FOV the model is right/wrong) plus a
+track-correctness figure per hardest storm — the hexbin/track cross-read
+separates storm problems from location/sensing problems.
 
 Figures go to logger.log_figure (all backends) AND run_dir/figures/ as
 svg + png (editable-vector workflow). The logger closes each figure.
@@ -68,6 +70,7 @@ from experiments.cyclone_jax.data.sparsity import network_sparsity
 from experiments.cyclone_jax.models.features import TOKEN_FIELDS
 from experiments.cyclone_jax.visualise.figures import (
     SOURCE_STYLE, accuracy_hexbin_figure, save_gif, storm_panel_figure,
+    storm_track_correctness_figure,
 )
 
 CALLBACKS = Registry('Callback')
@@ -439,13 +442,32 @@ def _prediction_records(cfg, data, logger, state, global_step, basemap):
             f"storms fully memorised "
             f"{sum(a == 1.0 for _, a, _ in per_storm)}/{len(per_storm)}  "
             f"hardest: {hardest}")
+        lons = np.asarray(fixes['lon'])[idx]
+        lats = np.asarray(fixes['lat'])[idx]
         fig = accuracy_hexbin_figure(
-            np.asarray(fixes['lon'])[idx], np.asarray(fixes['lat'])[idx],
-            correct, domain=domain, basemap=basemap,
+            lons, lats, correct, domain=domain, basemap=basemap,
             title=f'{split} prediction correctness — step {global_step}  '
                   f'accuracy {acc:.4f} (ceiling '
                   f'{report["max_accuracy"]:.4f})')
         _emit(fig, 'accuracy_hexbin', split, global_step, logger, run_dir)
+
+        # storm-track misclassification: the hardest storms as tracks,
+        # each fix coloured correct/wrong. Cross-read with the hexbin:
+        # a red cell traced by ONE storm's track = storm problem; red
+        # shared by many storms' fixes = location/sensing problem.
+        times = np.asarray(fixes['time'])[idx]
+        for sid, storm_acc, n_fixes in [r for r in per_storm
+                                        if r[1] < 1.0][:5]:
+            m = sids == sid
+            order = np.argsort(times[m])
+            fig = storm_track_correctness_figure(
+                lons[m][order], lats[m][order], correct[m][order],
+                domain=domain, basemap=basemap,
+                title=f'{split} {sid} track — '
+                      f'{int(correct[m].sum())}/{n_fixes} correct '
+                      f'({storm_acc:.2f})  step {global_step}')
+            _emit(fig, f'storm_track_{sid}', split, global_step,
+                  logger, run_dir)
 
 
 # ---------------------------------------------------------------------------

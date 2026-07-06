@@ -205,6 +205,53 @@ def accuracy_hexbin_figure(lon, lat, correct, domain=None, basemap=True,
     return fig
 
 
+def storm_track_correctness_figure(track_lon, track_lat, correct,
+                                   domain=None, basemap=True, title=''):
+    """One storm's track, each fix coloured by prediction correctness:
+    green dot = correct, red X = wrong, on the grey time-ordered trail
+    (colours = the hexbin's RdYlGn endpoints). The cross-read against
+    the accuracy hexbin is the answerable form of "which stations drive
+    right/wrong": a red hexbin cell traced by ONE storm's track = storm
+    problem; red shared by many storms' fixes = location/sensing problem.
+
+    Parameters
+    ----------
+    track_lon, track_lat : arrays   the storm's fixes, TIME-ORDERED
+    correct : bool/0-1 array        per-fix prediction correctness
+    domain : dict, optional         data yaml domain block -> fixed extent
+    basemap : bool          coastline basemap when cartopy is available
+    title : str             caller composes it (split, sid, accuracy)
+    """
+    use_map = basemap and cartopy_available()
+    if use_map:
+        extent = ([domain['lon'][0], domain['lon'][1],
+                   domain['lat'][0], domain['lat'][1]] if domain else None)
+        fig, ax, transform = make_geoaxes(figsize=(6.4, 4.8), extent=extent,
+                                          fill=True)
+        tkw = {'transform': transform}
+    else:
+        fig, ax = plt.subplots(figsize=(6.4, 4.8))
+        if domain:
+            ax.set_xlim(domain['lon'])
+            ax.set_ylim(domain['lat'])
+        ax.set_xlabel('lon')
+        ax.set_ylabel('lat')
+        tkw = {}
+    lon = np.asarray(track_lon, float)
+    lat = np.asarray(track_lat, float)
+    ok = np.asarray(correct).astype(bool)
+    ax.plot(lon, lat, color='grey', lw=0.8, alpha=0.5, zorder=3, **tkw)
+    if ok.any():
+        ax.scatter(lon[ok], lat[ok], s=26, c='#1a9641', edgecolors='none',
+                   zorder=4, label='correct', **tkw)
+    if (~ok).any():
+        ax.scatter(lon[~ok], lat[~ok], s=42, c='#d7191c', marker='x',
+                   linewidths=1.4, zorder=5, label='wrong', **tkw)
+    ax.legend(loc='upper right', fontsize=7, framealpha=0.8)
+    ax.set_title(title, fontsize=8)
+    return fig
+
+
 def storm_sequence_figures(samples, n_classes, domain=None, basemap=True,
                            class_names=None):
     """Time-ordered sample dicts -> list of storm-panel figures.

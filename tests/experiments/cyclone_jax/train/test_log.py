@@ -291,7 +291,8 @@ class TestEndOfRun:
         logger = self._run(storm_panels={'val': 'A'})
         assert [t for t, _ in logger.figures] == [
             'test/confusion_matrix', 'test/confusion_matrix_pct',
-            'test/accuracy_hexbin']
+            'test/accuracy_hexbin',
+            'test/storm_track_A', 'test/storm_track_B']
 
     def test_sequence_gif_and_artifact(self, tmp_path):
         logger = self._run(run_dir=str(tmp_path), storm_panels={'test': 'B'})
@@ -416,7 +417,31 @@ class TestPredictionRecords:
         assert (tmp_path / 'predictions_train.csv').exists()
         assert (tmp_path / 'per_storm_accuracy_train.csv').exists()
         assert not (tmp_path / 'predictions_val.csv').exists()
-        assert [t for t, _ in logger.figures] == ['train/accuracy_hexbin']
+        assert [t for t, _ in logger.figures] == [
+            'train/accuracy_hexbin',
+            'train/storm_track_A', 'train/storm_track_B']
+
+    def test_storm_track_figures_for_hardest_storms(self):
+        """Every imperfect storm (worst-first, capped) gets a track
+        figure — the hexbin cross-read. A (0/2) before B (1/3)."""
+        logger = self._run(None)
+        tags = [t for t, _ in logger.figures]
+        assert tags == ['test/accuracy_hexbin',
+                        'test/storm_track_A', 'test/storm_track_B']
+        a_title = logger.titles[tags.index('test/storm_track_A')]
+        assert '0/2 correct' in a_title and '(0.00)' in a_title
+
+    def test_fully_correct_storms_get_no_track_figure(self):
+        """_dual_state(pred=2): fix targets are i % N_CLS, so with a
+        single-storm split every fix of class 2 is correct."""
+        data = _bundle({}, loader=FakeLoader(('A', 'A', 'A', 'A', 'A')),
+                       splits={'test': np.array([2])})    # the correct fix
+        logger = FakeLogger()
+        cfg = {'data': {'domain': DOMAIN, 'batch_size': 2}, 'model': None,
+               'trainer': {'run_dir': None}}
+        end_of_run(cfg, data, logger, _dual_state(pred=2), global_step=5,
+                   basemap=False)
+        assert [t for t, _ in logger.figures] == ['test/accuracy_hexbin']
 
     def test_identifiability_ceiling_logged(self, tmp_path):
         """FakeLoader inputs are unique per fix -> ceiling 1.0, logged to
