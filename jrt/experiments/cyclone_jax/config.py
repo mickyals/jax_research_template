@@ -28,12 +28,15 @@ import yaml
 
 CONFIG_DIR = Path(__file__).resolve().parent / 'configs'
 
-TOP_KEYS = {'data', 'model', 'trainer'}
+# 'gpu' pins CUDA_VISIBLE_DEVICES (train.py _pin_gpu, CLI --gpu overrides;
+# a shell CUDA_VISIBLE_DEVICES always wins) — device policy, not config.
+TOP_KEYS = {'data', 'model', 'trainer', 'gpu'}
 
 DATA_KEYS = {'root', 'sources', 'selection', 'max_stations', 'pad_to',
              'target', 'sshs_min', 'class_set', 'drop_subtropical',
              'source_id', 'timesteps', 'batch_size', 'split',
-             'normalise', 'domain', 'tags', 'storm_panels'}
+             'normalise', 'domain', 'tags', 'storm_panels',
+             'num_workers', 'prefetch_factor'}
 
 # storm_panels: per-split storm selection for the storm_panel callback /
 # end-of-run sequence (a DATA property — which storm to watch belongs to

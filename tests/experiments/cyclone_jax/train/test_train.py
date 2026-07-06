@@ -102,6 +102,42 @@ class TestHelpers:
         assert seen['tags'] == ['mlp', 'memorise', 'identifiability', 'extra']
         assert seen['name'] == 'mlp-memorise-s3'
 
+    # _pin_gpu tests run against a patched os.environ dict — fully
+    # isolated, nothing leaks into the real process environment.
+    def _env(self, monkeypatch, initial):
+        import os
+        env = dict(initial)
+        monkeypatch.setattr(os, 'environ', env)
+        return env
+
+    def test_pin_gpu_shell_env_wins(self, monkeypatch, tmp_path):
+        from experiments.cyclone_jax.train.train import _pin_gpu
+        env = self._env(monkeypatch, {'CUDA_VISIBLE_DEVICES': '7'})
+        _pin_gpu('1', tmp_path / 'nope.yaml')
+        assert env['CUDA_VISIBLE_DEVICES'] == '7'
+
+    def test_pin_gpu_cli_over_yaml(self, monkeypatch, tmp_path):
+        from experiments.cyclone_jax.train.train import _pin_gpu
+        env = self._env(monkeypatch, {})
+        entry = tmp_path / 'e.yaml'
+        entry.write_text(yaml.safe_dump({'gpu': 3}))
+        _pin_gpu('2', entry)
+        assert env['CUDA_VISIBLE_DEVICES'] == '2'
+
+    def test_pin_gpu_yaml_fallback(self, monkeypatch, tmp_path):
+        from experiments.cyclone_jax.train.train import _pin_gpu
+        env = self._env(monkeypatch, {})
+        entry = tmp_path / 'e.yaml'
+        entry.write_text(yaml.safe_dump({'gpu': 3}))
+        _pin_gpu(None, entry)
+        assert env['CUDA_VISIBLE_DEVICES'] == '3'
+
+    def test_pin_gpu_noop_without_any_source(self, monkeypatch, tmp_path):
+        from experiments.cyclone_jax.train.train import _pin_gpu
+        env = self._env(monkeypatch, {})
+        _pin_gpu(None, tmp_path / 'missing.yaml')
+        assert 'CUDA_VISIBLE_DEVICES' not in env
+
     def test_norm_stats_join_logged_config(self, monkeypatch):
         import experiments.cyclone_jax.train.train as tr
         seen = {}

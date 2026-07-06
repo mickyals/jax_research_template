@@ -6,7 +6,9 @@ strategies, stream construction/coverage, seed threading, and guards.
 import numpy as np
 import pytest
 
-from experiments.cyclone_jax.data.interface import BatchStream, build_data
+from experiments.cyclone_jax.data.interface import (
+    BatchStream, _shard_epoch, build_data,
+)
 
 
 def _cfg(root, **over):
@@ -102,6 +104,38 @@ class TestBuildData:
     def test_no_batch_size_no_streams(self, library_root):
         data = build_data(_cfg(library_root, batch_size=None))
         assert data.streams == {} and len(data.splits['all'])
+
+
+# ---------------------------------------------------------------------------
+# Multiprocess assembly (shard logic tested directly — the process
+# machinery itself is covered in tests/training/test_prefetch.py)
+# ---------------------------------------------------------------------------
+
+class TestWorkerSharding:
+
+    def test_shards_partition_the_sync_epoch(self, library_root):
+        data = build_data(_cfg(library_root))
+        stream = data.streams['all']
+        sync = list(stream.epoch(0))
+        shards = [list(_shard_epoch(data.loader, stream._sampler, 0, w, 2))
+                  for w in (0, 1)]
+        assert len(shards[0]) + len(shards[1]) == len(sync)
+        for k, batch in enumerate(sync):        # round-robin reassembles
+            np.testing.assert_array_equal(
+                shards[k % 2][k // 2]['y'], batch['y'])
+
+    def test_num_workers_reaches_train_stream_only(self, library_root):
+        data = build_data(_cfg(
+            library_root, num_workers=3, prefetch_factor=4,
+            split={'strategy': 'stratified', 'n_per_class': 2}))
+        assert data.streams['train']._num_workers == 3
+        assert data.streams['train']._prefetch_factor == 4
+        assert data.streams['val']._num_workers == 0    # eval stays sync
+
+    def test_negative_num_workers_raises(self, library_root):
+        data = build_data(_cfg(library_root, batch_size=None))
+        with pytest.raises(ValueError, match='num_workers'):
+            BatchStream(data.loader, np.arange(4), 2, num_workers=-1)
 
 
 # ---------------------------------------------------------------------------

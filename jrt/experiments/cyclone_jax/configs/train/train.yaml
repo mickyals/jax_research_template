@@ -10,6 +10,9 @@
 
 data: overfit                     # -> configs/data/<name>.yaml
 model: mlp                        # -> configs/models/<name>.yaml
+# gpu: 0                          # pin CUDA_VISIBLE_DEVICES on multi-GPU
+                                  # boxes (CLI --gpu overrides; a shell
+                                  # CUDA_VISIBLE_DEVICES always wins)
 
 trainer:
   seed: 0                         # populates jax model init AND data order

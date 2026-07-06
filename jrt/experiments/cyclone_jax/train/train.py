@@ -157,11 +157,39 @@ def main(train_yaml, config_dir=None):
     return trainer, test_metrics
 
 
+def _pin_gpu(cli_gpu, config_path) -> None:
+    """Pin to one GPU via CUDA_VISIBLE_DEVICES (multi-GPU boxes: JAX
+    otherwise claims and preallocates EVERY visible device).
+
+    Resolution: shell CUDA_VISIBLE_DEVICES wins > --gpu > the train yaml's
+    top-level ``gpu:`` field. Must run before the first JAX device op —
+    JAX's GPU backend initialises lazily, so top of __main__ suffices.
+    """
+    import os
+    import yaml
+    if 'CUDA_VISIBLE_DEVICES' in os.environ:
+        return
+    gpu = cli_gpu
+    if gpu is None:
+        try:
+            with open(config_path, encoding='utf-8') as f:
+                gpu = (yaml.safe_load(f) or {}).get('gpu')
+        except (OSError, yaml.YAMLError):
+            gpu = None
+    if gpu is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
+        print(f"  [device] CUDA_VISIBLE_DEVICES={gpu} (single-GPU pin)")
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(
         description='Train a cyclone_jax model from a train config.')
     parser.add_argument('config', type=Path,
                         help='configs/train/<name>.yaml entry point')
+    parser.add_argument('--gpu', type=str, default=None,
+                        help='GPU index to pin (sets CUDA_VISIBLE_DEVICES; '
+                             'overrides the yaml top-level `gpu`).')
     args = parser.parse_args()
+    _pin_gpu(args.gpu, args.config)
     main(args.config)

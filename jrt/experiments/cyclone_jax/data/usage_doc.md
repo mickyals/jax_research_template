@@ -56,6 +56,10 @@ batch['meta']    # sid list, lat/lon/time arrays, n_stations
 ```
 
 - `pad_to` is FIXED from config (never batch max) -> jit compiles once.
+- `num_workers > 0` (data yaml) = multiprocess assembly for TRAIN streams
+  via jrt `training/prefetch` (val/test always sync). Batch contents match
+  the sync path exactly; epoch batch ORDER becomes queue-arrival order.
+  Linux/fork boxes only — keep 0 on Windows (spawn would pickle mmaps).
 - `meta['n_stations'] == pad_to` means truncation (size pad_to to the
   library max so it never happens).
 - The jrt Trainer drops `meta` before tracing — strings never reach jit.

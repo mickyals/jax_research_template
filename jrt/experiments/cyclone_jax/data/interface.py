@@ -37,6 +37,7 @@ streams here (numpy) and the caller feeds the same seed to jax model init
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -51,20 +52,49 @@ from experiments.cyclone_jax.data.sampler import (
 from experiments.cyclone_jax.data.batching import collate
 
 
+def _shard_epoch(loader, sampler, epoch, worker_id, num_workers):
+    """One worker's disjoint shard of a stream epoch (numpy batches).
+
+    Round-robins the sampler's deterministic batch sequence across workers
+    (worker w builds batches w, w+n, ...): shards are disjoint and sum to
+    exactly the sync epoch. Module-level so the spawn start method could
+    pickle it — but the intended platform is fork (Linux), where workers
+    inherit the mmap'd volumes for free; under spawn the loader (mmaps
+    included) would be pickled per worker.
+    """
+    pad_to = loader.inputs.pad_to
+    for k, idx in enumerate(sampler.epoch(epoch)):
+        if k % num_workers != worker_id:
+            continue
+        yield collate([loader.build(int(i)) for i in idx], pad_to)
+
+
 class BatchStream:
     """Re-iterable batch stream over one split.
 
     `for batch in stream` reshuffles each pass (epoch auto-increments —
     PyTorch-DataLoader semantics, deterministic overall given the seed);
     stream.epoch(e) gives explicit epoch control (notebooks, resume).
+
+    num_workers > 0 spreads sample assembly across worker PROCESSES via
+    jrt training.prefetch.ProcessPrefetcher (train streams only — see
+    build_data). Batch CONTENTS are identical to the sync path; batch
+    ORDER within an epoch depends on queue arrival and is therefore not
+    reproducible across runs. 0 (default) = synchronous, bitwise-identical
+    behaviour. Linux/fork is the intended platform; keep 0 on Windows.
     """
 
     def __init__(self, loader, indices, batch_size, seed=0, shuffle=True,
-                 drop_last=True):
+                 drop_last=True, num_workers=0, prefetch_factor=2):
         self._loader  = loader
         self._sampler = Sampler(indices, batch_size, seed=seed,
                                 shuffle=shuffle, drop_last=drop_last)
         self._epoch   = 0
+        self._num_workers     = int(num_workers or 0)
+        self._prefetch_factor = int(prefetch_factor)
+        if self._num_workers < 0:
+            raise ValueError(f"num_workers must be >= 0, "
+                             f"got {num_workers}")
 
     def __len__(self):
         """Batches per epoch."""
@@ -76,6 +106,14 @@ class BatchStream:
 
     def epoch(self, epoch):
         """Yield collated batches for one explicit epoch."""
+        if self._num_workers > 0:
+            from training.prefetch import ProcessPrefetcher
+            worker_fn = functools.partial(_shard_epoch, self._loader,
+                                          self._sampler, int(epoch))
+            yield from ProcessPrefetcher(
+                worker_fn, self._num_workers,
+                prefetch_factor=self._prefetch_factor)
+            return
         pad_to = self._loader.inputs.pad_to
         for idx in self._sampler.epoch(epoch):
             yield collate([self._loader.build(int(i)) for i in idx], pad_to)
@@ -163,13 +201,18 @@ def build_data(cfg, seed=0, check_fresh=True):
     streams = {}
     batch_size = cfg.get('batch_size')
     if batch_size:
+        # multiprocess assembly on TRAIN streams only: val/test stay
+        # synchronous (cheap, deterministic batch order for eval records)
+        workers = int(cfg.get('num_workers') or 0)
         for name, idx in splits.items():
             if not len(idx):
                 continue
             train = name in ('train', 'all')
-            streams[name] = BatchStream(loader, idx, int(batch_size),
-                                        seed=seed, shuffle=train,
-                                        drop_last=train)
+            streams[name] = BatchStream(
+                loader, idx, int(batch_size), seed=seed, shuffle=train,
+                drop_last=train,
+                num_workers=workers if train else 0,
+                prefetch_factor=int(cfg.get('prefetch_factor') or 2))
 
     return DataBundle(lib=lib, inputs=inputs, targets=targets,
                       loader=loader, splits=splits, streams=streams,

@@ -21,6 +21,12 @@ source_id: {land: -1, upper: 0, marine: 1}
 timesteps: 1
 
 batch_size: 32
+
+# TRAIN-stream multiprocess assembly (see memorise.yaml for the knobs'
+# semantics). 0 = synchronous; >0 for Linux/fork multi-CPU boxes.
+num_workers: 0
+prefetch_factor: 2
+
 split:
   strategy: year
   exclude_multistorm: true
