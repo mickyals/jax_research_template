@@ -289,6 +289,7 @@ class Trainer:
         self._global_step:      int   = 0
         self._last_state:       Optional[TrainState] = None
         self._best_metric_value: float = float("nan")
+        self._donate:           bool  = False   # resolved in _build_steps
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -399,8 +400,29 @@ class Trainer:
                     out[k] = fn(pred, batch["y"])
             return out
 
-        self._train_step = jax.jit(train_step)
+        # Donate the incoming state's buffers to train_step on
+        # accelerators — the old state is dead after the loop's
+        # reassignment, and donation roughly halves param+opt peak memory
+        # (capacity-ladder headroom). CPU XLA cannot donate (it would only
+        # warn per compile). fit()'s best_state snapshots go through
+        # _snapshot_state, which COPIES when donation is live, so the
+        # returned state never aliases donated buffers.
+        self._donate = jax.default_backend() in ("gpu", "tpu")
+        self._train_step = jax.jit(
+            train_step, donate_argnums=(0,) if self._donate else ())
         self._eval_step  = jax.jit(eval_step)
+
+    def _snapshot_state(self, state: TrainState) -> TrainState:
+        """A state safe to hold across future train steps.
+
+        With donation live, the held state's buffers are invalidated the
+        moment it (or its successor sharing them) re-enters train_step —
+        so snapshots must copy. Without donation the reference is fine.
+        """
+        if not self._donate:
+            return state
+        return jax.tree_util.tree_map(
+            lambda x: x.copy() if isinstance(x, jax.Array) else x, state)
 
     # ------------------------------------------------------------------
     # Epoch helpers
@@ -808,7 +830,7 @@ class Trainer:
         start_epoch    = 0
         best_metric    = float("inf") if self._lower_is_better else float("-inf")
         patience_count = 0
-        best_state     = state
+        best_state     = self._snapshot_state(state)
         self._global_step = 0
 
         if resume:
@@ -817,7 +839,7 @@ class Trainer:
             self._global_step = meta["global_step"]
             best_metric    = meta["best_metric"]
             patience_count = meta["patience_count"]
-            best_state     = state
+            best_state     = self._snapshot_state(state)
             print(
                 f"Resuming from epoch {start_epoch}, "
                 f"step {self._global_step}, "
@@ -894,7 +916,7 @@ class Trainer:
 
             if improved:
                 best_metric    = current
-                best_state     = state
+                best_state     = self._snapshot_state(state)
                 patience_count = 0
                 self.save_checkpoint(state)
             elif current is not None:

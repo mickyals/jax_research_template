@@ -1278,3 +1278,44 @@ class TestLossStackTrainer:
         assert bool(np.isfinite(val["val/loss"]))
         # l1 term really participates: its value is positive on a fitted net
         assert self._l1(best.params) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestDonation — donate_argnums on train_step (gpu/tpu) + snapshot copies
+# ---------------------------------------------------------------------------
+
+class TestDonation:
+    """Donation halves param/opt peak memory on accelerators; fit()'s
+    best_state snapshots must COPY when it is live (the snapshotted
+    buffers re-enter the donating step next batch). CPU XLA cannot
+    donate, so the flag must be off here (this suite runs on CPU)."""
+
+    def test_cpu_backend_disables_donation(self, trainer, state):
+        # _build_steps ran inside _init_state (state fixture)
+        assert trainer._donate is False
+
+    def test_snapshot_is_identity_when_not_donating(self, trainer, state):
+        assert trainer._snapshot_state(state) is state
+
+    def test_snapshot_copies_arrays_when_donating(self, trainer, state):
+        trainer._donate = True
+        snap = trainer._snapshot_state(state)
+        for a, b in zip(jax.tree_util.tree_leaves(state.params),
+                        jax.tree_util.tree_leaves(snap.params)):
+            assert a is not b
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def test_forced_donation_fit_still_returns_valid_best(
+            self, tmp_path, model, train_arrs, val_arrs, monkeypatch):
+        """Force the donate flag through _build_steps on CPU (XLA ignores
+        the donation with a warning) — the snapshot/copy path is exercised
+        end-to-end and the returned best state must remain usable."""
+        import training.trainer as tr
+        monkeypatch.setattr(
+            tr.jax, 'default_backend', lambda: 'gpu', raising=True)
+        t = Trainer(model, _METRICS, _base_config(tmp_path))
+        best = t.fit(_make_loader(train_arrs),
+                     _make_loader(val_arrs, shuffle=False))
+        assert t._donate is True
+        val = t._eval_model(best, _make_loader(val_arrs, shuffle=False))
+        assert bool(np.isfinite(val["val/mse"]))
