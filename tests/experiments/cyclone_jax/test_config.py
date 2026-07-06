@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from experiments.cyclone_jax.config import (
-    CONFIG_DIR, DATA_KEYS, MODEL_KEYS, load_config,
+    CONFIG_DIR, DATA_KEYS, MODEL_KEYS, load_config, load_tune_config,
 )
 from experiments.cyclone_jax.data.inputs import resolve_input
 from experiments.cyclone_jax.data.targets import resolve_target
@@ -248,3 +248,72 @@ class TestNormaliseConfigSurface:
     def test_tags_key_accepted(self, tmp_path):
         entry = _write(tmp_path, 's', {'root': 'x', 'tags': ['a']})
         assert load_config(entry, config_dir=tmp_path)['data']['tags'] == ['a']
+
+
+# ---------------------------------------------------------------------------
+# Tune config surface (configs/train/tune_*.yaml -> train/tune.py)
+# ---------------------------------------------------------------------------
+
+def _tune_yaml(tmp_path, block):
+    p = tmp_path / 'tune.yaml'
+    p.write_text(yaml.safe_dump(block))
+    return p
+
+
+class TestTuneConfigSurface:
+
+    VALID = {'base': 'b', 'n_trials': 2,
+             'search': {'trainer.scheduler_kwargs.value':
+                        {'low': 1e-4, 'high': 1e-2, 'log': True},
+                        'model.hidden_features': {'choices': [64, 256]}}}
+
+    def test_shipped_tune_config_loads(self):
+        cfg = load_tune_config(
+            CONFIG_DIR / 'train' / 'tune_memorise_mlp.yaml')
+        assert cfg['base'] == 'memorise_mlp'
+        assert cfg['retrain_best'] is True
+        assert all(p.startswith(('data.', 'model.', 'trainer.'))
+                   for p in cfg['search'])
+
+    def test_valid_block_loads(self, tmp_path):
+        cfg = load_tune_config(_tune_yaml(tmp_path, self.VALID))
+        assert set(cfg['search']) == {'trainer.scheduler_kwargs.value',
+                                      'model.hidden_features'}
+
+    def test_unknown_key_raises(self, tmp_path):
+        block = dict(self.VALID, n_trails=5)
+        with pytest.raises(ValueError, match='n_trails'):
+            load_tune_config(_tune_yaml(tmp_path, block))
+
+    def test_missing_base_raises(self, tmp_path):
+        block = {k: v for k, v in self.VALID.items() if k != 'base'}
+        with pytest.raises(ValueError, match="'base'"):
+            load_tune_config(_tune_yaml(tmp_path, block))
+
+    def test_empty_search_raises(self, tmp_path):
+        block = dict(self.VALID, search={})
+        with pytest.raises(ValueError, match='search'):
+            load_tune_config(_tune_yaml(tmp_path, block))
+
+    def test_bad_path_root_raises(self, tmp_path):
+        block = dict(self.VALID,
+                     search={'lr': {'low': 1e-4, 'high': 1e-2}})
+        with pytest.raises(ValueError, match="'lr'"):
+            load_tune_config(_tune_yaml(tmp_path, block))
+
+    def test_range_spec_unknown_key_raises(self, tmp_path):
+        block = dict(self.VALID, search={
+            'trainer.patience': {'low': 1, 'high': 9, 'lgo': True}})
+        with pytest.raises(ValueError, match='lgo'):
+            load_tune_config(_tune_yaml(tmp_path, block))
+
+    def test_choices_must_stand_alone(self, tmp_path):
+        block = dict(self.VALID, search={
+            'model.n_layers': {'choices': [1, 2], 'low': 1}})
+        with pytest.raises(ValueError, match='choices'):
+            load_tune_config(_tune_yaml(tmp_path, block))
+
+    def test_spec_needs_range_or_choices(self, tmp_path):
+        block = dict(self.VALID, search={'model.n_layers': {'log': True}})
+        with pytest.raises(ValueError, match='n_layers'):
+            load_tune_config(_tune_yaml(tmp_path, block))

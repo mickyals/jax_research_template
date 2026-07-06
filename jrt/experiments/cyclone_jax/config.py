@@ -53,8 +53,19 @@ DOMAIN_KEYS = {'lat', 'lon'}
 TRAINER_KEYS = {'seed', 'loss', 'loss_kwargs', 'optimizer',
                 'optimizer_kwargs', 'scheduler', 'scheduler_kwargs',
                 'num_epochs', 'check_val_every_n_epoch', 'gradient_clip',
-                'patience', 'patience_metric', 'metrics', 'logger',
-                'logger_kwargs', 'run_dir', 'callbacks'}
+                'patience', 'patience_metric', 'patience_direction',
+                'metrics', 'logger', 'logger_kwargs', 'run_dir',
+                'callbacks'}
+
+# Tune yamls (configs/train/tune_*.yaml -> train/tune.py). 'base' points
+# at a train yaml; 'search' maps dotted config paths to search specs.
+# The study direction is NOT a key — it derives from the base trainer's
+# patience_direction (one source of truth for better/worse).
+TUNE_KEYS = {'base', 'study', 'n_trials', 'search', 'retrain_best',
+             'n_startup_trials', 'n_warmup_steps', 'gpu'}
+
+_SEARCH_ROOTS = ('data.', 'model.', 'trainer.')
+_SEARCH_RANGE_KEYS = {'low', 'high', 'log', 'step'}
 
 # trainer.callbacks list items (name from train/log.py CALLBACKS; 'every'
 # in steps, default = est. steps per epoch; kwargs go to the factory).
@@ -158,3 +169,50 @@ def load_config(train_yaml, config_dir=None):
     # the pointer names survive for run naming ({model}-{data}-s{seed})
     return {'data': data, 'model': model, 'trainer': trainer,
             'names': {'data': raw['data'], 'model': raw.get('model')}}
+
+
+def load_tune_config(tune_yaml):
+    """Tune yaml -> validated dict (train/tune.py resolves the base).
+
+    Surface: {base: <train cfg name>, study?, n_trials?, retrain_best?,
+    n_startup_trials?, n_warmup_steps?, search: {dotted.path: spec}}.
+    Spec forms: {low, high, log?, step?} (float range; int when both
+    bounds are ints) or {choices: [...]}. Dotted paths must start
+    data. / model. / trainer. — the three blocks of the merged config
+    the overrides land in. Values are consumed in train/tune.py.
+    """
+    raw = _load_yaml(tune_yaml)
+    _check_keys(raw, TUNE_KEYS, str(tune_yaml))
+    if not raw.get('base'):
+        raise ValueError(f"{tune_yaml}: a 'base' train-config pointer is "
+                         f"required (configs/train/<name>.yaml).")
+    search = raw.get('search')
+    if not isinstance(search, dict) or not search:
+        raise ValueError(f"{tune_yaml}: 'search' must be a non-empty "
+                         f"mapping of dotted config paths to specs.")
+    for path, spec in search.items():
+        if not str(path).startswith(_SEARCH_ROOTS):
+            raise ValueError(
+                f"search path {path!r} must start with one of "
+                f"{_SEARCH_ROOTS} — overrides land in the merged "
+                f"data/model/trainer config.")
+        if not isinstance(spec, dict):
+            raise ValueError(f"search spec for {path!r} must be a mapping, "
+                             f"got {spec!r}")
+        if 'choices' in spec:
+            if set(spec) != {'choices'} or not spec['choices']:
+                raise ValueError(
+                    f"search spec for {path!r}: 'choices' must be a "
+                    f"non-empty list and stand alone.")
+        elif {'low', 'high'} <= set(spec):
+            unknown = set(spec) - _SEARCH_RANGE_KEYS
+            if unknown:
+                raise ValueError(
+                    f"unknown key(s) {sorted(unknown)} in search spec for "
+                    f"{path!r} — allowed: {sorted(_SEARCH_RANGE_KEYS)}")
+        else:
+            raise ValueError(
+                f"search spec for {path!r} needs either "
+                f"{{low, high[, log, step]}} or {{choices: [...]}}, "
+                f"got keys {sorted(spec)}")
+    return raw

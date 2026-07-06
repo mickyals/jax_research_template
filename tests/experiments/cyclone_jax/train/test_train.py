@@ -60,6 +60,16 @@ class TestHelpers:
         assert out['seed'] == 7
         assert out['patience_metric'] == 'train/loss'
 
+    def test_patience_direction_passes_through(self):
+        """tune.py derives the study direction from this key — it must
+        reach the jrt Trainer (which defaults lower_is_better)."""
+        base = {'data': {'batch_size': 4}, 'trainer': {}}
+        assert (build_trainer_config(base)['patience_direction']
+                == 'lower_is_better')
+        base['trainer']['patience_direction'] = 'higher_is_better'
+        assert (build_trainer_config(base)['patience_direction']
+                == 'higher_is_better')
+
     def test_null_logger_built_under_run_dir(self, tmp_path):
         cfg = {'trainer': {'logger': 'null', 'run_dir': str(tmp_path)}}
         logger = build_logger(cfg, tags=('mlp',))
@@ -175,6 +185,15 @@ class TestMain:
         assert np.isfinite(trainer._best_metric_value)
         assert (trainer._checkpoint_dir / 'best').exists()
         assert test_metrics == {}               # stratified split: no test
+
+    def test_main_accepts_merged_dict(self, library_root, tmp_path):
+        """tune.py retrain-best passes the merged best.yaml config
+        straight in — no pointer files involved."""
+        from experiments.cyclone_jax.config import load_config
+        entry = _write_configs(tmp_path / 'configs', library_root)
+        cfg = load_config(entry, config_dir=tmp_path / 'configs')
+        trainer, _ = main(cfg)
+        assert np.isfinite(trainer._best_metric_value)
 
     def test_prediction_records_written(self, library_root, tmp_path):
         """end_of_run: per-fix predictions + per-storm accuracy CSVs for

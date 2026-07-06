@@ -186,7 +186,7 @@ def _resolve_splits(cfg, loader, seed):
                      f"'year', 'stratified', 'memorise' or 'multistorm'.")
 
 
-def build_data(cfg, seed=0, check_fresh=True):
+def build_data(cfg, seed=0, check_fresh=True, lib=None):
     """Data config block -> DataBundle (see module docstring).
 
     Keys read beyond the spec keys (inputs/targets resolve their own):
@@ -195,6 +195,10 @@ def build_data(cfg, seed=0, check_fresh=True):
     splits get no stream. Train streams shuffle and drop the last partial
     batch; val/test streams are sequential and keep it (full coverage).
 
+    ``lib``: pass an already-loaded library to skip load_library —
+    tune.py caches it across trials (the caller guarantees it covers
+    cfg['sources']; a DataBundle.lib from the same sources does).
+
     Site overrides: CYCLONE_JAX_ROOT and CYCLONE_JAX_NUM_WORKERS in the
     shell beat the yaml's root / num_workers — library location and worker
     count are MACHINE properties, not experiment properties (same
@@ -202,9 +206,10 @@ def build_data(cfg, seed=0, check_fresh=True):
     """
     inputs  = resolve_input(cfg)
     targets = resolve_target(cfg)
-    root = os.environ.get('CYCLONE_JAX_ROOT') or cfg['root']
-    lib = load_library(root, names=tuple(inputs.sources) + ('cyclone',),
-                       check_fresh=check_fresh)
+    if lib is None:
+        root = os.environ.get('CYCLONE_JAX_ROOT') or cfg['root']
+        lib = load_library(root, names=tuple(inputs.sources) + ('cyclone',),
+                           check_fresh=check_fresh)
     loader = Loader(lib, inputs, targets,
                     sshs_min=int(cfg.get('sshs_min', 3)),
                     drop_subtropical=bool(cfg.get('drop_subtropical', False)))

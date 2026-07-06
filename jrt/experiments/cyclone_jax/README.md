@@ -67,6 +67,25 @@ python -m experiments.cyclone_jax.train.train \
   (`features.flatten`), so a shared pad keeps architectures identical
   across variants and the jit shape single.
 
+## Hyperparameter search (CLI)
+
+```bash
+python -m experiments.cyclone_jax.train.tune \
+    jrt/experiments/cyclone_jax/configs/train/tune_memorise_mlp.yaml --gpu 0
+```
+
+- The tune yaml points at a BASE train config and maps DOTTED paths into
+  the merged `{data, model, trainer}` config to search specs
+  (`{low, high, log?}` / `{choices: [...]}`) — architecture, data and
+  optimisation HPs through one mechanism.
+- Study direction derives from the base trainer's `patience_direction`
+  (the objective IS the patience metric) — there is no direction key.
+- Record (no sqlite): `<run_dir>/<study>/trials.csv` appended after every
+  trial + one wandb run per trial (group = study, run `{study}-t{N}`)
+  + `best.yaml` — the merged winning config, self-contained.
+- `retrain_best: true` retrains the winner under `<study>/best` with the
+  full end-of-run records, wandb-tagged `{study}-best`.
+
 ## Linux transfer (multi-CPU/GPU box)
 
 The configs are machine-agnostic; the shell names the site. Nothing in

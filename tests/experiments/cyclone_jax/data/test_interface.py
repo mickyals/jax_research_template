@@ -38,6 +38,18 @@ class TestBuildData:
         x = data.loader.build(0)['x']
         assert x['obs'].shape[1] == 5 and x['missing'].shape[1] == 5
 
+    def test_prebuilt_lib_skips_load(self, library_root, monkeypatch):
+        """lib= reuses an already-loaded library (tune.py caches it
+        across trials) — load_library must not run."""
+        import experiments.cyclone_jax.data.interface as intf
+        first = build_data(_cfg(library_root))
+        monkeypatch.setattr(
+            intf, 'load_library',
+            lambda *a, **k: pytest.fail('load_library ran despite lib='))
+        again = build_data(_cfg(library_root), lib=first.lib)
+        assert len(again.loader) == len(first.loader)
+        assert set(again.streams) == set(first.streams)
+
     def test_year_split(self, library_root):
         data = build_data(_cfg(
             library_root,

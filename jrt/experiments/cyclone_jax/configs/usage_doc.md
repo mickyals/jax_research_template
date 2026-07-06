@@ -33,6 +33,10 @@ configs/
 └── train/    # train.yaml: data: <scenario>, model: <name|null>, trainer: {...}
           #  top-level gpu: pins CUDA_VISIBLE_DEVICES (--gpu CLI overrides;
           #  a shell setting always wins)
+          #  tune_*.yaml: HP search over a base train yaml (train/tune.py)
+          #  — dotted data./model./trainer. search paths, direction derives
+          #  from the base's patience_direction, record = trials.csv +
+          #  per-trial wandb runs (group = study) + merged best.yaml
 ```
 
 Rules enforced by `config.py`:

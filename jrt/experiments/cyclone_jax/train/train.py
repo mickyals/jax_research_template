@@ -93,6 +93,8 @@ def build_trainer_config(cfg: dict) -> dict:
         'check_val_every_n_epoch': t.get('check_val_every_n_epoch', 1),
         'patience':         t.get('patience', 10),
         'patience_metric':  t.get('patience_metric', 'train/loss'),
+        'patience_direction': t.get('patience_direction',
+                                    'lower_is_better'),
         'max_grad_norm':    t.get('gradient_clip'),
         'seed':             t.get('seed', 0),
         'run_dir':          t.get('run_dir'),
@@ -215,11 +217,17 @@ def print_startup_banner(cfg, data, model, seed, log=None) -> None:
         log.info(nn.tabulate(model, rng)(X, train=False))
 
 
-def main(train_yaml, config_dir=None):
-    """Train per the config; returns (trainer, test_metrics)."""
-    cfg = load_config(train_yaml, config_dir=config_dir)
+def main(config, config_dir=None):
+    """Train per the config; returns (trainer, test_metrics).
+
+    ``config`` is a train-yaml path, or an ALREADY-MERGED {data, model,
+    trainer, names} dict — tune.py's retrain-best passes the winning
+    merged config (the best.yaml record) straight in.
+    """
+    cfg = (config if isinstance(config, dict)
+           else load_config(config, config_dir=config_dir))
     if not cfg['model']:
-        raise ValueError(f"{train_yaml}: training needs a 'model' pointer "
+        raise ValueError(f"{config}: training needs a 'model' pointer "
                          f"(configs/models/<name>.yaml).")
     seed = cfg['trainer'].get('seed', 0)
 
