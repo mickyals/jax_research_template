@@ -27,6 +27,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import matplotlib
+matplotlib.use('Agg')     # headless: callback figures must never spawn a
+                          # Tk GUI (off-thread Tk GC crashes the run)
 import numpy as np
 
 from training.logger import create_logger
