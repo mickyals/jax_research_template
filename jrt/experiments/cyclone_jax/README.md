@@ -18,6 +18,7 @@ cyclone_jax/
 ├── train/           # train.py entry + losses/metrics/log builders
 │                    #   (tune.py / evaluate.py: plan steps 6-7)
 ├── visualise/       # figures.py: storm panel/sequence/gif mechanics
+├── notebooks/       # run_experiment.ipynb — cells ready (kernel 'jrt')
 └── runs/            # run artifacts, gitignored (**/runs/)
 ```
 
@@ -73,9 +74,14 @@ the code path is Windows-specific — the Windows-side caveats (workers,
 OneDrive/orbax) simply disappear on Linux.
 
 ```bash
-conda env create -f environment.yaml        # name: jrt; jax[cuda13] default
-conda activate jrt
-pip install wandb                           # optional dep, needed for logging
+# Environment — requirements.txt is the single source of truth:
+#   conda box:     conda env create -f environment.yaml && conda activate jrt
+#   pip-only box (venv is all the cluster gives you):
+python3 -m venv ~/jrt-venv
+. ~/jrt-venv/bin/activate
+pip install -r requirements.txt            # jax[cuda13] default; wandb included
+python -m ipykernel install --user --name jrt --display-name "Python (jrt)"
+
 export PYTHONPATH=jrt
 export WANDB_API_KEY=...
 
@@ -95,8 +101,10 @@ python -m experiments.cyclone_jax.train.train \
   `CUDA_VISIBLE_DEVICES` always wins over `--gpu`/yaml).
 - `num_workers > 0` uses fork workers that inherit the mmaps for free
   (the reason it must stay 0 on Windows/spawn).
-- From a notebook: set `CUDA_VISIBLE_DEVICES` + `sys.path` in the FIRST
-  cell (JAX initialises once per kernel); fresh `run_dir` per run;
+- From a notebook: `notebooks/run_experiment.ipynb` has the cells ready
+  (kernel `jrt`). Rules it encodes: `CUDA_VISIBLE_DEVICES` + `sys.path`
+  in the FIRST cell (JAX initialises once per kernel — restart to switch
+  GPU); fresh `run_dir` per run (OneDrive/orbax gotcha on Windows);
   restart the kernel between big runs (device memory accumulates).
 
 ## Principles

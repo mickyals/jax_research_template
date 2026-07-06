@@ -53,16 +53,31 @@ deep-dive on each surface. Every knob a yaml accepts is key-set validated
 
 ### 1. Create the environment
 
+`requirements.txt` is the single source of truth; `environment.yaml` is a
+thin conda shell that installs it. Two equivalent paths:
+
 ```bash
+# Conda box (workstation):
 conda env create -f environment.yaml   # creates the 'jrt' environment
 conda activate jrt
+
+# pip-only box (many clusters expose only venv + pip):
+python3 -m venv ~/jrt-venv
+. ~/jrt-venv/bin/activate
+pip install -r requirements.txt
 ```
 
-For GPU/TPU support, follow the [JAX install guide](https://jax.readthedocs.io/en/latest/installation.html) after activating the environment:
+Register the Jupyter kernel once per environment (notebooks then select
+"Python (jrt)"):
 
 ```bash
-pip install --upgrade "jax[cuda12]"   # CUDA 12.x
+python -m ipykernel install --user --name jrt --display-name "Python (jrt)"
 ```
+
+The default JAX build is `jax[cuda13]` (Linux GPU). For CUDA 12 or
+CPU-only boxes edit the one jax line in `requirements.txt` (variants are
+listed there) — and never type `pip install jax>=0.10` bare in a shell:
+the `>` redirects and you get an unconstrained install.
 
 ### 2. Run the current experiment (cyclone_jax)
 
@@ -70,11 +85,18 @@ pip install --upgrade "jax[cuda12]"   # CUDA 12.x
 # Put jrt/ on the Python path once (packages are rooted there):
 #   export PYTHONPATH=jrt        (bash)   |   $env:PYTHONPATH="jrt"   (PowerShell)
 
-# Edit the data root + year lists in the scenario yaml, then:
-export WANDB_API_KEY=...           # when trainer.logger: wandb
+# Site knobs (machine properties — the yamls never need editing per box):
+export CYCLONE_JAX_ROOT=/data/Caribbean-Obs    # overrides the yamls' root:
+export CYCLONE_JAX_NUM_WORKERS=8               # overrides num_workers (Linux)
+export WANDB_API_KEY=...                       # when trainer.logger: wandb
+
 python -m experiments.cyclone_jax.train.train \
     jrt/experiments/cyclone_jax/configs/train/train.yaml --gpu 0
 ```
+
+Prefer notebooks? `jrt/experiments/cyclone_jax/notebooks/run_experiment.ipynb`
+has the cells ready (kernel `jrt`): env pinning first, collision-ceiling
+check, then `main(yaml)`.
 
 The entry yaml points at one data scenario and one model config
 (`data: overfit`, `model: mlp | siren | finer`) — swapping either is a
@@ -139,10 +161,12 @@ runs/my_experiment/run_01/
 ├── checkpoints/
 │   ├── best/       Best validation checkpoint (orbax pytree)
 │   └── latest/     End-of-epoch checkpoint for resume
+├── figures/        svg + png stills (training.logger.emit_figure)
+├── norm_stats.json      cyclone_jax: stats evaluation must reuse
+├── data_manifest.json   cyclone_jax: split sizes/class counts + config
 └── logs/
     ├── hparams.json
-    ├── figures/    Saved figures (NullLogger) or WandB local cache
-    └── wandb/      (when log_backend: wandb)
+    └── wandb/      (when logging to wandb)
 ```
 
 ---

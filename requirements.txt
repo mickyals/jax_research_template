@@ -1,0 +1,55 @@
+# Canonical dependency list — BOTH install paths consume this file, so
+# conda and pip-only environments stay identical by construction:
+#
+#   conda (workstation):   conda env create -f environment.yaml   # name: jrt
+#   venv (pip-only cluster):
+#       python3 -m venv ~/jrt-venv
+#       . ~/jrt-venv/bin/activate
+#       pip install -r requirements.txt
+#       python -m ipykernel install --user --name jrt --display-name "Python (jrt)"
+#
+# Never `pip install jax>=0.10` bare in a shell — the `>` redirects and
+# you silently get an unconstrained install plus a file named '=0.10'.
+# Quote the spec or (better) point pip at this file.
+
+# --- Core ML framework ------------------------------------------------
+# GPU by default — deployment environments are Linux. jax[cuda13] pulls
+# the matching jaxlib + CUDA plugin. Variants:
+#   jax[cuda12]>=0.10   CUDA 12.x clusters
+#   jax>=0.10           CPU-only (e.g. Windows laptop — no CUDA wheels)
+jax[cuda13]>=0.10
+flax>=0.12
+optax>=0.2
+orbax-checkpoint>=0.11
+
+# --- Scientific computing ---------------------------------------------
+numpy>=2.0
+scipy>=1.13
+
+# --- Data ----------------------------------------------------------------
+pandas>=2.0
+pillow>=10.0
+
+# --- Visualization ------------------------------------------------------
+matplotlib>=3.9
+seaborn>=0.13
+plotly>=5.0
+
+# --- Notebooks ------------------------------------------------------------
+ipython>=8.0
+ipykernel>=6.0
+
+# --- Development and testing ----------------------------------------------
+pytest>=9.0
+pyyaml>=6.0
+rich>=13.0
+tqdm>=4.0
+
+# --- Experiment tracking + tuning ------------------------------------------
+wandb>=0.16
+optuna>=4.0
+
+# --- Optional (install as needed) -------------------------------------------
+# cartopy>=0.25    # storm-panel basemaps (plain-axes fallback without;
+#                  # Natural Earth shapefiles download at first render)
+# torch>=2.0       # TensorBoardLogger only

@@ -1,3 +1,6 @@
+# Thin conda shell: conda supplies python + pip, requirements.txt is the
+# SINGLE source of truth for dependencies (pip-only clusters install the
+# same file directly — see its header for the venv recipe).
 name: jrt
 
 channels:
@@ -9,46 +12,4 @@ dependencies:
   - pip
 
   - pip:
-      # Core ML framework
-      # GPU by default — all deployment environments are Linux. jax[cuda13]
-      # pulls the matching jaxlib + CUDA 13 plugin. On a Windows/CPU-only box
-      # (no CUDA wheels for Windows) swap this line for plain `jax>=0.10`.
-      - jax[cuda13]>=0.10
-      - flax>=0.12
-      - optax>=0.2
-      - orbax-checkpoint>=0.11
-
-      # Scientific computing
-      - numpy>=2.0
-      - scipy>=1.13
-
-      # Data
-      - pandas>=2.0
-      - pillow>=10.0
-
-      # Visualization
-      - matplotlib>=3.9
-      - seaborn>=0.13
-      - plotly>=5.0
-
-      # Notebooks
-      - ipython>=8.0
-      - ipykernel>=6.0
-
-      # Development and testing
-      - pytest>=9.0
-      - pyyaml>=6.0
-      - rich>=13.0
-      - tqdm>=4.0
-
-      # Hyperparameter optimization
-      - optuna>=4.0
-
-      # Optional -- install as needed
-      # - wandb>=0.16
-      # - torch>=2.0        # TensorBoardLogger only
-
-      # JAX install variants (default above is jax[cuda13], Linux GPU):
-      #   pip install --upgrade "jax[cuda12]"  # CUDA 12.x
-      #   pip install --upgrade "jax"          # CPU only (e.g. Windows laptop)
-      # See https://jax.readthedocs.io/en/latest/installation.html
+      - -r requirements.txt
