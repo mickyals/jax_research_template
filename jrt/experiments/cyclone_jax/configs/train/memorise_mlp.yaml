@@ -12,16 +12,16 @@ data: memorise_2005_2024
 model: mlp
 
 trainer:
-  seed: 0
+  seed: 78138
   loss: cross_entropy
   optimizer: adam                 # no weight decay — memorisation probe
   scheduler: constant
   scheduler_kwargs: {value: 1.0e-3}
 
-  num_epochs: 300
-  patience: 30                    # on train/loss — generous; loss should fall
+  num_epochs: 15
+  patience: 5                   # on train/loss — generous; loss should fall
   patience_metric: train/loss
-  check_val_every_n_epoch: 5      # val == train: keep extra sweeps sparse
+  check_val_every_n_epoch: 1      # val == train: keep extra sweeps sparse
 
   metrics: [cross_entropy, accuracy]
 
@@ -29,8 +29,8 @@ trainer:
     # exact CM + per-class accuracy scalars + figure; every N STEPS.
     # Verified against the library 2026-07-06: 5739 train fixes / 32
     # = 179 steps/epoch -> every 900 ~ one full extra sweep per 5 epochs.
-    - {name: confusion_matrix, split: val, every: 900}
-    - {name: storm_panel, split: train, every: 900}
+    - {name: confusion_matrix, split: val, every: 100}
+    - {name: storm_panel, split: train, every: 100}
 
   logger: wandb                   # swap to null for an offline smoke run
   logger_kwargs: {project: cyclone_jax}
