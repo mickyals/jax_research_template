@@ -90,6 +90,18 @@ class TestBuildData:
                                       data.splits['val'])
         assert set(data.streams) == {'train', 'val'}
 
+    def test_memorise_years_filter(self, library_root):
+        base = {'strategy': 'memorise', 'exclude_multistorm': False}
+        all_ = build_data(_cfg(library_root, split=base))
+        kept = build_data(_cfg(library_root,
+                               split={**base, 'years': [2020]}))
+        none = build_data(_cfg(library_root, batch_size=None,
+                               split={**base, 'years': [1999]}))
+        # fixture fixes are all August 2020
+        np.testing.assert_array_equal(kept.splits['train'],
+                                      all_.splits['train'])
+        assert len(none.splits['train']) == 0
+
     def test_memorise_excludes_multistorm_by_default(self, library_root):
         data = build_data(_cfg(library_root,
                                split={'strategy': 'memorise'}))

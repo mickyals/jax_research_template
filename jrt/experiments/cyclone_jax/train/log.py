@@ -259,7 +259,8 @@ def end_of_run(cfg, data, logger, state, global_step,
     Runs after trainer.test(): (1) the confusion_matrix callback on the
     test split, if a test stream exists; (2) for each sid named in the
     data yaml's ``storm_panels: {test: ...}`` knob (sid | [sids] |
-    'random' -> one random test sid), the sid's test-split fixes are
+    'random' -> one random sid), the sid's fixes — from the test split,
+    or the train split when no test split exists (memorise) — are
     time-ordered, evenly subsampled to ``n_frames``, rendered as panels,
     and saved as ONE gif (run_dir/figures/storm_sequence_<sid>.gif,
     logged as an artifact — gif only when there is a run_dir) plus
@@ -277,9 +278,15 @@ def end_of_run(cfg, data, logger, state, global_step,
             state, 0, global_step)
 
     sel = (ctx['storm_panels'] or {}).get('test')
-    if sel is None or data.loader is None or 'test' not in data.splits:
+    if sel is None or data.loader is None:
         return
-    split_idx = np.asarray(data.splits['test'])
+    # sequences come from the test split when one exists; scenarios
+    # without one (memorise: train == val == all fixes) fall back to
+    # train so the showpiece storms still render
+    src = 'test' if 'test' in data.splits else 'train'
+    if src not in data.splits:
+        return
+    split_idx = np.asarray(data.splits[src])
     split_sids = np.asarray(data.loader.fixes['sid'])[split_idx]
     if isinstance(sel, (list, tuple)):
         sids = [str(s) for s in sel]
@@ -296,7 +303,7 @@ def end_of_run(cfg, data, logger, state, global_step,
         if not len(pool):
             raise ValueError(
                 f"storm_panels['test'] = {sid!r} matches no fix in the "
-                f"test split — check the sid against the library.")
+                f"{src!r} split — check the sid against the library.")
         pool = pool[np.argsort(np.asarray(data.loader.fixes['time'])[pool])]
         if len(pool) > n_frames:
             keep = np.linspace(0, len(pool) - 1, n_frames).round().astype(int)
@@ -313,7 +320,7 @@ def end_of_run(cfg, data, logger, state, global_step,
         stills = sorted({0, len(figs) // 2, len(figs) - 1})
         for k, fig in enumerate(figs):
             if k in stills:      # _emit hands to the logger, which closes
-                _emit(fig, f'storm_sequence_{sid}_f{k}', 'test',
+                _emit(fig, f'storm_sequence_{sid}_f{k}', src,
                       global_step, logger, run_dir)
             else:
                 plt.close(fig)

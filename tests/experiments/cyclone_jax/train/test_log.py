@@ -325,6 +325,22 @@ class TestEndOfRun:
         self._run(run_dir=str(tmp_path), storm_panels={'test': 'B'})
         assert plt.get_fignums() == []
 
+    def test_no_test_split_falls_back_to_train(self, tmp_path):
+        """memorise scenarios: no test split exists, but storm_panels
+        test-sids must still render sequences — from the train split."""
+        data = _bundle({}, loader=FakeLoader(self.SIDS, self._times()),
+                       splits={'train': np.arange(5)})
+        logger = FakeLogger()
+        cfg = {'data': {'storm_panels': {'test': 'B'}, 'domain': DOMAIN},
+               'model': None, 'trainer': {'run_dir': str(tmp_path)}}
+        end_of_run(cfg, data, logger, _dual_state(), global_step=42,
+                   basemap=False)
+        assert (tmp_path / 'figures' / 'storm_sequence_B.gif').exists()
+        # stills tagged with the split they actually came from
+        assert sum(t.startswith('train/storm_sequence_B') for t, _ in
+                   logger.figures) == 3
+        assert logger.metrics == []             # still no test CM
+
 
 # ---------------------------------------------------------------------------
 # Registry surface

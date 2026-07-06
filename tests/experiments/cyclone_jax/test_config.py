@@ -44,10 +44,10 @@ class TestShippedConfigs:
         assert spec_t.n_classes == 6
 
     def test_expected_scenarios_shipped(self):
-        assert SHIPPED_SCENARIOS == ['memorise', 'memorise_land',
-                                     'memorise_marine', 'multistorm',
-                                     'overfit', 'test', 'train',
-                                     'train_land', 'train_marine']
+        assert SHIPPED_SCENARIOS == ['memorise', 'memorise_2005_2024',
+                                     'memorise_land', 'memorise_marine',
+                                     'multistorm', 'overfit', 'test',
+                                     'train', 'train_land', 'train_marine']
 
     @pytest.mark.parametrize('name', SHIPPED_MODELS)
     def test_every_shipped_model_config_validates(self, name, tmp_path):

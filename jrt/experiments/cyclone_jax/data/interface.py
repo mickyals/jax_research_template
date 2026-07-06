@@ -25,8 +25,10 @@ Split strategies (cfg['split']['strategy']):
                   split: {strategy: stratified, n_per_class: 8}
     memorise    FULL-dataset memorisation (identifiability probe): train
                 and val are ALL fixes (same indices; multistorm fixes
-                excluded by default, as for 'year'):
-                  split: {strategy: memorise}
+                excluded by default, as for 'year'). An optional flat
+                years list restricts the probe (e.g. keep the 2025
+                land-only diagnostic year out):
+                  split: {strategy: memorise, years: [2005, ..., 2024]}
     multistorm  the multi-driver fixes as an OOD test set:
                   split: {strategy: multistorm}   -> {'test': idx}
 
@@ -170,8 +172,13 @@ def _resolve_splits(cfg, loader, seed):
         return {'train': idx, 'val': idx.copy()}
     if strategy == 'memorise':
         idx = np.arange(len(loader))
+        years = split.get('years')
+        if years is not None:      # optional flat list: restrict the probe
+            yr = (np.asarray(loader.fixes['time']).astype('datetime64[Y]')
+                  .astype(int) + 1970)
+            idx = idx[np.isin(yr[idx], np.asarray(list(years)))]
         if split.get('exclude_multistorm', True):
-            idx = idx[~_multistorm_mask(loader)]
+            idx = idx[~_multistorm_mask(loader)[idx]]
         return {'train': idx, 'val': idx.copy()}
     if strategy == 'multistorm':
         return {'test': np.nonzero(_multistorm_mask(loader))[0]}

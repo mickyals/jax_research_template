@@ -1,0 +1,52 @@
+# =============================================================================
+# cyclone_jax data scenario: MEMORISE_2005_2024 — full-library memorisation
+# =============================================================================
+# The memorisation run of record: train == val == every 2005-2024 fix
+# (2025 — the natural land-only diagnostic year — deliberately held out;
+# multi-driver timestamps excluded as always). See memorise.yaml for the
+# probe's semantics and train-yaml pairing notes. Six showpiece storms
+# render as end-of-run sequences (gif + stills) via storm_panels.test —
+# with no test split they draw from the train split.
+
+root: "E:/Caribbean-Obs"          # shell CYCLONE_JAX_ROOT overrides
+
+sources: [land, marine]
+selection: all
+max_stations: null
+pad_to: 1536
+
+target: usa_sshs
+sshs_min: 3
+class_set: [3, 4, 5, 6, 7, 8]
+drop_subtropical: false
+
+source_id: {land: -1, upper: 0, marine: 1}
+timesteps: 1
+
+batch_size: 32
+
+num_workers: 0                    # shell CYCLONE_JAX_NUM_WORKERS overrides
+prefetch_factor: 2
+
+split:
+  strategy: memorise              # train == val == the year-filtered fixes
+  exclude_multistorm: true
+  years: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014,
+          2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+
+tags: [memorise, identifiability, y2005-2024]
+
+storm_panels:
+  train: random                   # during-training panel: random fix
+  test:                           # end-of-run sequences (sids from the library)
+    - "2024181N09320"             # BERYL 2024
+    - "2017242N16333"             # IRMA 2017
+    - "2007225N12331"             # DEAN 2007
+    - "2022266N12294"             # IAN 2022
+    - "2010236N12341"             # EARL 2010
+    - "2020318N16289"             # IOTA 2020
+
+normalise:
+  method: standardise
+  stats: auto                     # over the train split = the whole set —
+                                  # correct for memorisation
