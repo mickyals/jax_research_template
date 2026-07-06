@@ -43,6 +43,12 @@ from utils.normalise import NORMALISERS, StatsAccumulator, get_normaliser
 
 _STAT_KEYS = ('mean', 'std', 'min', 'max', 'count')
 
+# Coordinate-convention guard rails: the store's canonical convention is
+# degrees with lon in -180..180 (sources/build.py stores source lon
+# verbatim — a 0..360 source must be canonicalised at volume build, this
+# layer only refuses to scale it silently).
+_GEO_LIMITS = {'lat': (-90.0, 90.0), 'lon': (-180.0, 180.0)}
+
 
 def _bounds(entry: Mapping, method: str) -> tuple[float, float]:
     """One field's (lo, hi) for `method`; never-observed -> identity-ish
@@ -91,6 +97,16 @@ class NormSpec:
                                           float(self.stats['lat']['max'])))
         object.__setattr__(self, '_lon', (float(self.stats['lon']['min']),
                                           float(self.stats['lon']['max'])))
+        for f in ('lat', 'lon'):
+            lo, hi = getattr(self, f'_{f}')
+            glo, ghi = _GEO_LIMITS[f]
+            if np.isfinite(lo) and np.isfinite(hi) and (lo < glo or hi > ghi):
+                hint = (' — a 0..360-convention source? Canonicalise at '
+                        'volume build: ((lon + 180) % 360) - 180'
+                        if f == 'lon' else '')
+                raise ValueError(
+                    f"{f} stats [{lo:g}, {hi:g}] fall outside the "
+                    f"geographic range [{glo:g}, {ghi:g}]{hint}.")
 
     # ------------------------------------------------------------------
     # Application (sampler.Loader calls these; see its docstring for WHERE)
@@ -183,8 +199,21 @@ class NormPolicy:
         if self.domain:
             for f in ('lat', 'lon'):
                 if f in self.domain:
-                    lo, hi = self.domain[f]
-                    stats[f] = {'min': float(lo), 'max': float(hi)}
+                    dlo, dhi = self.domain[f]
+                    if self.auto:
+                        # observed coords must fit the declared domain, or
+                        # the [-1,1] scaling silently leaves the unit range
+                        lo = float(stats[f]['min'])
+                        hi = float(stats[f]['max'])
+                        if np.isfinite(lo) and np.isfinite(hi) \
+                                and (lo < dlo or hi > dhi):
+                            raise ValueError(
+                                f"observed {f} range [{lo:g}, {hi:g}] "
+                                f"exceeds the declared domain "
+                                f"[{dlo:g}, {dhi:g}] — coords would scale "
+                                f"outside [-1, 1]; widen the domain block "
+                                f"or fix the data.")
+                    stats[f] = {'min': float(dlo), 'max': float(dhi)}
         return NormSpec(method=self.method, channels=channels, stats=stats)
 
 
@@ -238,4 +267,11 @@ def resolve_normalise(config: dict) -> NormPolicy | None:
             raise ValueError(f"domain block has unknown key(s) "
                              f"{sorted(unknown)} — only lat/lon.")
         domain = {f: (float(v[0]), float(v[1])) for f, v in domain.items()}
+        for f, (lo, hi) in domain.items():
+            glo, ghi = _GEO_LIMITS[f]
+            if not (glo <= lo < hi <= ghi):
+                raise ValueError(
+                    f"domain.{f} [{lo:g}, {hi:g}] must satisfy "
+                    f"{glo:g} <= lo < hi <= {ghi:g} (degrees; lon in "
+                    f"the -180..180 convention).")
     return NormPolicy(method=method, inline=inline, domain=domain)

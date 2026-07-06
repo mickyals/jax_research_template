@@ -66,6 +66,15 @@ class TestResolve:
         with pytest.raises(ValueError, match='alt'):
             resolve_normalise({**CFG, 'domain': {'alt': [0, 1]}})
 
+    def test_domain_0360_lon_raises(self):
+        # 0..360-convention Caribbean box — must be caught at resolve
+        with pytest.raises(ValueError, match='-180'):
+            resolve_normalise({**CFG, 'domain': {'lon': [260, 330]}})
+
+    def test_domain_inverted_bounds_raise(self):
+        with pytest.raises(ValueError, match='lat'):
+            resolve_normalise({**CFG, 'domain': {'lat': [35, 0]}})
+
 
 # ---------------------------------------------------------------------------
 # Materialisation (train-split stats)
@@ -113,6 +122,31 @@ class TestMaterialise:
         with pytest.raises(ValueError, match='sst'):
             NormSpec(method='standardise', channels=spec.channels,
                      stats=stats)
+
+    def test_lon_0360_stats_raise_with_hint(self, spec):
+        # a 0..360-convention source would otherwise scale silently
+        stats = spec.to_json()['stats']
+        stats['lon'] = {'min': 260.0, 'max': 330.0}
+        with pytest.raises(ValueError, match='180'):
+            NormSpec(method='standardise', channels=spec.channels,
+                     stats=stats)
+
+    def test_bad_lat_stats_raise(self, spec):
+        stats = spec.to_json()['stats']
+        stats['lat'] = {'min': -95.0, 'max': 30.0}
+        with pytest.raises(ValueError, match='lat'):
+            NormSpec(method='standardise', channels=spec.channels,
+                     stats=stats)
+
+    def test_observed_coords_outside_domain_raise(self, raw_loader):
+        # domain narrower than the data -> coords would leave [-1, 1]
+        lats = np.concatenate([raw_loader.build(i)['x']['lat']
+                               for i in range(8)])
+        lo, hi = float(lats.min()), float(lats.max())
+        p = resolve_normalise(
+            {**CFG, 'domain': {'lat': [lo + (hi - lo) / 2, hi]}})
+        with pytest.raises(ValueError, match='domain'):
+            p.materialise(raw_loader, np.arange(8))
 
     def test_json_round_trip(self, spec):
         clone = NormSpec.from_json(spec.to_json())
