@@ -1,0 +1,43 @@
+# =============================================================================
+# cyclone_jax data scenario: MEMORISE — full-dataset memorisation probe
+# =============================================================================
+# Supervisor identifiability question: can a model memorise EVERY fix from
+# the sparse observation network alone? train == val == all fixes (multi-
+# driver timestamps excluded, as for year splits). The headline output is
+# WHICH storms/times fail — see the confusion_matrix / storm_panel
+# callbacks and (later) evaluate's prediction table.
+#
+# Pair with a train yaml that watches train/loss (patience_metric), turns
+# regularisation OFF, and sets callback cadence to several epochs — with
+# train == val every val pass is a full extra sweep of the dataset.
+# Capacity ladder = clone the model yaml at increasing hidden_features.
+
+root: "E:/Caribbean-Obs"
+
+sources: [land, marine]
+selection: all
+max_stations: null
+pad_to: 1536
+
+target: usa_sshs
+sshs_min: 3
+class_set: [3, 4, 5, 6, 7, 8]
+drop_subtropical: false
+
+source_id: {land: -1, upper: 0, marine: 1}
+timesteps: 1
+
+batch_size: 32
+split:
+  strategy: memorise              # train == val == ALL fixes
+  exclude_multistorm: true
+
+tags: [memorise, identifiability]
+
+storm_panels:
+  train: random
+
+normalise:
+  method: standardise
+  stats: auto                     # over the train split = the whole set —
+                                  # correct for memorisation

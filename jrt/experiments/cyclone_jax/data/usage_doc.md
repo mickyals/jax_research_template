@@ -23,6 +23,7 @@ splits, streams` — all by name, notebook-friendly.
 | `targets.py` | `TargetSpec` / `resolve_target`: label space (class_set; label = position in set), `build_y`, class names |
 | `transformations.py` | numpy mechanics (missingness). Wind lives in `utils/geoscience/met_conversions`, normalisers in `utils/jax_core/helpers` — not duplicated here |
 | `sampler.py` | `Loader` (deterministic fix -> ragged named sample) + `Sampler` (seeded index streams) + `split_by_year` / `stratified_fixes` |
+| `identifiability.py` | `input_collisions`: identical-input/different-target groups + memorisation accuracy ceiling (run before the memorise scenario) |
 | `batching.py` | `collate(samples, pad_to)`: the ONLY sample -> device-batch translator |
 | `interface.py` | `build_data`, `BatchStream`, split-strategy resolution |
 
@@ -68,6 +69,7 @@ batch['meta']    # sid list, lat/lon/time arrays, n_stations
 |---|---|---|
 | `year` | `years: {train, val, test}`, `exclude_multistorm` (default true) | disjoint year splits; multi-driver fixes excluded |
 | `stratified` | `n_per_class` | balanced overfit subset; train == val (memorisation gate) |
+| `memorise` | `exclude_multistorm` (default true) | train == val == ALL fixes (full-dataset identifiability probe) |
 | `multistorm` | — | `{'test': ...}` = all fixes at multi-driver timestamps (OOD) |
 | *(absent)* | — | `{'all': ...}` for exploration |
 

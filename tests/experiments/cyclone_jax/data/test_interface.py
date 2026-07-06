@@ -78,6 +78,23 @@ class TestBuildData:
         with pytest.raises(ValueError, match='n_per_class'):
             build_data(_cfg(library_root, split={'strategy': 'stratified'}))
 
+    def test_memorise_split_train_eq_val_eq_all(self, library_root):
+        data = build_data(_cfg(
+            library_root,
+            split={'strategy': 'memorise', 'exclude_multistorm': False}))
+        np.testing.assert_array_equal(data.splits['train'],
+                                      np.arange(len(data.loader)))
+        np.testing.assert_array_equal(data.splits['train'],
+                                      data.splits['val'])
+        assert set(data.streams) == {'train', 'val'}
+
+    def test_memorise_excludes_multistorm_by_default(self, library_root):
+        data = build_data(_cfg(library_root,
+                               split={'strategy': 'memorise'}))
+        multi = np.asarray(data.lib['shelves']['cyclone']['multi_times'])
+        kept = np.asarray(data.loader.fixes['time'])[data.splits['train']]
+        assert len(kept) and not np.isin(kept, multi).any()
+
     def test_unknown_strategy_raises(self, library_root):
         with pytest.raises(ValueError, match='split.strategy'):
             build_data(_cfg(library_root, split={'strategy': 'random'}))

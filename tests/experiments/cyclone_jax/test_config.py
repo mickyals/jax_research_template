@@ -25,10 +25,12 @@ class TestShippedConfigs:
 
     def test_train_entry_point_loads(self):
         cfg = load_config(CONFIG_DIR / 'train' / 'train.yaml')
-        assert set(cfg) == {'data', 'model', 'trainer'}
+        assert set(cfg) == {'data', 'model', 'trainer', 'names'}
         assert cfg['model']['name'] == 'mlp'         # the gate baseline
         assert cfg['trainer']['seed'] == 0
         assert cfg['data']['split']['strategy'] == 'stratified'
+        # pointer names survive for run naming ({model}-{data}-s{seed})
+        assert cfg['names'] == {'data': 'overfit', 'model': 'mlp'}
 
     @pytest.mark.parametrize('scenario', SHIPPED_SCENARIOS)
     def test_every_scenario_resolves_through_the_specs(self, scenario,
@@ -42,8 +44,8 @@ class TestShippedConfigs:
         assert spec_t.n_classes == 6
 
     def test_expected_scenarios_shipped(self):
-        assert SHIPPED_SCENARIOS == ['multistorm', 'overfit', 'test',
-                                     'train']
+        assert SHIPPED_SCENARIOS == ['memorise', 'multistorm', 'overfit',
+                                     'test', 'train']
 
     @pytest.mark.parametrize('name', SHIPPED_MODELS)
     def test_every_shipped_model_config_validates(self, name, tmp_path):

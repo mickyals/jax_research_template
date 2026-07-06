@@ -3,6 +3,8 @@ Tests for train/train.py — config translation helpers and an end-to-end
 fit on the synthetic library fixture (2 epochs, tiny model, null logger).
 """
 
+import json
+
 import numpy as np
 import pytest
 import yaml
@@ -81,6 +83,42 @@ class TestHelpers:
         assert seen['tags'] == ['mlp', 'baseline', 'extra']
         assert seen['project'] == 'p'
 
+    def test_wandb_gains_data_tags_and_run_name(self, monkeypatch):
+        """Run tags = model + data + kwargs tags; run name from the config
+        pointer names ({model}-{data}-s{seed})."""
+        import experiments.cyclone_jax.train.train as tr
+        seen = {}
+
+        def fake_create_logger(backend, log_dir=None, config=None, **kw):
+            seen.update(kw, config=config)
+            return object()
+
+        monkeypatch.setattr(tr, 'create_logger', fake_create_logger)
+        cfg = {'data': {'tags': ['memorise', 'identifiability']},
+               'names': {'model': 'mlp', 'data': 'memorise'},
+               'trainer': {'logger': 'wandb', 'seed': 3,
+                           'logger_kwargs': {'tags': ['extra']}}}
+        tr.build_logger(cfg, tags=('mlp',))
+        assert seen['tags'] == ['mlp', 'memorise', 'identifiability', 'extra']
+        assert seen['name'] == 'mlp-memorise-s3'
+
+    def test_norm_stats_join_logged_config(self, monkeypatch):
+        import experiments.cyclone_jax.train.train as tr
+        seen = {}
+
+        def fake_create_logger(backend, log_dir=None, config=None, **kw):
+            seen['config'] = config
+            return object()
+
+        class FakeNorms:
+            def to_json(self):
+                return {'method': 'standardise'}
+
+        monkeypatch.setattr(tr, 'create_logger', fake_create_logger)
+        tr.build_logger({'trainer': {'logger': 'null'}}, tags=(),
+                        norms=FakeNorms())
+        assert seen['config']['norm_stats'] == {'method': 'standardise'}
+
 
 # ---------------------------------------------------------------------------
 # End-to-end on the fixture library
@@ -103,6 +141,23 @@ class TestMain:
                               {'name': 'l1_params', 'weight': 1.0e-4}]})
         trainer, _ = main(entry, config_dir=tmp_path / 'configs')
         assert np.isfinite(trainer._best_metric_value)
+
+    def test_run_records_written(self, library_root, tmp_path):
+        """norm_stats.json (evaluate reuses) + data_manifest.json (what the
+        run trained on) land in run_dir before training starts."""
+        entry = _write_configs(
+            tmp_path / 'configs', library_root,
+            data_over={'normalise': {'method': 'standardise',
+                                     'stats': 'auto'}})
+        main(entry, config_dir=tmp_path / 'configs')
+        run = tmp_path / 'configs' / 'run'
+        stats = json.loads((run / 'norm_stats.json').read_text())
+        assert stats['method'] == 'standardise'
+        man = json.loads((run / 'data_manifest.json').read_text())
+        tr = man['splits']['train']
+        assert tr['size'] > 0
+        assert sum(tr['class_counts'].values()) == tr['size']
+        assert man['config']['names'] == {'data': 'tiny', 'model': 'tiny'}
 
     def test_missing_model_pointer_raises(self, library_root, tmp_path):
         entry = _write_configs(tmp_path / 'configs', library_root)

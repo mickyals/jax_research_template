@@ -23,6 +23,10 @@ Split strategies (cfg['split']['strategy']):
     stratified  balanced overfit subset (memorisation gate) — train and
                 val are the SAME indices (watch train loss; val = sanity):
                   split: {strategy: stratified, n_per_class: 8}
+    memorise    FULL-dataset memorisation (identifiability probe): train
+                and val are ALL fixes (same indices; multistorm fixes
+                excluded by default, as for 'year'):
+                  split: {strategy: memorise}
     multistorm  the multi-driver fixes as an OOD test set:
                   split: {strategy: multistorm}   -> {'test': idx}
 
@@ -125,10 +129,15 @@ def _resolve_splits(cfg, loader, seed):
                              "n_per_class.")
         idx = stratified_fixes(loader, int(split['n_per_class']), seed=seed)
         return {'train': idx, 'val': idx.copy()}
+    if strategy == 'memorise':
+        idx = np.arange(len(loader))
+        if split.get('exclude_multistorm', True):
+            idx = idx[~_multistorm_mask(loader)]
+        return {'train': idx, 'val': idx.copy()}
     if strategy == 'multistorm':
         return {'test': np.nonzero(_multistorm_mask(loader))[0]}
     raise ValueError(f"unknown split.strategy {strategy!r} — "
-                     f"'year', 'stratified' or 'multistorm'.")
+                     f"'year', 'stratified', 'memorise' or 'multistorm'.")
 
 
 def build_data(cfg, seed=0, check_fresh=True):

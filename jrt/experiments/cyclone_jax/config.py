@@ -152,4 +152,6 @@ def load_config(train_yaml, config_dir=None):
             _check_keys(cb, CALLBACK_KEYS,
                         f"trainer.callbacks entry {cb['name']!r}")
 
-    return {'data': data, 'model': model, 'trainer': trainer}
+    # the pointer names survive for run naming ({model}-{data}-s{seed})
+    return {'data': data, 'model': model, 'trainer': trainer,
+            'names': {'data': raw['data'], 'model': raw.get('model')}}

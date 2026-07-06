@@ -24,7 +24,10 @@ passes through. patience_metric train/loss is supported by the Trainer
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import numpy as np
 
 from training.logger import create_logger
 from training.trainer import Trainer
@@ -52,6 +55,7 @@ def build_trainer_config(cfg: dict) -> dict:
         'scheduler':        t.get('scheduler', 'constant'),
         'scheduler_kwargs': t.get('scheduler_kwargs') or {},
         'num_epochs':       t.get('num_epochs', 100),
+        'check_val_every_n_epoch': t.get('check_val_every_n_epoch', 1),
         'patience':         t.get('patience', 10),
         'patience_metric':  t.get('patience_metric', 'train/loss'),
         'max_grad_norm':    t.get('gradient_clip'),
@@ -60,12 +64,14 @@ def build_trainer_config(cfg: dict) -> dict:
     }
 
 
-def build_logger(cfg: dict, tags: tuple):
-    """trainer.logger/logger_kwargs + model tags -> a jrt logger.
+def build_logger(cfg: dict, tags: tuple, norms=None):
+    """trainer.logger/logger_kwargs + model/data tags -> a jrt logger.
 
-    Model tags prepend any config-level tags (wandb only — the other
-    backends have no tag concept). log_dir mirrors the Trainer's
-    run_dir/logs convention.
+    wandb run tags = model tags + data tags + logger_kwargs tags (the
+    other backends have no tag concept); run name defaults to
+    {model}-{data}-s{seed} from the config pointer names. Norm stats join
+    the logged config (they are properties of the training distribution).
+    log_dir mirrors the Trainer's run_dir/logs convention.
     """
     t = cfg['trainer']
     backend = str(t.get('logger') or 'null')
@@ -74,8 +80,45 @@ def build_logger(cfg: dict, tags: tuple):
     log_dir = str(Path(run_dir).resolve() / 'logs') if run_dir else None
     if backend == 'wandb':
         kwargs.setdefault('project', 'cyclone_jax')
-        kwargs['tags'] = list(tags) + list(kwargs.get('tags') or [])
-    return create_logger(backend, log_dir=log_dir, config=cfg, **kwargs)
+        data_tags = (cfg.get('data') or {}).get('tags') or []
+        kwargs['tags'] = (list(tags) + list(data_tags)
+                          + list(kwargs.get('tags') or []))
+        names = cfg.get('names') or {}
+        if names.get('model') and names.get('data'):
+            kwargs.setdefault('name', f"{names['model']}-{names['data']}"
+                                      f"-s{t.get('seed', 0)}")
+    config = dict(cfg)
+    if norms is not None:
+        config['norm_stats'] = norms.to_json()
+    return create_logger(backend, log_dir=log_dir, config=config, **kwargs)
+
+
+def write_run_records(cfg: dict, data, run_dir) -> None:
+    """run_dir/norm_stats.json + run_dir/data_manifest.json.
+
+    norm_stats.json is the record evaluation REUSES (stats are properties
+    of the training distribution — see data/usage_doc.md). The manifest
+    records what the run actually trained on: per-split sizes and class
+    counts, plus the merged config.
+    """
+    run = Path(run_dir)
+    run.mkdir(parents=True, exist_ok=True)
+    if data.norms is not None:
+        (run / 'norm_stats.json').write_text(
+            json.dumps(data.norms.to_json(), indent=2))
+
+    sshs = np.rint(np.asarray(data.loader.fixes['usa_sshs'])).astype(int)
+    names = data.targets.class_names
+    splits = {}
+    for split, idx in data.splits.items():
+        vals = sshs[np.asarray(idx)]
+        splits[split] = {
+            'size': int(len(idx)),
+            'class_counts': {names[pos]: int((vals == c).sum())
+                             for pos, c in enumerate(data.targets.class_set)},
+        }
+    (run / 'data_manifest.json').write_text(
+        json.dumps({'splits': splits, 'config': cfg}, indent=2))
 
 
 def main(train_yaml, config_dir=None):
@@ -89,7 +132,9 @@ def main(train_yaml, config_dir=None):
     data = build_data(cfg['data'], seed=seed)
     model, tags = build_model(cfg['model'], data.targets)
 
-    logger = build_logger(cfg, tags)
+    if cfg['trainer'].get('run_dir'):
+        write_run_records(cfg, data, cfg['trainer']['run_dir'])
+    logger = build_logger(cfg, tags, norms=data.norms)
     trainer = Trainer(model, build_metrics_fns(cfg['trainer']),
                       build_trainer_config(cfg), logger=logger)
 
