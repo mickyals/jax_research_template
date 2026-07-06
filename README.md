@@ -29,8 +29,10 @@ jax_research_template/
 ├── jrt/
 │   ├── core/               Model building blocks and registered nets
 │   ├── datasets/           Generic data loading and batching
-│   ├── training/           Trainer, losses, metrics, prefetch, logger, tuner
-│   ├── utils/              Geoscience, JAX helpers, plotting, normalisers
+│   ├── training/           Trainer, losses, metrics, optimizers, prefetch,
+│   │                       logger, tuner
+│   ├── utils/              Geoscience, JAX helpers, plotting, normalisers,
+│   │                       coordinate sampling
 │   └── experiments/        One directory per experiment
 │       ├── cyclone_jax/       CURRENT: TC intensity from sparse in-situ obs
 │       │                      (the canonical example — start here)
