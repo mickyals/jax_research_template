@@ -69,8 +69,8 @@ from experiments.cyclone_jax.data.identifiability import input_collisions
 from experiments.cyclone_jax.data.sparsity import network_sparsity
 from experiments.cyclone_jax.models.features import TOKEN_FIELDS
 from experiments.cyclone_jax.visualise.figures import (
-    SOURCE_STYLE, accuracy_hexbin_figure, save_gif, storm_panel_figure,
-    storm_track_correctness_figure,
+    SOURCE_STYLE, accuracy_hexbin_figure, accuracy_vs_resolution_figure,
+    save_gif, storm_panel_figure, storm_track_correctness_figure,
 )
 
 CALLBACKS = Registry('Callback')
@@ -304,15 +304,52 @@ def build_callbacks(cfg, data, logger) -> list:
 # Prediction records — which fixes/storms/places the model gets right
 # ---------------------------------------------------------------------------
 
+# Local-view half-width: ±5° around the fix (the supervisor's
+# local-vs-global resolution question) — the box the per-fix local
+# station count / resolvable_km columns use.
+LOCAL_HALF_WIDTH_DEG = 5.0
+
+
+def _local_resolution(batch, norms):
+    """Per-sample station count + resolvable_km within
+    ±LOCAL_HALF_WIDTH_DEG of the fix. Station coords come out of the
+    loader normalised (invert them); fix (meta) coords stay raw.
+    resolvable_km is inf when the local box holds no stations."""
+    lat = np.asarray(batch['X']['lat'], np.float32)
+    lon = np.asarray(batch['X']['lon'], np.float32)
+    mask = np.asarray(batch['X']['station_mask']).astype(bool)
+    if norms is not None:
+        lat, lon = norms.invert_coords(lat, lon)
+    fix_lat = np.asarray(batch['meta']['lat'], float)
+    fix_lon = np.asarray(batch['meta']['lon'], float)
+    h = LOCAL_HALF_WIDTH_DEG
+    n_local = np.empty(len(fix_lat), np.int64)
+    r_local = np.empty(len(fix_lat), np.float64)
+    for b in range(len(fix_lat)):
+        near = (mask[b]
+                & (np.abs(lat[b] - fix_lat[b]) <= h)
+                & (np.abs(lon[b] - fix_lon[b]) <= h))
+        n_local[b] = int(near.sum())
+        box = {'lat': [max(fix_lat[b] - h, -90.0),
+                       min(fix_lat[b] + h, 90.0)],
+               'lon': [fix_lon[b] - h, fix_lon[b] + h]}
+        r_local[b] = network_sparsity(n_local[b], box)['resolvable_km']
+    return n_local, r_local
+
+
 def _sweep_split(state, data, idx, batch_size):
     """Deterministic full sweep over fix indices -> (pred, true,
-    n_stations) arrays. Chunked at the training batch size so the
-    compiled forward is reused (one extra trace for the tail chunk)."""
+    n_stations, n_stations_local, resolvable_km_local) arrays. Chunked
+    at the training batch size so the compiled forward is reused (one
+    extra trace for the tail chunk). The local-resolution pair rides
+    the sweep because the stations are already in hand per batch."""
     loader = data.loader
     pad_to = loader.inputs.pad_to
     preds = np.empty(len(idx), np.int64)
     trues = np.empty(len(idx), np.int64)
     n_stations = np.empty(len(idx), np.int64)
+    n_local = np.empty(len(idx), np.int64)
+    r_local = np.empty(len(idx), np.float64)
     for s in range(0, len(idx), batch_size):
         chunk = idx[s:s + batch_size]
         batch = collate([loader.build(int(i)) for i in chunk], pad_to)
@@ -321,7 +358,9 @@ def _sweep_split(state, data, idx, batch_size):
         trues[s:s + len(chunk)] = np.asarray(batch['y'])
         n_stations[s:s + len(chunk)] = np.asarray(
             batch['meta']['n_stations'])
-    return preds, trues, n_stations
+        n_local[s:s + len(chunk)], r_local[s:s + len(chunk)] = \
+            _local_resolution(batch, data.norms)
+    return preds, trues, n_stations, n_local, r_local
 
 
 def _per_storm(sids, correct):
@@ -335,13 +374,17 @@ def _per_storm(sids, correct):
 
 
 def _write_predictions_csv(path, fixes, idx, preds, trues, n_stations,
-                           class_names):
+                           n_local, r_local, class_names):
     """One row per fix: identity + true/pred/correct — THE record for
-    finding exactly which fixes the model fails on."""
+    finding exactly which fixes the model fails on — plus the local
+    (±LOCAL_HALF_WIDTH_DEG) station count and resolvable_km: the
+    covariate for 'does the model fail where the network is locally
+    coarse?' (blank when the local box is empty)."""
     storm_names = fixes.get('name')
     with open(path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(['sid', 'name', 'time', 'lat', 'lon', 'n_stations',
+                    'n_stations_local', 'resolvable_km_local',
                     'true', 'pred', 'correct'])
         for k, i in enumerate(idx):
             w.writerow([
@@ -352,6 +395,8 @@ def _write_predictions_csv(path, fixes, idx, preds, trues, n_stations,
                 f"{float(fixes['lat'][i]):.4f}",
                 f"{float(fixes['lon'][i]):.4f}",
                 int(n_stations[k]),
+                int(n_local[k]),
+                f'{r_local[k]:.1f}' if np.isfinite(r_local[k]) else '',
                 class_names[trues[k]], class_names[preds[k]],
                 int(preds[k] == trues[k]),
             ])
@@ -401,7 +446,8 @@ def _prediction_records(cfg, data, logger, state, global_step, basemap):
                          f"{seen[key]!r} — one sweep covers both")
             continue
         seen[key] = split
-        preds, trues, n_st = _sweep_split(state, data, idx, batch_size)
+        preds, trues, n_st, n_local, r_local = _sweep_split(
+            state, data, idx, batch_size)
         correct = preds == trues
         sids = np.asarray(fixes['sid'])[idx]
         report = input_collisions(data.loader, idx, fields=consumed)
@@ -414,7 +460,7 @@ def _prediction_records(cfg, data, logger, state, global_step, basemap):
                            if 'name' in fixes else None)
             _write_predictions_csv(out / f'predictions_{split}.csv',
                                    fixes, idx, preds, trues, n_st,
-                                   class_names)
+                                   n_local, r_local, class_names)
             _write_per_storm_csv(out / f'per_storm_accuracy_{split}.csv',
                                  sids, correct, storm_names)
             (out / f'identifiability_{split}.json').write_text(json.dumps(
@@ -428,11 +474,34 @@ def _prediction_records(cfg, data, logger, state, global_step, basemap):
                 logger.log_artifact(stem, out / f'{stem}.{kind}',
                                     artifact_type='predictions')
         acc = float(correct.mean())
-        logger.log_metrics(
-            {f'{split}/memorisation_ceiling': float(report['max_accuracy']),
-             f'{split}/n_unmemorisable': int(report['n_unmemorisable']),
-             f'{split}/n_unique_inputs': int(report['n_unique_inputs'])},
-            step=global_step)
+        scalars = {
+            f'{split}/memorisation_ceiling': float(report['max_accuracy']),
+            f'{split}/n_unmemorisable': int(report['n_unmemorisable']),
+            f'{split}/n_unique_inputs': int(report['n_unique_inputs']),
+            f'{split}/n_stations_local_mean': float(n_local.mean()),
+        }
+        # local vs global resolution scalars (the ±5° box vs the FOV);
+        # empty local boxes (inf) drop out of the local mean
+        finite = np.isfinite(r_local)
+        if finite.any():
+            scalars[f'{split}/resolvable_km_local_mean'] = \
+                float(r_local[finite].mean())
+        if domain:
+            r_global = np.asarray(
+                [network_sparsity(int(n), domain)['resolvable_km']
+                 for n in n_st])
+            g_ok = np.isfinite(r_global)
+            if g_ok.any():
+                scalars[f'{split}/resolvable_km_global_mean'] = \
+                    float(r_global[g_ok].mean())
+        logger.log_metrics(scalars, step=global_step)
+        if finite.any():
+            RUN_LOG.info(
+                f"  [resolution] {split}: local (±{LOCAL_HALF_WIDTH_DEG:g}°)"
+                f" mean {r_local[finite].mean():.0f} km over"
+                f" {n_local.mean():.1f} stations"
+                + (f"; global mean {r_global[g_ok].mean():.0f} km"
+                   if domain and g_ok.any() else ''))
         per_storm = _per_storm(sids, correct)
         hardest = ', '.join(f'{s} {a:.2f}' for s, a, _ in per_storm[:5])
         RUN_LOG.info(
@@ -468,6 +537,17 @@ def _prediction_records(cfg, data, logger, state, global_step, basemap):
                       f'({storm_acc:.2f})  step {global_step}')
             _emit(fig, f'storm_track_{sid}', split, global_step,
                   logger, run_dir)
+
+        # local-vs-global interaction: does the model fail where the
+        # network is locally coarse? (binned accuracy vs the per-fix
+        # ±5° resolvable_km already computed in the sweep)
+        if finite.any():
+            fig = accuracy_vs_resolution_figure(
+                r_local, correct,
+                title=f'{split} accuracy vs local (±{LOCAL_HALF_WIDTH_DEG:g}°)'
+                      f' resolution — step {global_step}')
+            _emit(fig, 'accuracy_vs_local_resolution', split,
+                  global_step, logger, run_dir)
 
 
 # ---------------------------------------------------------------------------

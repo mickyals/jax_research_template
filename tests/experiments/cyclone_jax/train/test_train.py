@@ -204,6 +204,7 @@ class TestMain:
         header, *rows = (run / 'predictions_train.csv').read_text() \
             .strip().splitlines()
         assert header == ('sid,name,time,lat,lon,n_stations,'
+                          'n_stations_local,resolvable_km_local,'
                           'true,pred,correct')
         assert len(rows) > 0
         assert not (run / 'predictions_val.csv').exists()

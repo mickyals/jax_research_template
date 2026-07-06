@@ -9,8 +9,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from experiments.cyclone_jax.visualise.figures import (
-    SOURCE_STYLE, SSHS_COLORS, accuracy_hexbin_figure, class_colour,
-    save_gif, storm_panel_figure, storm_sequence_figures,
+    SOURCE_STYLE, SSHS_COLORS, accuracy_hexbin_figure,
+    accuracy_vs_resolution_figure, class_colour, save_gif,
+    storm_panel_figure, storm_sequence_figures,
     storm_track_correctness_figure,
 )
 
@@ -164,6 +165,29 @@ class TestAccuracyHexbin:
             np.array([-60.0, -61.0]), np.array([12.0, 13.0]),
             np.array([True, False]), basemap=False)
         assert len(fig.axes[0].collections) == 1
+        plt.close('all')
+
+
+class TestAccuracyVsResolution:
+
+    def test_bins_hold_mean_accuracy(self):
+        # two resolution clusters: fine-network fixes all correct,
+        # coarse-network fixes 1/4 correct
+        r = np.array([100.0] * 4 + [1000.0] * 4)
+        correct = np.array([1, 1, 1, 1, 0, 0, 0, 1], float)
+        fig = accuracy_vs_resolution_figure(r, correct, n_bins=2,
+                                            title='val vs resolution')
+        ax = fig.axes[0]
+        assert sorted(ax.lines[0].get_ydata().tolist()) == [0.25, 1.0]
+        assert ax.get_title() == 'val vs resolution'
+        ax2 = fig.axes[1]                        # count bars on the twin
+        assert sorted(p.get_height() for p in ax2.patches) == [4, 4]
+        plt.close('all')
+
+    def test_nonfinite_dropped_and_empty_safe(self):
+        fig = accuracy_vs_resolution_figure(
+            np.array([np.inf, np.nan]), np.array([1, 0]))
+        assert len(fig.axes[0].lines) == 0       # nothing left to plot
         plt.close('all')
 
 

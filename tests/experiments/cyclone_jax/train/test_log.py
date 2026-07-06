@@ -292,7 +292,8 @@ class TestEndOfRun:
         assert [t for t, _ in logger.figures] == [
             'test/confusion_matrix', 'test/confusion_matrix_pct',
             'test/accuracy_hexbin',
-            'test/storm_track_A', 'test/storm_track_B']
+            'test/storm_track_A', 'test/storm_track_B',
+            'test/accuracy_vs_local_resolution']
 
     def test_sequence_gif_and_artifact(self, tmp_path):
         logger = self._run(run_dir=str(tmp_path), storm_panels={'test': 'B'})
@@ -390,6 +391,20 @@ class TestPredictionRecords:
         assert rows[0]['pred'] == 'Cat 2'   # every miss names its pred
         assert rows[0]['n_stations'] == '3'
         assert rows[0]['lat'] and rows[0]['time']    # identity present
+        # local-view columns: all 3 fake stations sit within ±5° of the
+        # fix (13, -58) -> local count = total, finite resolvable_km
+        assert rows[0]['n_stations_local'] == '3'
+        assert float(rows[0]['resolvable_km_local']) > 0
+
+    def test_local_resolution_scalars_logged(self):
+        logger = self._run(None)
+        (m, step), = [e for e in logger.metrics
+                      if 'test/memorisation_ceiling' in e[0]]
+        assert step == 5
+        assert m['test/n_stations_local_mean'] == 3.0
+        assert m['test/resolvable_km_local_mean'] > 0
+        assert m['test/resolvable_km_global_mean'] > \
+            m['test/resolvable_km_local_mean']   # FOV box >> ±5° box
 
     def test_per_storm_accuracy_worst_first(self, tmp_path):
         self._run(str(tmp_path))
@@ -419,7 +434,8 @@ class TestPredictionRecords:
         assert not (tmp_path / 'predictions_val.csv').exists()
         assert [t for t, _ in logger.figures] == [
             'train/accuracy_hexbin',
-            'train/storm_track_A', 'train/storm_track_B']
+            'train/storm_track_A', 'train/storm_track_B',
+            'train/accuracy_vs_local_resolution']
 
     def test_storm_track_figures_for_hardest_storms(self):
         """Every imperfect storm (worst-first, capped) gets a track
@@ -427,7 +443,8 @@ class TestPredictionRecords:
         logger = self._run(None)
         tags = [t for t, _ in logger.figures]
         assert tags == ['test/accuracy_hexbin',
-                        'test/storm_track_A', 'test/storm_track_B']
+                        'test/storm_track_A', 'test/storm_track_B',
+                        'test/accuracy_vs_local_resolution']
         a_title = logger.titles[tags.index('test/storm_track_A')]
         assert '0/2 correct' in a_title and '(0.00)' in a_title
 
@@ -441,7 +458,8 @@ class TestPredictionRecords:
                'trainer': {'run_dir': None}}
         end_of_run(cfg, data, logger, _dual_state(pred=2), global_step=5,
                    basemap=False)
-        assert [t for t, _ in logger.figures] == ['test/accuracy_hexbin']
+        assert [t for t, _ in logger.figures] == [
+            'test/accuracy_hexbin', 'test/accuracy_vs_local_resolution']
 
     def test_identifiability_ceiling_logged(self, tmp_path):
         """FakeLoader inputs are unique per fix -> ceiling 1.0, logged to

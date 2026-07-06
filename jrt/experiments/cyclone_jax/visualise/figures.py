@@ -205,6 +205,55 @@ def accuracy_hexbin_figure(lon, lat, correct, domain=None, basemap=True,
     return fig
 
 
+def accuracy_vs_resolution_figure(resolvable_km, correct, n_bins=10,
+                                  title=''):
+    """Binned accuracy against LOCAL network resolution: does the model
+    fail where the network is locally coarse? Quantile (equal-count)
+    bins so sparse tails don't dominate; grey count bars carry the
+    evidence per bin (right axis), the green line the accuracy. Fixes
+    with a non-finite resolution (empty local box) are dropped.
+
+    Parameters
+    ----------
+    resolvable_km : array   per-fix LOCAL resolvable_km (log.py computes
+                            it over the ±5° box during the sweep)
+    correct : bool/0-1 array   per-fix prediction correctness
+    n_bins : int            target quantile-bin count (duplicate edges
+                            collapse when the distribution is lumpy)
+    title : str             caller composes it (split, step)
+    """
+    r = np.asarray(resolvable_km, float)
+    ok = np.asarray(correct, float)
+    keep = np.isfinite(r)
+    r, ok = r[keep], ok[keep]
+    fig, ax = plt.subplots(figsize=(6.4, 4.0))
+    ax.set_xlabel('local resolvable_km')
+    ax.set_ylabel('accuracy')
+    ax.set_title(title, fontsize=8)
+    if not r.size:
+        return fig
+    edges = np.unique(np.quantile(r, np.linspace(0, 1, n_bins + 1)))
+    if len(edges) < 2:               # all fixes share one resolution
+        edges = np.array([edges[0] - 0.5, edges[0] + 0.5])
+    which = np.clip(np.digitize(r, edges[1:-1]), 0, len(edges) - 2)
+    mids = (edges[:-1] + edges[1:]) / 2
+    counts = np.bincount(which, minlength=len(mids))
+    accs = np.full(len(mids), np.nan)
+    for k in np.nonzero(counts)[0]:
+        accs[k] = ok[which == k].mean()
+    ax2 = ax.twinx()
+    ax2.bar(mids, counts, width=np.diff(edges) * 0.9, color='0.88',
+            zorder=1)
+    ax2.set_ylabel('fixes per bin', fontsize=8)
+    ax.set_zorder(ax2.get_zorder() + 1)     # accuracy line above bars
+    ax.patch.set_visible(False)
+    val = ~np.isnan(accs)
+    ax.plot(mids[val], accs[val], marker='o', ms=4, color='#1a9641',
+            zorder=3)
+    ax.set_ylim(-0.02, 1.02)
+    return fig
+
+
 def storm_track_correctness_figure(track_lon, track_lat, correct,
                                    domain=None, basemap=True, title=''):
     """One storm's track, each fix coloured by prediction correctness:
