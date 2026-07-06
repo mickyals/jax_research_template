@@ -152,6 +152,14 @@ class TestConfusionMatrixCallback:
         assert m['val/macro_precision'] == pytest.approx(0.75)
         assert m['val/macro_recall'] == pytest.approx(0.75)
 
+    def test_exact_and_per_class_accuracy_logged(self):
+        logger = self._run(None)
+        (m, _), = logger.metrics
+        assert m['val/accuracy_exact'] == pytest.approx(2 / 3)
+        names = _targets().class_names
+        assert m[f'val/class_acc/{names[0]}'] == pytest.approx(0.5)
+        assert m[f'val/class_acc/{names[1]}'] == pytest.approx(1.0)
+
     def test_figure_logged_and_stills_saved(self, tmp_path):
         logger = self._run(str(tmp_path))
         assert logger.figures == [('val/confusion_matrix', 10)]

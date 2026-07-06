@@ -119,6 +119,9 @@ def write_run_records(cfg: dict, data, run_dir) -> None:
         }
     (run / 'data_manifest.json').write_text(
         json.dumps({'splits': splits, 'config': cfg}, indent=2))
+    for name, info in splits.items():       # startup banner (pre-tqdm)
+        print(f"  [data] {name}: {info['size']} fixes  "
+              f"{info['class_counts']}")
 
 
 def main(train_yaml, config_dir=None):

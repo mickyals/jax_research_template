@@ -40,10 +40,12 @@ svg + png (editable-vector workflow). The logger closes each figure.
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import jax
 import jax.numpy as jnp
 
 from training.metrics import compute_final_metrics, update_cm
@@ -64,12 +66,22 @@ _CALLBACK_SPEC_KEYS = {'name', 'every', 'split', 'kwargs'}
 # Shared mechanics
 # ---------------------------------------------------------------------------
 
+@functools.partial(jax.jit, static_argnums=0)
+def _jit_apply(apply_fn, variables, X):
+    return apply_fn(variables, X, train=False)
+
+
 def _predict(state, batch):
-    """Model forward on one collated batch (eval mode; meta never traced)."""
+    """Model forward on one collated batch (eval mode; meta never traced).
+
+    Jitted (apply_fn static): full-split CM sweeps reuse one compiled
+    forward instead of running op-by-op; pad_to keeps shapes fixed, so it
+    traces once per batch shape (stream batch + the B=1 panel batch).
+    """
     variables = {'params': state.params}
     if getattr(state, 'batch_stats', None) is not None:
         variables['batch_stats'] = state.batch_stats
-    return state.apply_fn(variables, batch['X'], train=False)
+    return _jit_apply(state.apply_fn, variables, batch['X'])
 
 
 def _emit(fig, name, split, global_step, logger, run_dir):
@@ -145,10 +157,13 @@ def _confusion_matrix(ctx, split='val'):
             cm = update_cm(cm, _predict(state, batch),
                            jnp.asarray(batch['y']))
         m = compute_final_metrics(cm)
-        logger.log_metrics(
-            {f'{split}/macro_precision': float(m['macro_precision']),
-             f'{split}/macro_recall':    float(m['macro_recall'])},
-            step=global_step)
+        scalars = {f'{split}/macro_precision': float(m['macro_precision']),
+                   f'{split}/macro_recall':    float(m['macro_recall']),
+                   f'{split}/accuracy_exact':  float(m['accuracy'])}
+        # per-class accuracy = that class's recall (diag / row sum)
+        for name, r in zip(targets.class_names, np.asarray(m['recall'])):
+            scalars[f'{split}/class_acc/{name}'] = float(r)
+        logger.log_metrics(scalars, step=global_step)
         fig = confusion_matrix_figure(
             np.asarray(cm), class_names=targets.class_names,
             title=f'{split} confusion — step {global_step}')
