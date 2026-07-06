@@ -1,9 +1,14 @@
 # =============================================================================
 # cyclone_jax data scenario: TRAIN — full year-split training
 # =============================================================================
-# Disjoint year lists; fixes at multi-driver timestamps are EXCLUDED
-# (ambiguous supervision) — they form the multistorm.yaml OOD scenario.
-# !! EDIT the year lists to the library's real coverage before training.
+# THE generalisation scenario: disjoint year lists over the library's
+# 2005-2024 coverage (2025 = the land-only diagnostic year, out — same
+# ruling as memorise_2005_2024). Fixes at multi-driver timestamps are
+# EXCLUDED (ambiguous supervision) — they form the multistorm.yaml OOD
+# scenario. NOTE the test ceiling means something different here:
+# input_collisions counts conflicts WITHIN the split, but a test fix
+# whose weather picture also occurred in training carries its label
+# boundary — flag when reporting.
 
 root: "E:/Caribbean-Obs"          # shell CYCLONE_JAX_ROOT overrides
 
@@ -35,14 +40,20 @@ prefetch_factor: 2
 split:
   strategy: year
   exclude_multistorm: true
-  years:                          # !! placeholders — set from the library
-    train: [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009,
-            2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019,
-            2020]
-    val:  [2021, 2022]
-    test: [2023, 2024]
+  years:                          # 14 / 3 / 3 seasons over 2005-2024
+    train: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014,
+            2015, 2016, 2017, 2018]
+    val:  [2019, 2020, 2021]
+    test: [2022, 2023, 2024]      # holds Ian 2022 + Beryl 2024
 
-tags: [year-split]                # -> wandb, with model tags
+tags: [year-split, generalise]    # -> wandb, with model tags
+
+storm_panels:
+  train: random
+  val: random
+  test:                           # end-of-run sequences from TEST years
+    - "2024181N09320"             # BERYL 2024
+    - "2022266N12294"             # IAN 2022
 
 normalise:
   method: standardise

@@ -1,0 +1,31 @@
+# =============================================================================
+# cyclone_jax tune: GENERALISE-MLP hyperparameter search
+# =============================================================================
+# Optuna search over the generalise_mlp base. patience_metric val/loss
+# + lower_is_better -> the study minimises VAL loss (derived, never set).
+# Record: <run_dir>/<study>/trials.csv + per-trial wandb (group = study)
+# + best.yaml; retrain_best trains the winner with the full end-of-run
+# records (per-split CSVs/hexbins/track figures = the 'where is
+# generalising hard' evidence).
+#
+#   PYTHONPATH=jrt python -m experiments.cyclone_jax.train.tune \
+#       jrt/experiments/cyclone_jax/configs/train/tune_generalise_mlp.yaml
+
+base: generalise_mlp              # configs/train/<name>.yaml
+study: generalise_mlp_hp          # wandb group + <run_dir>/<study>/
+n_trials: 24
+n_startup_trials: 4               # trials before the median pruner engages
+n_warmup_steps: 5                 # epochs per trial before pruning checks
+retrain_best: true                # best.yaml -> full run tagged {study}-best
+
+# dotted paths into the merged {data, model, trainer} config; specs are
+# {low, high, log?, step?} (int when both bounds are ints) or {choices}.
+# Generalisation search = capacity AND regularisation (the loss-vs-HP
+# data the evaluation wants).
+search:
+  trainer.scheduler_kwargs.value: {low: 1.0e-4, high: 1.0e-2, log: true}
+  trainer.optimizer_kwargs.weight_decay: {low: 1.0e-6, high: 1.0e-2, log: true}
+  model.dropout_rate: {low: 0.0, high: 0.5}
+  model.hidden_features: {choices: [64, 128, 256, 512]}
+  model.n_layers: {choices: [1, 2, 3]}
+  model.encoding.embedding_kwargs.mapping_dim: {choices: [16, 32, 64]}

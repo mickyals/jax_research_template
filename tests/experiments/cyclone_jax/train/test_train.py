@@ -195,6 +195,15 @@ class TestMain:
         trainer, _ = main(cfg)
         assert np.isfinite(trainer._best_metric_value)
 
+    def test_seed_cli_override(self, library_root, tmp_path):
+        """--seed overrides trainer.seed — the run name (and everything
+        seeded) picks it up (multi-seed hard-storm sweeps)."""
+        entry = _write_configs(tmp_path / 'configs', library_root)
+        main(entry, config_dir=tmp_path / 'configs', seed=7)
+        text = (tmp_path / 'configs' / 'run' / 'logs' / 'run.log') \
+            .read_text(encoding='utf-8')
+        assert '[run] tiny-tiny-s7' in text
+
     def test_prediction_records_written(self, library_root, tmp_path):
         """end_of_run: per-fix predictions + per-storm accuracy CSVs for
         the distinct splits (stratified: val == train, swept once)."""
@@ -262,6 +271,8 @@ class TestMain:
         assert '[data] channels (' in out      # the resolved union, named
         assert '[norm] standardise' in out
         assert '[model] X per sample' in out    # what enters the model
+        # no encoding block -> the model consumes every token field
+        assert '[model] consumes  level, time, id, obs, missing' in out
         assert '[model] mlp' in out and 'params' in out
         assert 'flatten_mlp' in out.lower() or 'Dense' in out  # tabulate
 

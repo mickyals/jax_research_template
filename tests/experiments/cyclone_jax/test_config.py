@@ -43,6 +43,21 @@ class TestShippedConfigs:
         assert spec_in.pad_to == 1536
         assert spec_t.n_classes == 6
 
+    def test_generalise_entry_loads(self):
+        cfg = load_config(CONFIG_DIR / 'train' / 'generalise_mlp.yaml')
+        assert cfg['data']['split']['strategy'] == 'year'
+        years = cfg['data']['split']['years']
+        covered = years['train'] + years['val'] + years['test']
+        # disjoint lists covering exactly the library's 2005-2024
+        assert sorted(covered) == list(range(2005, 2025))
+        assert cfg['trainer']['patience_metric'] == 'val/loss'
+
+    def test_generalise_tune_config_loads(self):
+        cfg = load_tune_config(
+            CONFIG_DIR / 'train' / 'tune_generalise_mlp.yaml')
+        assert cfg['base'] == 'generalise_mlp'
+        assert 'trainer.optimizer_kwargs.weight_decay' in cfg['search']
+
     def test_expected_scenarios_shipped(self):
         assert SHIPPED_SCENARIOS == ['memorise', 'memorise_2005_2024',
                                      'memorise_land', 'memorise_marine',

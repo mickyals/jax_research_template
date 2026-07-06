@@ -204,6 +204,11 @@ def print_startup_banner(cfg, data, model, seed, log=None) -> None:
     X = collate([data.loader.build(int(idx[0]))], data.inputs.pad_to)['X']
     log.info("  [model] X per sample  "
              + '  '.join(f"{k} {tuple(v.shape[1:])}" for k, v in X.items()))
+    from experiments.cyclone_jax.models.features import TOKEN_FIELDS
+    enc = (cfg.get('model') or {}).get('encoding') or {}
+    fields = tuple(enc.get('fields') or TOKEN_FIELDS)
+    log.info(f"  [model] consumes  {', '.join(fields)} + lat/lon  "
+             f"(encoding {enc.get('mode', 'concat')})")
     rng = jax.random.PRNGKey(seed)
     shapes = jax.eval_shape(lambda x: model.init(rng, x, train=False), X)
     n_params = sum(int(np.prod(p.shape))
@@ -217,18 +222,22 @@ def print_startup_banner(cfg, data, model, seed, log=None) -> None:
         log.info(nn.tabulate(model, rng)(X, train=False))
 
 
-def main(config, config_dir=None):
+def main(config, config_dir=None, seed=None):
     """Train per the config; returns (trainer, test_metrics).
 
     ``config`` is a train-yaml path, or an ALREADY-MERGED {data, model,
     trainer, names} dict — tune.py's retrain-best passes the winning
-    merged config (the best.yaml record) straight in.
+    merged config (the best.yaml record) straight in. ``seed`` overrides
+    trainer.seed (CLI --seed: multi-seed sweeps of one frozen scenario
+    without yaml clones — run name/records pick it up).
     """
     cfg = (config if isinstance(config, dict)
            else load_config(config, config_dir=config_dir))
     if not cfg['model']:
         raise ValueError(f"{config}: training needs a 'model' pointer "
                          f"(configs/models/<name>.yaml).")
+    if seed is not None:
+        cfg['trainer']['seed'] = int(seed)
     seed = cfg['trainer'].get('seed', 0)
 
     data = build_data(cfg['data'], seed=seed)
@@ -297,6 +306,9 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', type=str, default=None,
                         help='GPU index to pin (sets CUDA_VISIBLE_DEVICES; '
                              'overrides the yaml top-level `gpu`).')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='override trainer.seed — multi-seed sweeps of '
+                             'one frozen scenario without yaml clones.')
     args = parser.parse_args()
     _pin_gpu(args.gpu, args.config)
-    main(args.config)
+    main(args.config, seed=args.seed)

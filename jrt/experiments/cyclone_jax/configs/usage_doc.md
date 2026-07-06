@@ -13,7 +13,7 @@ cfg = load_config(CONFIG_DIR / 'train' / 'train.yaml')
 configs/
 ├── data/     # run SCENARIOS — self-contained (no inheritance; diffable):
 │   #  overfit.yaml     stratified n_per_class subset, train==val (memorisation gate)
-│   #  train.yaml       year split, multi-driver fixes excluded  !! edit year lists
+│   #  train.yaml       year split 2005-18/2019-21/2022-24 (generalisation)
 │   #  train_land.yaml / train_marine.yaml   single-source variants (same
 │   #              splits; pad_to stays 1536 so architectures stay identical)
 │   #  memorise.yaml    FULL-dataset memorisation probe (train==val==all fixes)

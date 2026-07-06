@@ -1,0 +1,42 @@
+# =============================================================================
+# cyclone_jax entry: GENERALISE-MLP — year-split generalisation, MLP baseline
+# =============================================================================
+# The research question after memorisation: can cyclone_jax GENERALISE —
+# and where is generalising hard? Year-split data (train 2005-2018 /
+# val 2019-2021 / test 2022-2024); the end-of-run records run PER SPLIT
+# automatically (predictions/per-storm CSVs, hexbin, storm tracks,
+# local-resolution figure), so 'val/test failures: locations or storms?'
+# reads straight off the same instruments as the memorise probe.
+# Regularisation is ON here (adamw + dropout knobs are what tuning is
+# for — see tune_generalise_mlp.yaml).
+
+data: train
+model: mlp
+
+trainer:
+  seed: 0
+  loss: cross_entropy
+  optimizer: adamw
+  optimizer_kwargs:
+    weight_decay: 0.0             # tune_generalise_mlp searches this
+  scheduler: constant
+  scheduler_kwargs: {value: 1.0e-3}
+
+  num_epochs: 100
+  patience: 15                    # on VAL loss — generalisation, not fit
+  patience_metric: val/loss
+  check_val_every_n_epoch: 1
+
+  metrics: [cross_entropy, accuracy]
+
+  callbacks:
+    # every omitted = once per (estimated) epoch
+    - {name: confusion_matrix, split: val}
+    - {name: storm_panel, split: val}
+
+  logger: wandb                   # swap to null for an offline smoke run
+  logger_kwargs: {project: cyclone_jax}
+
+  # Site path — EDIT per box; FRESH dir per run (orbax overwrite +
+  # OneDrive locks on Windows: keep run dirs OFF OneDrive).
+  run_dir: "E:/cyclone_runs/generalise-mlp-s0"
