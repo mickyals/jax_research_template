@@ -40,15 +40,15 @@ svg + png (editable-vector workflow). The logger closes each figure.
 
 from __future__ import annotations
 
-import functools
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import jax
 import jax.numpy as jnp
 
+from training.logger import emit_figure
 from training.metrics import compute_final_metrics, update_cm
+from utils.jax_core.helpers import eval_forward
 from utils.plotting.fields import confusion_matrix_figure
 from utils.registry import Registry
 
@@ -66,34 +66,23 @@ _CALLBACK_SPEC_KEYS = {'name', 'every', 'split', 'kwargs'}
 # Shared mechanics
 # ---------------------------------------------------------------------------
 
-@functools.partial(jax.jit, static_argnums=0)
-def _jit_apply(apply_fn, variables, X):
-    return apply_fn(variables, X, train=False)
-
-
 def _predict(state, batch):
     """Model forward on one collated batch (eval mode; meta never traced).
 
-    Jitted (apply_fn static): full-split CM sweeps reuse one compiled
-    forward instead of running op-by-op; pad_to keeps shapes fixed, so it
-    traces once per batch shape (stream batch + the B=1 panel batch).
+    Thin over utils.jax_core.helpers.eval_forward (jitted, apply_fn
+    static): full-split CM sweeps reuse one compiled forward instead of
+    running op-by-op; pad_to keeps shapes fixed, so it traces once per
+    batch shape (stream batch + the B=1 panel batch).
     """
-    variables = {'params': state.params}
-    if getattr(state, 'batch_stats', None) is not None:
-        variables['batch_stats'] = state.batch_stats
-    return _jit_apply(state.apply_fn, variables, batch['X'])
+    return eval_forward(state.apply_fn, state.params, batch['X'],
+                        getattr(state, 'batch_stats', None))
 
 
 def _emit(fig, name, split, global_step, logger, run_dir):
-    """Save svg + png stills under run_dir/figures/, then hand the figure
-    to the logger (which closes it — save first)."""
-    if run_dir:
-        fig_dir = Path(run_dir) / 'figures'
-        fig_dir.mkdir(parents=True, exist_ok=True)
-        stem = str(fig_dir / f'{name}_{split}_step{global_step:07d}')
-        fig.savefig(stem + '.svg')
-        fig.savefig(stem + '.png', dpi=150)
-    logger.log_figure(f'{split}/{name}', fig, global_step)
+    """jrt emit_figure with this experiment's naming convention:
+    tag {split}/{name}, still stem {name}_{split}."""
+    emit_figure(logger, fig, f'{split}/{name}', global_step,
+                run_dir=run_dir, stem=f'{name}_{split}')
 
 
 def _domain_from_norms(norms):
