@@ -14,8 +14,14 @@ configs/
 ├── data/     # run SCENARIOS — self-contained (no inheritance; diffable):
 │   #  overfit.yaml     stratified n_per_class subset, train==val (memorisation gate)
 │   #  train.yaml       year split, multi-driver fixes excluded  !! edit year lists
+│   #  train_land.yaml / train_marine.yaml   single-source variants (same
+│   #              splits; pad_to stays 1536 so architectures stay identical)
+│   #  memorise.yaml    FULL-dataset memorisation probe (train==val==all fixes)
+│   #  memorise_land.yaml / memorise_marine.yaml   its source variants
 │   #  test.yaml        same years, evaluation passes            !! keep in sync
 │   #  multistorm.yaml  the excluded multi-driver fixes as OOD test
+│   #  site overrides: shell CYCLONE_JAX_ROOT / CYCLONE_JAX_NUM_WORKERS
+│   #  beat the yaml root / num_workers (machine properties)
 ├── models/   # one yaml per model, self-contained + wandb tags:
 │   #  mlp.yaml    StationMLP baseline (activation relu|gelu|silu|leaky_relu,
 │   #              encoding: concat|additive, embedding null = raw coords)
@@ -23,6 +29,8 @@ configs/
 │   #  finer.yaml  StationFINER — siren keys + bias_k
 │   #  n_classes stays null — injected from TargetSpec by models.build_model
 └── train/    # train.yaml: data: <scenario>, model: <name|null>, trainer: {...}
+          #  top-level gpu: pins CUDA_VISIBLE_DEVICES (--gpu CLI overrides;
+          #  a shell setting always wins)
 ```
 
 Rules enforced by `config.py`:

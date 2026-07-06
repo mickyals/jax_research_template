@@ -16,6 +16,7 @@ Distance and bearing calculations on the Earth's surface.
 | `haversine_jax(lat1, lon1, lat2, lon2)` | Haversine distance in km (JAX, JIT-compatible) |
 | `vincenty_np(lat1, lon1, lat2, lon2)` | Vincenty inverse distance in km (NumPy, float64, higher accuracy) |
 | `vincenty_jax(lat1, lon1, lat2, lon2)` | Vincenty distance (JAX, float32) |
+| `latlon_box_area(lat_bounds, lon_bounds)` | Exact area (km²) of a lat/lon box on the sphere (network-sparsity / density calculations) |
 
 All functions accept scalar or broadcast-compatible array inputs and expect coordinates in degrees. The `_np` variants run in float64 (NumPy default); the `_jax` variants run in float32 (JAX default). For geophysical distances the float32 precision (±~10 cm at short range) is negligible.
 
@@ -46,12 +47,28 @@ JAX utility functions for model initialisation and array manipulation.
 |----------|-------------|
 | `create_rng(seed)` | `jax.random.PRNGKey` from an integer seed |
 | `create_rng_dict(seed, keys)` | Dict of PRNGKeys split from one seed — for `model.init(rngs, ...)` |
-| `standardise(x, axis)` | Zero-mean unit-variance normalisation |
-| `minmax_norm(x, lo, hi)` | Min-max normalisation to `[0, 1]` |
+| `eval_forward(apply_fn, params, X, batch_stats=None)` | Jitted eval-mode forward (`apply_fn` static; one trace per batch shape) for host-side consumers — figure callbacks, evaluate passes. The Trainer keeps its own fused eval_step by design |
+| `standardise(x, axis)` | Zero-mean unit-variance normalisation (device-side; numpy twin in `utils/normalise.py`) |
+| `minmax_norm(x, lo, hi)` | Min-max normalisation to `[0, 1]` or `[-1, 1]` |
 
 ### `diagnostics.py`
 
 JAX runtime diagnostics: device listing, memory checks, and debugging helpers. Includes `trace_profile(trace_dir, enabled=True)` — a context manager around `jax.profiler.start_trace`/`stop_trace` for ad-hoc profiling; view traces with TensorBoard's Profile plugin (WandB cannot render XLA traces). The Trainer exposes the same capability declaratively via the `profile`/`profile_steps` config keys (see `jrt/training/README.md`).
+
+---
+
+## `normalise.py`
+
+Numpy-only normaliser registry + streaming statistics — jax-free on
+purpose (multiprocess data workers must never import jax). The
+device-side twins (`standardise`/`minmax_norm`) live in
+`jax_core/helpers.py`; cross-referenced both ways.
+
+| Name / class | Description |
+|--------------|-------------|
+| `NORMALISERS` registry: `minmax_01`, `minmax_11`, `standardise` | `(vals, lo, hi) -> scaled` — the (lo, hi) pair is (min, max) or (mean, std) per method |
+| `get_normaliser(name)` | Registry lookup |
+| `StatsAccumulator` | NaN-aware streaming per-column stats (mean/std/min/max/count) over ragged sample passes — feeds train-split normalisation stats |
 
 ---
 
