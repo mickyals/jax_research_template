@@ -75,7 +75,8 @@ class FakeLoader:
     def build(self, i):
         return {
             'x': {'lat': np.float32([10.0 + i, 11.0, 12.0]),
-                  'lon': np.float32([-60.0, -61.0, -62.0])},
+                  'lon': np.float32([-60.0, -61.0, -62.0]),
+                  'id':  np.float32([-1.0, 1.0, 0.0])},
             'y': {'target': np.int32(i % N_CLS),
                   'sid':    str(self.fixes['sid'][i]),
                   'lat':    np.float32(13.0),
@@ -218,6 +219,16 @@ class TestStormPanelCallback:
         with pytest.raises(ValueError, match='NOPE'):
             CALLBACKS.get('storm_panel', ctx=ctx, split='val',
                           basemap=False)
+
+    def test_station_ids_reach_the_panel_legend(self):
+        from experiments.cyclone_jax.train.log import _render_fix
+        data = _bundle({}, loader=FakeLoader(), splits={})
+        fig = _render_fix(_const_state(pred=1), data, 0, DOMAIN,
+                          basemap=False)
+        # FakeLoader ids -1/1/0 -> one dot group per source, labelled
+        labels = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+        assert labels == ['land', 'upper', 'marine']
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------

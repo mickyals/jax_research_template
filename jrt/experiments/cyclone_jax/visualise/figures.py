@@ -24,6 +24,16 @@ import matplotlib.pyplot as plt
 
 from utils.plotting.geo import cartopy_available, make_geoaxes
 
+# Station-dot styling per source-ID code (phase-0 scalar lock: land -1,
+# upper 0, marine +1 — the x['id'] field). Marine keeps the historic
+# single-colour dot blue; unknown codes fall back to it, labelled 'id <k>'.
+SOURCE_STYLE = {
+    -1: ('land',   '#8c6d31'),
+    0:  ('upper',  '#7b52ab'),
+    1:  ('marine', '#3b6ea5'),
+}
+_DOT_FALLBACK = '#3b6ea5'
+
 
 def class_colour(k: int, n_classes: int):
     """Stable colour for class k: viridis sampled over the class range."""
@@ -32,7 +42,7 @@ def class_colour(k: int, n_classes: int):
 
 def storm_panel_figure(station_lon, station_lat, storm_lon, storm_lat,
                        true_class, pred_class, n_classes, title='',
-                       domain=None, basemap=True):
+                       domain=None, basemap=True, station_id=None):
     """One storm fix: station dots, truth-star inside a predicted-class ring.
 
     Parameters
@@ -45,6 +55,9 @@ def storm_panel_figure(station_lon, station_lat, storm_lon, storm_lat,
                       sensor count, resolvable_km — log.py territory)
     domain : dict, optional   data yaml domain block -> fixed extent
     basemap : bool    coastline basemap when cartopy is available
+    station_id : array, optional   per-station source codes (x['id'],
+                      same mask as the coords) -> dots coloured per
+                      SOURCE_STYLE + a small legend; None = single colour
     """
     use_map = basemap and cartopy_available()
     if use_map:
@@ -64,8 +77,25 @@ def storm_panel_figure(station_lon, station_lat, storm_lon, storm_lat,
 
     lon, lat = np.asarray(station_lon), np.asarray(station_lat)
     if lon.size:
-        ax.scatter(lon, lat, s=12, c='#3b6ea5', edgecolors='none', zorder=4,
-                   **tkw)
+        if station_id is None:
+            ax.scatter(lon, lat, s=12, c=_DOT_FALLBACK, edgecolors='none',
+                       zorder=4, **tkw)
+        else:
+            codes = np.rint(np.asarray(station_id)).astype(int)
+            for code, (label, colour) in SOURCE_STYLE.items():
+                sel = codes == code
+                if sel.any():
+                    ax.scatter(lon[sel], lat[sel], s=12, c=colour,
+                               edgecolors='none', zorder=4, label=label,
+                               **tkw)
+            for code in np.unique(codes[~np.isin(codes,
+                                                 list(SOURCE_STYLE))]):
+                sel = codes == code
+                ax.scatter(lon[sel], lat[sel], s=12, c=_DOT_FALLBACK,
+                           edgecolors='none', zorder=4, label=f'id {code}',
+                           **tkw)
+            ax.legend(loc='upper right', fontsize=6, markerscale=1.5,
+                      framealpha=0.8)
     ax.scatter([storm_lon], [storm_lat], s=900, marker='o',
                facecolors='none',
                edgecolors=[class_colour(int(pred_class), n_classes)],
@@ -81,14 +111,16 @@ def storm_sequence_figures(samples, n_classes, domain=None, basemap=True):
     """Time-ordered sample dicts -> list of storm-panel figures.
 
     Each sample: {station_lon, station_lat, storm_lon, storm_lat,
-    true_class, pred_class, title}. The gif is these frames via save_gif;
-    the caller saves a FEW of them as stills (not every frame).
+    true_class, pred_class, title, station_id?}. The gif is these frames
+    via save_gif; the caller saves a FEW of them as stills (not every
+    frame).
     """
     return [storm_panel_figure(s['station_lon'], s['station_lat'],
                                s['storm_lon'], s['storm_lat'],
                                s['true_class'], s['pred_class'], n_classes,
                                title=s.get('title', ''), domain=domain,
-                               basemap=basemap)
+                               basemap=basemap,
+                               station_id=s.get('station_id'))
             for s in samples]
 
 

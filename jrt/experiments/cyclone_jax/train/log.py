@@ -115,6 +115,7 @@ def _render_fix(state, data, i, domain, basemap):
     meta, mask = batch['meta'], batch['X']['station_mask'][0]
     lat = np.asarray(batch['X']['lat'][0])[mask]
     lon = np.asarray(batch['X']['lon'][0])[mask]
+    ids = np.asarray(batch['X']['id'][0])[mask]   # untouched by normalise
     if data.norms is not None:
         lat, lon = data.norms.invert_coords(lat, lon)
 
@@ -128,7 +129,7 @@ def _render_fix(state, data, i, domain, basemap):
     return storm_panel_figure(
         lon, lat, float(meta['lon'][0]), float(meta['lat'][0]),
         true, pred, targets.n_classes, title=title,
-        domain=domain, basemap=basemap)
+        domain=domain, basemap=basemap, station_id=ids)
 
 
 # ---------------------------------------------------------------------------
