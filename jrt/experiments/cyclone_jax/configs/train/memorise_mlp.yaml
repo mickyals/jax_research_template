@@ -8,7 +8,7 @@
 # Capacity ladder = clone models/mlp.yaml at rising hidden_features and
 # swap the model: pointer.
 
-data: memorise_2005_2024
+data: memorise
 model: mlp
 
 trainer:

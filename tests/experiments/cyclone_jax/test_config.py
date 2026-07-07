@@ -23,14 +23,13 @@ SHIPPED_MODELS = sorted(p.stem for p in (CONFIG_DIR / 'models').glob('*.yaml'))
 
 class TestShippedConfigs:
 
-    def test_train_entry_point_loads(self):
-        cfg = load_config(CONFIG_DIR / 'train' / 'train.yaml')
+    def test_memorise_entry_point_loads(self):
+        cfg = load_config(CONFIG_DIR / 'train' / 'memorise_mlp.yaml')
         assert set(cfg) == {'data', 'model', 'trainer', 'names'}
-        assert cfg['model']['name'] == 'mlp'         # the gate baseline
-        assert cfg['trainer']['seed'] == 0
-        assert cfg['data']['split']['strategy'] == 'stratified'
+        assert cfg['model']['name'] == 'mlp'         # the baseline
+        assert cfg['data']['split']['strategy'] == 'memorise'
         # pointer names survive for run naming ({model}-{data}-s{seed})
-        assert cfg['names'] == {'data': 'overfit', 'model': 'mlp'}
+        assert cfg['names'] == {'data': 'memorise', 'model': 'mlp'}
 
     @pytest.mark.parametrize('scenario', SHIPPED_SCENARIOS)
     def test_every_scenario_resolves_through_the_specs(self, scenario,
@@ -59,17 +58,17 @@ class TestShippedConfigs:
         assert 'trainer.optimizer_kwargs.weight_decay' in cfg['search']
 
     def test_expected_scenarios_shipped(self):
-        assert SHIPPED_SCENARIOS == ['memorise', 'memorise_2005_2024',
-                                     'memorise_land', 'memorise_marine',
-                                     'multistorm', 'overfit', 'test',
-                                     'train', 'train_land', 'train_marine']
+        # the working set: one memorise probe + one generalise split
+        # (variants are made by editing sources:/channels:/split:, not by
+        # shipping a yaml per combination — 2026-07-06 consolidation)
+        assert SHIPPED_SCENARIOS == ['generalise', 'memorise']
 
     @pytest.mark.parametrize('name', SHIPPED_MODELS)
     def test_every_shipped_model_config_validates(self, name, tmp_path):
         """Key-set validation passes for every shipped model yaml (the
         build/run round-trip lives in models/test_registry.py)."""
         entry = tmp_path / 'entry.yaml'
-        entry.write_text(yaml.safe_dump({'data': 'overfit', 'model': name}))
+        entry.write_text(yaml.safe_dump({'data': 'memorise', 'model': name}))
         cfg = load_config(entry, config_dir=CONFIG_DIR)
         assert cfg['model']['name'] == name
 

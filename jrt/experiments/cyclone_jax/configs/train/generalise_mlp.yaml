@@ -10,7 +10,7 @@
 # Regularisation is ON here (adamw + dropout knobs are what tuning is
 # for — see tune_generalise_mlp.yaml).
 
-data: train
+data: generalise
 model: mlp
 
 trainer:
