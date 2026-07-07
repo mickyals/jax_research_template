@@ -20,7 +20,7 @@ activation: relu                  # relu | gelu | silu | leaky_relu
 dropout_rate: 0.0                 # keep 0 for the memorisation gate
 
 encoding:
-  mode: concat                    # concat | additive
+  mode: additive                    # concat | additive
   # fields = which x fields build the station vector (the MODEL's input
   # contract; the sample always carries everything). Ruled 2026-07-06:
   # obs + missingness + position ONLY — level/time/id excluded so
@@ -30,5 +30,5 @@ encoding:
   embedding: GAUSSIAN_POSITIONAL  # null = raw coords; or a core/embeddings name
   embedding_kwargs:
     input_dim: 2                  # (lat, lon)
-    mapping_dim: 64               # even; mapping_dim/2 cos + sin pairs
+    mapping_dim: 8               # even; mapping_dim/2 cos + sin pairs
     scale: 1.0

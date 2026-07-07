@@ -16,10 +16,10 @@ trainer:
   loss: cross_entropy
   optimizer: adam                 # no weight decay — memorisation probe
   scheduler: constant
-  scheduler_kwargs: {value: 1.0e-3}
+  scheduler_kwargs: {value: 1.0e-4}
 
-  num_epochs: 15
-  patience: 5                   # on train/loss — generous; loss should fall
+  num_epochs: 100
+  patience: 10                   # on train/loss — generous; loss should fall
   patience_metric: train/loss
   check_val_every_n_epoch: 1      # val == train: keep extra sweeps sparse
 
