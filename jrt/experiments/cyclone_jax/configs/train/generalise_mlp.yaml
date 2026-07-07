@@ -23,7 +23,7 @@ trainer:
   scheduler_kwargs: {value: 1.0e-3}
 
   num_epochs: 100
-  patience: 15                    # on VAL loss — generalisation, not fit
+  patience: 10                    # on VAL loss — generalisation, not fit
   patience_metric: val/loss
   check_val_every_n_epoch: 1
 

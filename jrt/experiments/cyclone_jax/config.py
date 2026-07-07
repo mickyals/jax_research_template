@@ -36,7 +36,7 @@ DATA_KEYS = {'root', 'sources', 'channels', 'selection', 'max_stations',
              'pad_to', 'target', 'sshs_min', 'class_set',
              'drop_subtropical', 'source_id', 'timesteps', 'batch_size',
              'split', 'normalise', 'tags', 'storm_panels',
-             'num_workers', 'prefetch_factor'}
+             'shuffle_samples', 'num_workers', 'prefetch_factor'}
 
 # storm_panels: per-split storm selection for the storm_panel callback /
 # end-of-run sequence (a DATA property — which storm to watch belongs to

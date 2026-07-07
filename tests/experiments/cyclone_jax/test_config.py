@@ -47,8 +47,10 @@ class TestShippedConfigs:
         assert cfg['data']['split']['strategy'] == 'year'
         years = cfg['data']['split']['years']
         covered = years['train'] + years['val'] + years['test']
-        # disjoint lists covering exactly the library's 2005-2024
-        assert sorted(covered) == list(range(2005, 2025))
+        # the split lists must be disjoint (coverage is the user's knob —
+        # years may be deliberately left out, e.g. 2023)
+        assert len(covered) == len(set(covered))
+        assert set(covered) <= set(range(2005, 2025))
         assert cfg['trainer']['patience_metric'] == 'val/loss'
 
     def test_generalise_tune_config_loads(self):

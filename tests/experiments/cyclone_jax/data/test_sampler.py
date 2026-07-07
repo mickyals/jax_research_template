@@ -55,6 +55,27 @@ class TestLoader:
         for f in X_FIELDS:
             np.testing.assert_array_equal(a['x'][f], b['x'][f])
 
+    def test_shuffle_samples_permutes_rows_deterministically(self, library,
+                                                             loader):
+        """shuffle_samples: station rows are co-permuted (a permutation of
+        the plain build, rows intact), the permutation differs per fix,
+        and the SAME fix rebuilds the SAME bytes (input_collisions and the
+        prediction records stay valid with the knob on)."""
+        sh = Loader(library, resolve_input({}), resolve_target({}),
+                    shuffle_samples=True, seed=3)
+        a, b = sh.build(7)['x'], sh.build(7)['x']
+        for f in X_FIELDS:
+            np.testing.assert_array_equal(a[f], b[f])   # per-fix frozen
+        plain = loader.build(7)['x']
+        order = np.argsort(a['lat'], kind='stable')
+        base = np.argsort(plain['lat'], kind='stable')
+        np.testing.assert_array_equal(a['lat'][order], plain['lat'][base])
+        np.testing.assert_array_equal(a['obs'][order], plain['obs'][base])
+        assert not np.array_equal(a['lat'], plain['lat'])   # order changed
+        sh2 = Loader(library, resolve_input({}), resolve_target({}),
+                     shuffle_samples=True, seed=4)
+        assert not np.array_equal(sh2.build(7)['x']['lat'], a['lat'])
+
     def test_union_channels_masked_per_source(self, loader):
         """Every token carries the FULL channel union; channels a source
         lacks are zeroed with missing False (land: sst; marine:

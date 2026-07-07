@@ -80,10 +80,18 @@ class Loader:
     """
 
     def __init__(self, lib, inputs, targets, sshs_min=TROPICAL_STORM,
-                 drop_subtropical=False, norms=None):
+                 drop_subtropical=False, norms=None,
+                 shuffle_samples=False, seed=0):
         self.lib     = lib
         self.inputs  = inputs
         self.targets = targets
+        # shuffle_samples: permute station order WITHIN each sample so a
+        # flat model cannot key weights to storage-order slots. The
+        # permutation is a pure function of (seed, fix index) — the same
+        # fix always builds the same bytes, so input_collisions and the
+        # prediction records stay valid with the knob on.
+        self.shuffle_samples = bool(shuffle_samples)
+        self.seed = int(seed)
         # build_data attaches this AFTER computing train-split stats (the
         # stats pass itself needs raw samples, i.e. norms is None).
         self.norms   = norms
@@ -163,6 +171,11 @@ class Loader:
                              x['lat'], x['lon'])
             keep = np.argsort(d, kind='stable')[:k]
             x = {f: v[keep] for f, v in x.items()}
+
+        if self.shuffle_samples and len(x['lat']) > 1:
+            perm = np.random.default_rng([self.seed, i]).permutation(
+                len(x['lat']))
+            x = {f: v[perm] for f, v in x.items()}
 
         if self.norms is not None:
             x = self.norms.apply_tail(x)     # post-selection: coords/time/level

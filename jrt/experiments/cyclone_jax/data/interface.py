@@ -212,7 +212,9 @@ def build_data(cfg, seed=0, check_fresh=True, lib=None):
                            check_fresh=check_fresh)
     loader = Loader(lib, inputs, targets,
                     sshs_min=int(cfg.get('sshs_min', 3)),
-                    drop_subtropical=bool(cfg.get('drop_subtropical', False)))
+                    drop_subtropical=bool(cfg.get('drop_subtropical', False)),
+                    shuffle_samples=bool(cfg.get('shuffle_samples', False)),
+                    seed=seed)
 
     splits = _resolve_splits(cfg, loader, seed)
     norms = _resolve_norms(cfg, loader, splits)

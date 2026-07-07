@@ -27,7 +27,12 @@ timesteps: 1
 
 batch_size: 32
 num_workers: 0                    # shell CYCLONE_JAX_NUM_WORKERS overrides
-prefetch_factor: 2
+prefetch_factor: 4
+
+# permute station order WITHIN each sample (seeded per fix — builds stay
+# deterministic, input_collisions valid): breaks storage-order slot
+# identity so a flat MLP cannot key weights to slots
+shuffle_samples: false
 
 split:
   strategy: memorise              # train == val == the year-filtered fixes
@@ -62,7 +67,7 @@ normalise:
   time_coordinate:
     time: {scale: 10800.0}        # max lookback delta (3 h) -> [-1, 0]
   variables:
-    slp:      {min: 87000.0, max: 105000.0}   # Caribbean max 1050 hPa
+    slp:      {min: 87000.0, max: 108400.0}
     air_temp: {min: 193.0, max: 333.0}
     u_wind:   {min: -115.0, max: 115.0}       # signed-symmetric: 0 -> 0
     v_wind:   {min: -115.0, max: 115.0}

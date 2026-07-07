@@ -15,7 +15,7 @@
 
 base: memorise_mlp                # configs/train/<name>.yaml
 study: memorise_mlp_hp            # wandb group + <run_dir>/<study>/
-n_trials: 24
+n_trials: 48
 n_startup_trials: 4               # trials before the median pruner engages
 n_warmup_steps: 3                 # epochs per trial before pruning checks
 retrain_best: true                # best.yaml -> full run tagged {study}-best
@@ -24,8 +24,8 @@ retrain_best: true                # best.yaml -> full run tagged {study}-best
 # {low, high, log?, step?} (int when both bounds are ints) or {choices}.
 search:
   trainer.scheduler_kwargs.value: {low: 1.0e-4, high: 1.0e-2, log: true}
-  model.hidden_features: {choices: [32, 64, 128, 256, 512]}
-  model.n_layers: {choices: [1, 2, 3]}
-  model.encoding.embedding_kwargs.mapping_dim: {choices: [8, 16, 32, 64]}
+  model.hidden_features: {choices: [32, 64, 128, 256]}
+  model.n_layers: {choices: [1, 2, 3, 4]}
+  model.encoding.embedding_kwargs.mapping_dim: {choices: [8, 16, 32, 64, 128]}
   # gamma bandwidth is worth a look once the size knobs settle:
   model.encoding.embedding_kwargs.scale: {low: 0.5, high: 8.0, log: true}

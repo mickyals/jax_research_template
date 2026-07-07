@@ -13,7 +13,7 @@
 
 base: generalise_mlp              # configs/train/<name>.yaml
 study: generalise_mlp_hp          # wandb group + <run_dir>/<study>/
-n_trials: 24
+n_trials: 50
 n_startup_trials: 4               # trials before the median pruner engages
 n_warmup_steps: 5                 # epochs per trial before pruning checks
 retrain_best: true                # best.yaml -> full run tagged {study}-best
