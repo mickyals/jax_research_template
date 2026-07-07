@@ -1,8 +1,9 @@
 """
-Tests for cyclone_jax data/normalise.py — the NormSpec policy layer:
-resolve, train-split stats materialisation, application inside the Loader
+Tests for cyclone_jax data/normalise.py — the physical-bounds NormSpec
+layer (2026-07-06 schema): grouped keyed-dict resolve, per-field method
+selection, explicit-auto train-split fill, application inside the Loader
 (obs pre-fill, tail post-selection), json round-trip, and the guards.
-Mechanics (registry, accumulator) are covered in tests/utils/test_normalise.
+Stats mechanics (accumulator) are covered in tests/utils/test_normalise.
 """
 
 import numpy as np
@@ -15,7 +16,34 @@ from experiments.cyclone_jax.data.normalise import (
     NormSpec, resolve_normalise,
 )
 
-CFG = {'normalise': {'method': 'standardise', 'stats': 'auto'}}
+# fixture library: station lat 0..30, lon -100..-30 (matches the real
+# library's verified coverage); default input spec = the 7-channel union
+COORDS = {
+    'surface_coordinate':  {'lat': {'min': 0.0, 'max': 30.0},
+                            'lon': {'min': -100.0, 'max': -30.0}},
+    'vertical_coordinate': {'level': {'min': 70000.0, 'max': 108000.0}},
+    'time_coordinate':     {'time': {'scale': 10800.0}},
+}
+DECLARED_VARS = {
+    'station_pressure': {'min': 87000.0, 'max': 105000.0},
+    'slp':              {'min': 87000.0, 'max': 105000.0},
+    'air_temp':         {'min': 193.0, 'max': 333.0},
+    'dewpoint':         {'mean': 290.0, 'std': 8.0},      # z-score entry
+    'sst':              {'mean': 300.0, 'std': 3.0},
+    'u_wind':           {'min': -115.0, 'max': 115.0},
+    'v_wind':           {'min': -115.0, 'max': 115.0},
+}
+
+DECLARED = {'normalise': {**COORDS, 'variables': dict(DECLARED_VARS)}}
+# same block with two obs channels + every coordinate left to the split
+AUTO = {'normalise': {
+    'surface_coordinate':  {'lat': 'auto', 'lon': 'auto'},
+    'vertical_coordinate': {'level': 'auto'},
+    'time_coordinate':     {'time': 'auto'},
+    'variables': {**{c: 'auto' for c in ('slp', 'air_temp')},
+                  **{c: v for c, v in DECLARED_VARS.items()
+                     if c not in ('slp', 'air_temp')}},
+}}
 
 
 @pytest.fixture(scope='module')
@@ -25,8 +53,14 @@ def raw_loader(library):
 
 @pytest.fixture(scope='module')
 def spec(raw_loader):
-    """Stats over every fix (the fixture's 'train split')."""
-    policy = resolve_normalise(CFG)
+    """Fully declared — materialises with NO data pass."""
+    return resolve_normalise(DECLARED).materialise(raw_loader)
+
+
+@pytest.fixture(scope='module')
+def auto_spec(raw_loader):
+    """Auto entries filled over every fix (the fixture's 'train split')."""
+    policy = resolve_normalise(AUTO)
     return policy.materialise(raw_loader, np.arange(len(raw_loader)))
 
 
@@ -37,7 +71,7 @@ def norm_loader(library, spec):
 
 
 # ---------------------------------------------------------------------------
-# resolve_normalise
+# resolve_normalise — the grouped keyed-dict surface
 # ---------------------------------------------------------------------------
 
 class TestResolve:
@@ -45,108 +79,155 @@ class TestResolve:
     def test_absent_block_is_none(self):
         assert resolve_normalise({}) is None
 
-    def test_method_none_is_none(self):
-        assert resolve_normalise({'normalise': {'method': 'none'}}) is None
+    def test_old_flat_form_rejected_with_hint(self):
+        with pytest.raises(ValueError, match='physical bounds'):
+            resolve_normalise({'normalise': {'method': 'standardise',
+                                             'stats': 'auto'}})
 
-    def test_unknown_method_raises(self):
-        with pytest.raises(ValueError, match='zscore'):
-            resolve_normalise({'normalise': {'method': 'zscore'}})
+    def test_old_domain_block_rejected_with_hint(self):
+        with pytest.raises(ValueError, match='surface_coordinate'):
+            resolve_normalise({**DECLARED, 'domain': {'lat': [0, 35]}})
 
-    def test_auto_flag(self):
-        assert resolve_normalise(CFG).auto
+    def test_missing_group_raises(self):
+        block = {k: v for k, v in DECLARED['normalise'].items()
+                 if k != 'time_coordinate'}
+        with pytest.raises(ValueError, match='time_coordinate'):
+            resolve_normalise({'normalise': block})
 
-    def test_inline_stats_not_auto(self, spec):
-        cfg = {'normalise': {'method': 'standardise',
-                             'stats': spec.to_json()['stats']}}
-        assert not resolve_normalise(cfg).auto
+    def test_wrong_coord_fields_raise(self):
+        block = dict(DECLARED['normalise'],
+                     surface_coordinate={'lat': {'min': 0, 'max': 30}})
+        with pytest.raises(ValueError, match='lon'):
+            resolve_normalise({'normalise': block})
 
-    def test_domain_parsed_and_validated(self):
-        p = resolve_normalise({**CFG, 'domain': {'lat': [0, 35]}})
-        assert p.domain == {'lat': (0.0, 35.0)}
-        with pytest.raises(ValueError, match='alt'):
-            resolve_normalise({**CFG, 'domain': {'alt': [0, 1]}})
+    def test_needs_stats_flag(self):
+        assert resolve_normalise(AUTO).needs_stats
+        assert not resolve_normalise(DECLARED).needs_stats
 
-    def test_domain_0360_lon_raises(self):
-        # 0..360-convention Caribbean box — must be caught at resolve
-        with pytest.raises(ValueError, match='-180'):
-            resolve_normalise({**CFG, 'domain': {'lon': [260, 330]}})
+    def test_mixed_key_entry_raises(self):
+        block = dict(DECLARED['normalise'],
+                     variables=dict(DECLARED_VARS,
+                                    slp={'min': 0.0, 'std': 1.0}))
+        with pytest.raises(ValueError, match='keyed pair'):
+            resolve_normalise({'normalise': block})
 
-    def test_domain_inverted_bounds_raise(self):
+    def test_inverted_minmax_raises(self):
+        block = dict(DECLARED['normalise'],
+                     variables=dict(DECLARED_VARS,
+                                    slp={'min': 9.0, 'max': 1.0}))
+        with pytest.raises(ValueError, match='min < max'):
+            resolve_normalise({'normalise': block})
+
+    def test_nonpositive_std_raises(self):
+        block = dict(DECLARED['normalise'],
+                     variables=dict(DECLARED_VARS,
+                                    sst={'mean': 300.0, 'std': 0.0}))
+        with pytest.raises(ValueError, match='std > 0'):
+            resolve_normalise({'normalise': block})
+
+    def test_time_takes_scale_only(self):
+        block = dict(DECLARED['normalise'],
+                     time_coordinate={'time': {'min': -1e4, 'max': 0.0}})
+        with pytest.raises(ValueError, match='scale'):
+            resolve_normalise({'normalise': block})
+
+    def test_lat_rejects_mean_std(self):
+        block = dict(DECLARED['normalise'],
+                     surface_coordinate={'lat': {'mean': 15.0, 'std': 5.0},
+                                         'lon': COORDS['surface_coordinate']['lon']})
         with pytest.raises(ValueError, match='lat'):
-            resolve_normalise({**CFG, 'domain': {'lat': [35, 0]}})
+            resolve_normalise({'normalise': block})
+
+    def test_unknown_variable_name_raises(self):
+        block = dict(DECLARED['normalise'],
+                     variables=dict(DECLARED_VARS,
+                                    air_tmp={'min': 0.0, 'max': 1.0}))
+        with pytest.raises(ValueError, match='air_tmp'):
+            resolve_normalise({'normalise': block})
+
+    def test_0360_lon_bounds_raise_with_hint(self):
+        block = dict(DECLARED['normalise'],
+                     surface_coordinate={'lat': COORDS['surface_coordinate']['lat'],
+                                         'lon': {'min': 260.0, 'max': 330.0}})
+        with pytest.raises(ValueError, match='-180'):
+            resolve_normalise({'normalise': block})
 
 
 # ---------------------------------------------------------------------------
-# Materialisation (train-split stats)
+# Materialisation
 # ---------------------------------------------------------------------------
 
 class TestMaterialise:
 
-    def test_channels_align_with_input_spec(self, spec, raw_loader):
+    def test_declared_needs_no_indices(self, spec, raw_loader):
         assert spec.channels == raw_loader.inputs.channels
 
-    def test_obs_stats_match_manual_nan_stats(self, spec, raw_loader):
-        """Spec stats == nan-stats over raw samples (mask-restored NaN)."""
+    def test_declared_passthrough(self, spec):
+        v = spec.stats['variables']
+        assert v['slp'] == {'min': 87000.0, 'max': 105000.0}
+        assert v['sst'] == {'mean': 300.0, 'std': 3.0}
+
+    def test_active_channel_without_entry_raises(self, raw_loader):
+        block = dict(DECLARED['normalise'],
+                     variables={c: v for c, v in DECLARED_VARS.items()
+                                if c != 'slp'})
+        with pytest.raises(ValueError, match='slp'):
+            resolve_normalise({'normalise': block}).materialise(raw_loader)
+
+    def test_inactive_entries_ignored(self, library):
+        """A shared block may carry entries for channels the scenario
+        filtered out — the record subsets to the active set."""
+        loader = Loader(library,
+                        resolve_input({'channels': ['slp', 'air_temp']}),
+                        resolve_target({}))
+        s = resolve_normalise(DECLARED).materialise(loader)
+        assert set(s.stats['variables']) == {'slp', 'air_temp'}
+
+    def test_auto_needs_indices(self, raw_loader):
+        with pytest.raises(ValueError, match='index set'):
+            resolve_normalise(AUTO).materialise(raw_loader)
+
+    def test_auto_refuses_normalised_loader(self, norm_loader):
+        with pytest.raises(RuntimeError, match='RAW'):
+            resolve_normalise(AUTO).materialise(norm_loader, np.arange(4))
+
+    def test_auto_fills_mean_std(self, auto_spec, raw_loader):
+        """auto == nan-stats over raw samples (mask-restored NaN)."""
         vals = []
         for i in range(len(raw_loader)):
             x = raw_loader.build(i)['x']
             vals.append(np.where(x['missing'], x['obs'], np.nan))
         v = np.concatenate(vals)
-        j = spec.channels.index('slp')
-        s = spec.stats['obs']['slp']
-        # accumulator runs float64; the manual reference is float32 samples
+        j = auto_spec.channels.index('slp')
+        s = auto_spec.stats['variables']['slp']
+        assert set(s) == {'mean', 'std'}
         np.testing.assert_allclose(s['mean'], np.nanmean(v[:, j]), rtol=1e-6)
         np.testing.assert_allclose(s['std'], np.nanstd(v[:, j]), rtol=1e-4)
 
-    def test_time_scale_covers_the_lookback(self, spec, raw_loader):
+    def test_auto_coords_are_observed_minmax(self, auto_spec):
+        lat = auto_spec.stats['surface_coordinate']['lat']
+        assert set(lat) == {'min', 'max'}
+        assert 0.0 <= lat['min'] < lat['max'] <= 30.0
+
+    def test_auto_time_scale_covers_the_lookback(self, auto_spec,
+                                                 raw_loader):
         dts = [raw_loader.build(i)['x']['time'].min()
                for i in range(0, len(raw_loader), 5)]
-        assert spec.time_scale >= abs(min(dts))
+        assert auto_spec.time_scale >= abs(min(dts))
 
-    def test_domain_overrides_observed_coord_range(self, raw_loader):
-        p = resolve_normalise({**CFG, 'domain': {'lat': [-90, 90]}})
-        s = p.materialise(raw_loader, np.arange(8))
-        assert s.stats['lat'] == {'min': -90.0, 'max': 90.0}
-
-    def test_auto_needs_indices(self, raw_loader):
-        with pytest.raises(ValueError, match='index set'):
-            resolve_normalise(CFG).materialise(raw_loader)
-
-    def test_stats_pass_refuses_normalised_loader(self, norm_loader):
-        with pytest.raises(RuntimeError, match='RAW'):
-            resolve_normalise(CFG).materialise(norm_loader, np.arange(4))
-
-    def test_inline_missing_channel_raises(self, spec):
-        stats = spec.to_json()['stats']
-        stats['obs'].pop('sst')
-        with pytest.raises(ValueError, match='sst'):
-            NormSpec(method='standardise', channels=spec.channels,
-                     stats=stats)
-
-    def test_lon_0360_stats_raise_with_hint(self, spec):
-        # a 0..360-convention source would otherwise scale silently
-        stats = spec.to_json()['stats']
-        stats['lon'] = {'min': 260.0, 'max': 330.0}
-        with pytest.raises(ValueError, match='180'):
-            NormSpec(method='standardise', channels=spec.channels,
-                     stats=stats)
-
-    def test_bad_lat_stats_raise(self, spec):
-        stats = spec.to_json()['stats']
-        stats['lat'] = {'min': -95.0, 'max': 30.0}
-        with pytest.raises(ValueError, match='lat'):
-            NormSpec(method='standardise', channels=spec.channels,
-                     stats=stats)
-
-    def test_observed_coords_outside_domain_raise(self, raw_loader):
-        # domain narrower than the data -> coords would leave [-1, 1]
+    def test_declared_coords_must_cover_observed_when_pass_runs(
+            self, raw_loader):
+        """A stats pass (any auto) validates declared lat/lon coverage."""
         lats = np.concatenate([raw_loader.build(i)['x']['lat']
                                for i in range(8)])
         lo, hi = float(lats.min()), float(lats.max())
-        p = resolve_normalise(
-            {**CFG, 'domain': {'lat': [lo + (hi - lo) / 2, hi]}})
-        with pytest.raises(ValueError, match='domain'):
-            p.materialise(raw_loader, np.arange(8))
+        block = dict(AUTO['normalise'])
+        block['surface_coordinate'] = {
+            'lat': {'min': lo + (hi - lo) / 2, 'max': hi},
+            'lon': 'auto'}
+        with pytest.raises(ValueError, match='declared'):
+            resolve_normalise({'normalise': block}).materialise(
+                raw_loader, np.arange(8))
 
     def test_json_round_trip(self, spec):
         clone = NormSpec.from_json(spec.to_json())
@@ -155,9 +236,48 @@ class TestMaterialise:
         v = np.array([[1.0e5] * len(spec.channels)], np.float32)
         np.testing.assert_array_equal(spec.obs(v), clone.obs(v))
 
-    def test_json_is_serialisable(self, spec):
+    def test_json_is_serialisable(self, auto_spec):
         import json
-        json.dumps(spec.to_json())                   # numpy fully stripped
+        json.dumps(auto_spec.to_json())              # numpy fully stripped
+
+    def test_domain_property(self, spec):
+        assert spec.domain == {'lat': [0.0, 30.0], 'lon': [-100.0, -30.0]}
+
+    def test_describe_names_methods(self, spec):
+        d = spec.describe()
+        assert 'minmax(' in d and 'standardise(' in d
+        assert 'slp' in d and 'sst' in d and 'time /10800s' in d
+
+
+# ---------------------------------------------------------------------------
+# NormSpec direct-construction guards (the from_json path)
+# ---------------------------------------------------------------------------
+
+class TestSpecGuards:
+
+    def test_missing_channel_raises(self, spec):
+        stats = spec.to_json()['stats']
+        stats['variables'].pop('sst')
+        with pytest.raises(ValueError, match='sst'):
+            NormSpec(channels=spec.channels, stats=stats)
+
+    def test_missing_group_raises(self, spec):
+        stats = spec.to_json()['stats']
+        stats.pop('time_coordinate')
+        with pytest.raises(ValueError, match='time_coordinate'):
+            NormSpec(channels=spec.channels, stats=stats)
+
+    def test_lon_0360_stats_raise_with_hint(self, spec):
+        stats = spec.to_json()['stats']
+        stats['surface_coordinate']['lon'] = {'min': 260.0, 'max': 330.0}
+        with pytest.raises(ValueError, match='180'):
+            NormSpec(channels=spec.channels, stats=stats)
+
+    def test_bad_lat_stats_raise(self, spec):
+        stats = spec.to_json()['stats']
+        stats['surface_coordinate']['lat'] = {'min': -95.0, 'max': 30.0}
+        with pytest.raises(ValueError, match='lat'):
+            NormSpec(channels=spec.channels, stats=stats)
 
 
 # ---------------------------------------------------------------------------
@@ -181,20 +301,30 @@ class TestAppliedLoader:
         t = norm_loader.build(3)['x']['time']
         assert t.min() >= -1.0 - 1e-6 and t.max() <= 0.0
 
-    def test_missing_fill_sits_at_channel_mean(self, norm_loader):
-        """Standardised mean = 0; zero-fill therefore == mean-fill."""
+    def test_missing_fill_sits_at_zero(self, norm_loader):
+        """Scaling runs BEFORE the fill: filled values are exactly 0 —
+        the declared midpoint (minmax) or mean (standardise); the missing
+        flag is what disambiguates them from a real mid-range value."""
         x = norm_loader.build(5)['x']
         assert not x['missing'].all()                # fixture has gaps
         np.testing.assert_array_equal(x['obs'][~x['missing']], 0.0)
 
-    def test_observed_values_roughly_standardised(self, norm_loader):
+    def test_minmax_channel_lands_in_declared_band(self, norm_loader):
+        """Observed slp scales inside [-1, 1] iff the raw values respect
+        the declared physical bounds (the fixture's do)."""
+        j = norm_loader.norms.channels.index('slp')
         vals = []
         for i in range(0, len(norm_loader), 3):
             x = norm_loader.build(i)['x']
-            vals.append(np.where(x['missing'], x['obs'], np.nan))
+            vals.append(x['obs'][x['missing'][:, j], j])
         v = np.concatenate(vals)
-        assert abs(np.nanmean(v)) < 0.2
-        assert 0.5 < np.nanstd(v) < 2.0
+        assert len(v) and v.min() >= -1.0 - 1e-6 and v.max() <= 1.0 + 1e-6
+
+    def test_signed_symmetric_wind_keeps_zero(self, spec):
+        """u/v bounds [-115, 115]: raw 0 m/s must scale to exactly 0."""
+        j = spec.channels.index('u_wind')
+        v = np.zeros((1, len(spec.channels)), np.float32)
+        assert spec.obs(v)[0, j] == 0.0
 
     def test_mask_and_dtypes_unchanged(self, raw_loader, norm_loader):
         raw, norm = raw_loader.build(7)['x'], norm_loader.build(7)['x']

@@ -239,24 +239,35 @@ class TestGuards:
 
 class TestNormaliseConfigSurface:
 
-    def test_shipped_scenarios_carry_the_new_blocks(self):
+    def test_shipped_scenarios_declare_physical_bounds(self):
+        """Both scenarios ship the same fully-declared grouped block —
+        identical tokens across them (2026-07-06 bounds ruling), and
+        every active channel has an entry."""
+        blocks = {}
         for name in SHIPPED_SCENARIOS:
             block = yaml.safe_load(
                 (CONFIG_DIR / 'data' / f'{name}.yaml').read_text())
-            assert block['normalise'] == {'method': 'standardise',
-                                          'stats': 'auto'}
-            assert block['tags']                     # every scenario tagged
+            norm = block['normalise']
+            assert set(norm) == {'surface_coordinate',
+                                 'vertical_coordinate',
+                                 'time_coordinate', 'variables'}
+            assert set(block['channels']) <= set(norm['variables'])
+            assert 'auto' not in norm['variables'].values()  # no data pass
+            assert block['tags']                 # every scenario tagged
+            blocks[name] = norm
+        assert blocks['memorise'] == blocks['generalise']
 
-    def test_unknown_normalise_key_raises(self, tmp_path):
+    def test_unknown_normalise_group_raises(self, tmp_path):
         entry = _write(tmp_path, 's',
-                       {'root': 'x', 'normalise': {'methdo': 'standardise'}})
-        with pytest.raises(ValueError, match='methdo'):
+                       {'root': 'x', 'normalise': {'method': 'standardise'}})
+        with pytest.raises(ValueError, match='method'):
             load_config(entry, config_dir=tmp_path)
 
-    def test_unknown_domain_key_raises(self, tmp_path):
+    def test_old_domain_block_rejected(self, tmp_path):
+        # absorbed into normalise.surface_coordinate (2026-07-06)
         entry = _write(tmp_path, 's',
-                       {'root': 'x', 'domain': {'alt': [0, 1]}})
-        with pytest.raises(ValueError, match='alt'):
+                       {'root': 'x', 'domain': {'lat': [0, 30]}})
+        with pytest.raises(ValueError, match='domain'):
             load_config(entry, config_dir=tmp_path)
 
     def test_tags_key_accepted(self, tmp_path):

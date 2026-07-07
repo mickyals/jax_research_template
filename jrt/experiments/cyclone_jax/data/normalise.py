@@ -2,34 +2,58 @@
 experiments/cyclone_jax/data/normalise.py
 
 NormSpec — the declarative NORMALISATION side of a sample (third sibling of
-inputs.py / targets.py: policy here, mechanics in utils/normalise).
+inputs.py / targets.py: policy here, stats mechanics in utils/normalise).
 
-What gets scaled (x only — y and meta stay RAW, they are eval metadata):
+PHYSICAL DECLARED BOUNDS (user ruling 2026-07-06, supersedes the flat
+method/stats form): the yaml declares each field's scaling, so tokens are
+exactly identical across land/marine/channel-subset scenarios — no
+per-scenario stats drift. The train split is consulted only for fields
+explicitly marked ``auto``.
 
-    obs      per-channel by `method`, BEFORE the NaN->0 missingness fill,
-             so a zero-filled missing value sits at the channel mean
-    level    by `method`
-    time     divided by time scale -> [-1, 0]   (relative seconds, <= 0)
-    lat/lon  minmax_11 -> [-1, 1] over the domain bounds (SIREN/FINER need
-             [-1, 1]; radians only matter for angle-consuming embeddings)
-    id       untouched (already {-1, 0, 1}), missing untouched (bool)
-
-Stats policy (user ruling 2026-07-04): computed over the TRAIN split at
-train time and LOGGED — train.py writes NormSpec.to_json() to
-run_dir/norm_stats.json; evaluation REUSES a training run's saved stats.
-Scenarios without a train/all split (e.g. multistorm) cannot self-compute:
-they must carry inline stats in the yaml or be evaluated with a stats
-pointer to the training run — the point is to name WHICH training
-distribution the numbers are relative to.
-
-Config block (configs/data/*.yaml; no block or method 'none' = raw):
+Config block — grouped by coordinate kind; the KEYED PAIR selects the
+method per field:
 
     normalise:
-      method: standardise        # standardise | minmax_01 | minmax_11
-      stats: auto                # auto | inline json-shaped block
-    domain:                      # optional; fallback = train-split min/max
-      lat: [0, 35]
-      lon: [-100, -30]
+      surface_coordinate:               # -> minmax_11, [-1, 1]
+        lat: {min: 0.0, max: 30.0}
+        lon: {min: -100.0, max: -30.0}
+      vertical_coordinate:
+        level: {min: 70000.0, max: 108000.0}
+      time_coordinate:
+        time: {scale: 10800.0}          # dt / scale -> [-1, 0]
+      variables:                        # the obs channels
+        slp:      {min: 87000.0, max: 105000.0}    # minmax_11
+        air_temp: {mean: 300.0, std: 5.0}          # standardise
+        sst:      auto                  # train-split mean/std
+
+Entry forms:
+    {min, max}    affine map onto [-1, 1] (signed-symmetric bounds keep
+                  0 at 0 — the u/v wind case)
+    {mean, std}   z-score
+    {scale}       time only: dt/scale (dt is relative seconds <= 0)
+    auto          computed over the TRAIN split at build_data time —
+                  variables/level get mean/std, lat/lon observed min/max,
+                  time scale = max |dt|. ANY auto entry costs one raw
+                  pass over the split; an all-declared block builds with
+                  NO data pass (and no observed-coverage check — declared
+                  bounds are trusted).
+
+Every ACTIVE channel (after ``channels:`` filtering) must have a
+variables entry — missing is a config ERROR ("computed if not provided"
+requires an EXPLICIT auto). Entries for known-but-inactive channels are
+ignored, so one block can serve source/channel variants. x is scaled;
+y and meta stay RAW (eval metadata).
+
+Every scaling is affine, (value - shift) / scale, NaN-propagating: obs
+are scaled BEFORE the NaN->0 missingness fill, so a filled zero sits at
+the declared midpoint (minmax) or mean (standardise) and the missing
+flag disambiguates it. Values outside declared bounds scale slightly
+outside [-1, 1] — no clipping, QC outliers stay visible.
+
+The resolved record (autos filled with numbers) is what train.py writes
+to run_dir/norm_stats.json and evaluation reuses. Records written before
+this schema (flat method/stats, pre-2026-07-06) are not readable — those
+runs predate the bounds ruling and its comparison line.
 """
 
 from __future__ import annotations
@@ -39,9 +63,14 @@ from typing import Mapping
 
 import numpy as np
 
-from utils.normalise import NORMALISERS, StatsAccumulator, get_normaliser
+from utils.normalise import StatsAccumulator
 
-_STAT_KEYS = ('mean', 'std', 'min', 'max', 'count')
+from experiments.cyclone_jax.data.inputs import CHANNEL_ORDER
+
+_COORD_FIELDS = {'surface_coordinate':  ('lat', 'lon'),
+                 'vertical_coordinate': ('level',),
+                 'time_coordinate':     ('time',)}
+_GROUPS = (*_COORD_FIELDS, 'variables')
 
 # Coordinate-convention guard rails: the store's canonical convention is
 # degrees with lon in -180..180 (sources/build.py stores source lon
@@ -50,63 +79,106 @@ _STAT_KEYS = ('mean', 'std', 'min', 'max', 'count')
 _GEO_LIMITS = {'lat': (-90.0, 90.0), 'lon': (-180.0, 180.0)}
 
 
-def _bounds(entry: Mapping, method: str) -> tuple[float, float]:
-    """One field's (lo, hi) for `method`; never-observed -> identity-ish
-    (0, 1) — such values are all-NaN raw, so the choice is inert."""
-    lo, hi = (('mean', 'std') if method == 'standardise' else ('min', 'max'))
-    a, b = float(entry[lo]), float(entry[hi])
-    if not (np.isfinite(a) and np.isfinite(b)):
+def _check_entry(entry, where, kinds=('minmax', 'standardise')):
+    """Validate one field entry; return it with floats (or 'auto').
+
+    ``kinds`` = the keyed forms this field admits ('minmax' | 'standardise'
+    | 'scale'); 'auto' is always admitted.
+    """
+    if entry == 'auto':
+        return 'auto'
+    if not isinstance(entry, Mapping):
+        raise ValueError(f"{where}: entry must be a keyed dict or 'auto', "
+                         f"got {entry!r}.")
+    keys = frozenset(entry)
+    if keys == {'min', 'max'} and 'minmax' in kinds:
+        lo, hi = float(entry['min']), float(entry['max'])
+        if not (np.isfinite(lo) and np.isfinite(hi) and lo < hi):
+            raise ValueError(f"{where}: need finite min < max, "
+                             f"got [{lo!r}, {hi!r}].")
+        return {'min': lo, 'max': hi}
+    if keys == {'mean', 'std'} and 'standardise' in kinds:
+        mean, std = float(entry['mean']), float(entry['std'])
+        if not (np.isfinite(mean) and np.isfinite(std) and std > 0):
+            raise ValueError(f"{where}: need finite mean and std > 0, "
+                             f"got mean {mean!r}, std {std!r}.")
+        return {'mean': mean, 'std': std}
+    if keys == {'scale'} and 'scale' in kinds:
+        s = float(entry['scale'])
+        if not (np.isfinite(s) and s > 0):
+            raise ValueError(f"{where}: need finite scale > 0, got {s!r}.")
+        return {'scale': s}
+    forms = {'minmax': '{min, max}', 'standardise': '{mean, std}',
+             'scale': '{scale}'}
+    raise ValueError(f"{where}: the keyed pair selects the method — "
+                     f"{' or '.join(forms[k] for k in kinds)} or 'auto', "
+                     f"got keys {sorted(entry)}.")
+
+
+def _check_geo(f, entry, where):
+    """Declared lat/lon bounds must sit inside the geographic range."""
+    lo, hi = entry['min'], entry['max']
+    glo, ghi = _GEO_LIMITS[f]
+    if lo < glo or hi > ghi:
+        hint = (' — a 0..360-convention source? Canonicalise at volume '
+                'build: ((lon + 180) % 360) - 180' if f == 'lon' else '')
+        raise ValueError(f"{where}: {f} bounds [{lo:g}, {hi:g}] fall "
+                         f"outside the geographic range "
+                         f"[{glo:g}, {ghi:g}]{hint}.")
+
+
+def _affine(entry) -> tuple[float, float]:
+    """One resolved entry -> (shift, scale) for (v - shift) / scale.
+
+    {min, max} -> (midpoint, half-width): exactly minmax_11. {mean, std}
+    -> z-score. Auto-resolved entries whose split never observed the
+    field carry NaN — those scale as identity (0, 1): such values are
+    all-NaN raw, so the choice is inert (the record keeps the honest NaN).
+    """
+    if 'min' in entry:
+        lo, hi = float(entry['min']), float(entry['max'])
+        shift, scale = (lo + hi) / 2.0, (hi - lo) / 2.0
+    else:
+        shift, scale = float(entry['mean']), float(entry['std'])
+    if not (np.isfinite(shift) and np.isfinite(scale) and scale > 0):
         return 0.0, 1.0
-    return a, b
+    return shift, scale
 
 
 @dataclass(frozen=True)
 class NormSpec:
-    """Materialised normalisation: method + concrete per-field stats.
+    """Materialised normalisation: concrete per-field scalings.
 
     Built by NormPolicy.materialise (or from_json for a saved run) —
-    construct directly only in tests. `stats` is the json-shaped record
-    (module docstring) and THE thing train.py logs.
+    construct directly only in tests. ``stats`` is the RESOLVED grouped
+    record (module docstring shape, autos filled with numbers) and THE
+    thing train.py logs.
     """
-    method:   str
     channels: tuple[str, ...]          # obs column alignment (InputSpec)
     stats:    Mapping = field(repr=False)
 
     def __post_init__(self):
-        if self.method not in NORMALISERS:
-            raise ValueError(f"unknown normalise method {self.method!r} — "
-                             f"one of {NORMALISERS.names()} or 'none'.")
-        missing = set(self.channels) - set(self.stats.get('obs', {}))
+        missing_groups = set(_GROUPS) - set(self.stats)
+        if missing_groups:
+            raise ValueError(f"stats missing group(s) "
+                             f"{sorted(missing_groups)}.")
+        v = self.stats['variables']
+        missing = set(self.channels) - set(v)
         if missing:
-            raise ValueError(f"stats have no obs entry for channel(s) "
-                             f"{sorted(missing)}.")
-        for f in ('level', 'time', 'lat', 'lon'):
-            if f not in self.stats:
-                raise ValueError(f"stats missing the {f!r} block.")
-        fn = get_normaliser(self.method)
-        obs = self.stats['obs']
-        lo, hi = zip(*(_bounds(obs[c], self.method) for c in self.channels))
-        object.__setattr__(self, '_fn', fn)
-        object.__setattr__(self, '_obs_lo', np.asarray(lo, np.float32))
-        object.__setattr__(self, '_obs_hi', np.asarray(hi, np.float32))
-        object.__setattr__(self, '_level',
-                           _bounds(self.stats['level'], self.method))
-        scale = float(self.stats['time']['scale'])
-        object.__setattr__(self, 'time_scale', scale if scale > 0 else 1.0)
-        object.__setattr__(self, '_lat', (float(self.stats['lat']['min']),
-                                          float(self.stats['lat']['max'])))
-        object.__setattr__(self, '_lon', (float(self.stats['lon']['min']),
-                                          float(self.stats['lon']['max'])))
+            raise ValueError(f"stats have no variables entry for "
+                             f"channel(s) {sorted(missing)}.")
+        shift, scale = zip(*(_affine(v[c]) for c in self.channels))
+        object.__setattr__(self, '_obs_shift', np.asarray(shift, np.float32))
+        object.__setattr__(self, '_obs_scale', np.asarray(scale, np.float32))
+        object.__setattr__(self, '_level', _affine(
+            self.stats['vertical_coordinate']['level']))
+        s = float(self.stats['time_coordinate']['time']['scale'])
+        object.__setattr__(self, 'time_scale', s if s > 0 else 1.0)
         for f in ('lat', 'lon'):
-            lo, hi = getattr(self, f'_{f}')
-            glo, ghi = _GEO_LIMITS[f]
-            if np.isfinite(lo) and np.isfinite(hi) and (lo < glo or hi > ghi):
-                hint = (' — a 0..360-convention source? Canonicalise at '
-                        'volume build: ((lon + 180) % 360) - 180'
-                        if f == 'lon' else '')
-                raise ValueError(
-                    f"{f} stats [{lo:g}, {hi:g}] fall outside the "
-                    f"geographic range [{glo:g}, {ghi:g}]{hint}.")
+            entry = self.stats['surface_coordinate'][f]
+            lo, hi = float(entry['min']), float(entry['max'])
+            _check_geo(f, {'min': lo, 'max': hi}, 'stats')
+            object.__setattr__(self, f'_{f}', (lo, hi))
 
     # ------------------------------------------------------------------
     # Application (sampler.Loader calls these; see its docstring for WHERE)
@@ -114,24 +186,26 @@ class NormSpec:
 
     def obs(self, vals) -> np.ndarray:
         """Scale a raw (n, C) obs matrix. NaN-propagating — call BEFORE
-        build_missingness, so zero-fill lands on the channel mean."""
-        return self._fn(vals, self._obs_lo, self._obs_hi).astype(np.float32)
+        build_missingness, so zero-fill lands on the midpoint/mean."""
+        return ((np.asarray(vals, np.float32) - self._obs_shift)
+                / self._obs_scale).astype(np.float32)
 
     def apply_tail(self, x: dict) -> dict:
         """Scale lat/lon/time/level in place — AFTER station selection
         (haversine needs real degrees). Returns x for chaining."""
-        mm = get_normaliser('minmax_11')
-        x['lat'] = mm(x['lat'], *self._lat).astype(np.float32)
-        x['lon'] = mm(x['lon'], *self._lon).astype(np.float32)
+        for f in ('lat', 'lon'):
+            lo, hi = getattr(self, f'_{f}')
+            x[f] = ((x[f] - lo) / (hi - lo) * 2.0 - 1.0).astype(np.float32)
         x['time'] = (x['time'] / self.time_scale).astype(np.float32)
-        x['level'] = self._fn(x['level'], *self._level).astype(np.float32)
+        shift, scale = self._level
+        x['level'] = ((x['level'] - shift) / scale).astype(np.float32)
         return x
 
     def invert_coords(self, lat, lon) -> tuple[np.ndarray, np.ndarray]:
         """Normalised [-1, 1] lat/lon back to degrees.
 
-        Inverse of apply_tail's minmax_11 coordinate scaling — for figures
-        that plot station positions from an already-normalised batch (the
+        Inverse of apply_tail's coordinate scaling — for figures that
+        plot station positions from an already-normalised batch (the
         storm panel callback; y/meta coordinates stay raw and never need
         this).
         """
@@ -141,18 +215,38 @@ class NormSpec:
         lon = lo_lo + (np.asarray(lon, np.float32) + 1.0) * (lo_hi - lo_lo) / 2.0
         return lat.astype(np.float32), lon.astype(np.float32)
 
+    @property
+    def domain(self) -> dict:
+        """The declared FOV, {'lat': [lo, hi], 'lon': [lo, hi]} — feeds
+        network_sparsity and the figure extents (train/log.py)."""
+        return {'lat': [self._lat[0], self._lat[1]],
+                'lon': [self._lon[0], self._lon[1]]}
+
+    def describe(self) -> str:
+        """One banner line: per-method channel groups + coord bounds."""
+        v = self.stats['variables']
+        parts = []
+        for kind, key in (('minmax', 'min'), ('standardise', 'mean')):
+            named = [c for c in self.channels if key in v[c]]
+            if named:
+                parts.append(f"{kind}({', '.join(named)})")
+        lv = self.stats['vertical_coordinate']['level']
+        parts.append(f"lat [{self._lat[0]:g}, {self._lat[1]:g}]  "
+                     f"lon [{self._lon[0]:g}, {self._lon[1]:g}]")
+        parts.append(f"level {'minmax' if 'min' in lv else 'standardise'}")
+        parts.append(f"time /{self.time_scale:g}s")
+        return '  '.join(parts)
+
     # ------------------------------------------------------------------
     # Persistence (train.py -> run_dir/norm_stats.json; evaluate reads)
     # ------------------------------------------------------------------
 
     def to_json(self) -> dict:
-        return {'method': self.method, 'channels': list(self.channels),
-                'stats': _plain(self.stats)}
+        return {'channels': list(self.channels), 'stats': _plain(self.stats)}
 
     @classmethod
     def from_json(cls, d: Mapping) -> 'NormSpec':
-        return cls(method=d['method'], channels=tuple(d['channels']),
-                   stats=d['stats'])
+        return cls(channels=tuple(d['channels']), stats=d['stats'])
 
 
 def _plain(obj):
@@ -172,53 +266,77 @@ def _plain(obj):
 
 @dataclass(frozen=True)
 class NormPolicy:
-    """Resolved `normalise:` block, before stats exist."""
-    method: str
-    inline: Mapping | None      # stats block, or None = auto (train split)
-    domain: Mapping | None      # {'lat': (lo, hi), 'lon': (lo, hi)}
+    """Resolved ``normalise:`` block — declared entries plus 'auto'
+    markers, before any train-split numbers exist."""
+    entries: Mapping                   # grouped, validated (floats/'auto')
 
     @property
-    def auto(self) -> bool:
-        return self.inline is None
+    def needs_stats(self) -> bool:
+        """True when ANY entry is 'auto' — materialise then needs a
+        train-split index set (one raw pass; interface.py supplies it)."""
+        coords = any(self.entries[g][f] == 'auto'
+                     for g, fields in _COORD_FIELDS.items() for f in fields)
+        return coords or any(e == 'auto'
+                             for e in self.entries['variables'].values())
 
     def materialise(self, loader, indices=None) -> NormSpec:
-        """Concrete NormSpec — from inline stats, or one raw pass over
-        loader samples at `indices` (the train split; interface.py decides
-        which indices and raises the no-train-split error before this)."""
+        """Concrete NormSpec — declared entries pass through; 'auto'
+        entries are filled from one raw pass over loader samples at
+        ``indices`` (the train split; interface.py decides which indices
+        and raises the no-train-split error before this)."""
         channels = loader.inputs.channels
-        if not self.auto:
-            stats = dict(self.inline)
-        else:
+        variables = self.entries['variables']
+        missing = [c for c in channels if c not in variables]
+        if missing:
+            raise ValueError(
+                f"active channel(s) {missing} have no normalise.variables "
+                f"entry — declare {{min, max}}/{{mean, std}} bounds or an "
+                f"explicit 'auto' (config error, not a silent fallback).")
+        resolved = {g: {f: self.entries[g][f] for f in fields}
+                    for g, fields in _COORD_FIELDS.items()}
+        resolved['variables'] = {c: variables[c] for c in channels}
+
+        if self.needs_stats:
             if indices is None or not len(indices):
-                raise ValueError("stats: auto needs a non-empty index set "
-                                 "to compute from.")
+                raise ValueError("'auto' normalise entries need a non-empty "
+                                 "index set to compute from.")
             if loader.norms is not None:
                 raise RuntimeError("stats must be computed on RAW samples — "
                                    "loader already has norms attached.")
             stats = _collect_stats(loader, indices, channels)
-        if self.domain:
+            obs = stats['obs']
+            for c in channels:
+                if resolved['variables'][c] == 'auto':
+                    resolved['variables'][c] = {'mean': obs[c]['mean'],
+                                                'std':  obs[c]['std']}
+            if resolved['vertical_coordinate']['level'] == 'auto':
+                resolved['vertical_coordinate']['level'] = {
+                    'mean': stats['level']['mean'],
+                    'std':  stats['level']['std']}
+            if resolved['time_coordinate']['time'] == 'auto':
+                resolved['time_coordinate']['time'] = stats['time']
             for f in ('lat', 'lon'):
-                if f in self.domain:
-                    dlo, dhi = self.domain[f]
-                    if self.auto:
-                        # observed coords must fit the declared domain, or
-                        # the [-1,1] scaling silently leaves the unit range
-                        lo = float(stats[f]['min'])
-                        hi = float(stats[f]['max'])
-                        if np.isfinite(lo) and np.isfinite(hi) \
-                                and (lo < dlo or hi > dhi):
-                            raise ValueError(
-                                f"observed {f} range [{lo:g}, {hi:g}] "
-                                f"exceeds the declared domain "
-                                f"[{dlo:g}, {dhi:g}] — coords would scale "
-                                f"outside [-1, 1]; widen the domain block "
-                                f"or fix the data.")
-                    stats[f] = {'min': float(dlo), 'max': float(dhi)}
-        return NormSpec(method=self.method, channels=channels, stats=stats)
+                observed = stats[f]
+                if resolved['surface_coordinate'][f] == 'auto':
+                    resolved['surface_coordinate'][f] = dict(observed)
+                else:
+                    # the pass ran anyway — declared bounds must cover the
+                    # observed range, or coords silently leave [-1, 1]
+                    d = resolved['surface_coordinate'][f]
+                    lo, hi = float(observed['min']), float(observed['max'])
+                    if np.isfinite(lo) and np.isfinite(hi) \
+                            and (lo < d['min'] or hi > d['max']):
+                        raise ValueError(
+                            f"observed {f} range [{lo:g}, {hi:g}] exceeds "
+                            f"the declared surface_coordinate bounds "
+                            f"[{d['min']:g}, {d['max']:g}] — coords would "
+                            f"scale outside [-1, 1]; widen the bounds or "
+                            f"fix the data.")
+        return NormSpec(channels=channels, stats=resolved)
 
 
 def _collect_stats(loader, indices, channels) -> dict:
-    """One raw pass over the given fixes -> json-shaped stats dict."""
+    """One raw pass over the given fixes -> per-field stats for 'auto'."""
     obs_acc, tail_acc = StatsAccumulator(), StatsAccumulator()
     for i in indices:
         x = loader.build(int(i))['x']
@@ -231,7 +349,8 @@ def _collect_stats(loader, indices, channels) -> dict:
     tail = tail_acc.result()
 
     def _entry(res, j):
-        return {k: res[k][j] for k in _STAT_KEYS}
+        return {'mean': res['mean'][j], 'std': res['std'][j],
+                'min': res['min'][j], 'max': res['max'][j]}
 
     return {
         'obs':   {c: _entry(obs, j) for j, c in enumerate(channels)},
@@ -243,35 +362,56 @@ def _collect_stats(loader, indices, channels) -> dict:
 
 
 def resolve_normalise(config: dict) -> NormPolicy | None:
-    """Build the NormPolicy from the data config block.
+    """Data-config ``normalise:`` block -> NormPolicy (None = raw).
 
-    Keys read: normalise {method, stats}, domain. No block, or
-    method 'none', means raw values (None). Value errors surface here;
-    the no-train-split case surfaces in interface.build_data.
+    Guards the grouped surface (module docstring): the four groups, exact
+    coordinate field sets, keyed-pair entries, geographic limits on
+    declared lat/lon, and variables names against the canonical channel
+    union (typo guard — ACTIVE coverage is checked at materialise, where
+    the resolved channel set exists).
     """
+    if config.get('domain'):
+        raise ValueError("the top-level domain: block moved into "
+                         "normalise.surface_coordinate (lat/lon "
+                         "{min, max}) — physical-bounds schema, "
+                         "2026-07-06.")
     block = config.get('normalise')
     if not block:
         return None
-    method = block.get('method', 'standardise')
-    if method == 'none':
-        return None
-    if method not in NORMALISERS:
-        raise ValueError(f"unknown normalise.method {method!r} — one of "
-                         f"{NORMALISERS.names()} or 'none'.")
-    stats = block.get('stats', 'auto')
-    inline = None if (stats is None or stats == 'auto') else dict(stats)
-    domain = config.get('domain')
-    if domain:
-        unknown = set(domain) - {'lat', 'lon'}
-        if unknown:
-            raise ValueError(f"domain block has unknown key(s) "
-                             f"{sorted(unknown)} — only lat/lon.")
-        domain = {f: (float(v[0]), float(v[1])) for f, v in domain.items()}
-        for f, (lo, hi) in domain.items():
-            glo, ghi = _GEO_LIMITS[f]
-            if not (glo <= lo < hi <= ghi):
-                raise ValueError(
-                    f"domain.{f} [{lo:g}, {hi:g}] must satisfy "
-                    f"{glo:g} <= lo < hi <= {ghi:g} (degrees; lon in "
-                    f"the -180..180 convention).")
-    return NormPolicy(method=method, inline=inline, domain=domain)
+    unknown = set(block) - set(_GROUPS)
+    if unknown:
+        raise ValueError(f"unknown normalise group(s) {sorted(unknown)} — "
+                         f"the block is grouped as {sorted(_GROUPS)} "
+                         f"(the flat method/stats form was replaced by "
+                         f"per-field physical bounds, 2026-07-06).")
+    missing = set(_GROUPS) - set(block)
+    if missing:
+        raise ValueError(f"normalise block missing group(s) "
+                         f"{sorted(missing)} — every group is declared "
+                         f"explicitly (entries may be 'auto').")
+
+    entries = {}
+    for g, fields in _COORD_FIELDS.items():
+        sub = block[g] or {}
+        if set(sub) != set(fields):
+            raise ValueError(f"normalise.{g} must declare exactly "
+                             f"{sorted(fields)}, got {sorted(sub)}.")
+        kinds = {'lat': ('minmax',), 'lon': ('minmax',),
+                 'level': ('minmax', 'standardise'), 'time': ('scale',)}
+        entries[g] = {f: _check_entry(sub[f], f'normalise.{g}.{f}',
+                                      kinds=kinds[f]) for f in fields}
+        for f in fields:
+            if f in _GEO_LIMITS and entries[g][f] != 'auto':
+                _check_geo(f, entries[g][f], f'normalise.{g}')
+
+    variables = block['variables'] or {}
+    if not variables:
+        raise ValueError("normalise.variables is empty — every active "
+                         "channel needs an entry.")
+    unknown = set(variables) - set(CHANNEL_ORDER)
+    if unknown:
+        raise ValueError(f"normalise.variables name(s) {sorted(unknown)} "
+                         f"are not in the channel union {CHANNEL_ORDER}.")
+    entries['variables'] = {c: _check_entry(e, f'normalise.variables.{c}')
+                            for c, e in variables.items()}
+    return NormPolicy(entries=entries)

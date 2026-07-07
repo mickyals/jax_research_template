@@ -4,11 +4,11 @@ experiments/cyclone_jax/config.py
 Config composition + validation. Train configs are the entry point and
 POINT at one data scenario and one model config:
 
-    configs/train/train.yaml:   data: overfit      # configs/data/<name>.yaml
-                                model: mlp | null  # configs/models/<name>.yaml
-                                trainer: {...}     # inline
+    configs/train/memorise_mlp.yaml:  data: memorise   # configs/data/<name>.yaml
+                                      model: mlp       # configs/models/<name>.yaml
+                                      trainer: {...}   # inline
 
-    cfg = load_config('.../configs/train/train.yaml')
+    cfg = load_config('.../configs/train/memorise_mlp.yaml')
     data = build_data(cfg['data'], seed=cfg['trainer']['seed'])
 
 load_config resolves the pointers and validates every block against its
@@ -35,7 +35,7 @@ TOP_KEYS = {'data', 'model', 'trainer', 'gpu'}
 DATA_KEYS = {'root', 'sources', 'channels', 'selection', 'max_stations',
              'pad_to', 'target', 'sshs_min', 'class_set',
              'drop_subtropical', 'source_id', 'timesteps', 'batch_size',
-             'split', 'normalise', 'domain', 'tags', 'storm_panels',
+             'split', 'normalise', 'tags', 'storm_panels',
              'num_workers', 'prefetch_factor'}
 
 # storm_panels: per-split storm selection for the storm_panel callback /
@@ -46,9 +46,14 @@ STORM_PANEL_KEYS = {'train', 'val', 'test'}
 
 SPLIT_KEYS = {'strategy', 'years', 'n_per_class', 'exclude_multistorm'}
 
-NORMALISE_KEYS = {'method', 'stats'}
-
-DOMAIN_KEYS = {'lat', 'lon'}
+# Physical-bounds normalisation (2026-07-06): grouped per-field entries,
+# the keyed pair selects the method — {min, max} minmax_11 / {mean, std}
+# standardise / {scale} (time) / 'auto' (train split). Entry-level
+# validation lives in data/normalise.resolve_normalise; this is the
+# group surface only. The old top-level domain: block is absorbed into
+# surface_coordinate.
+NORMALISE_KEYS = {'surface_coordinate', 'vertical_coordinate',
+                  'time_coordinate', 'variables'}
 
 TRAINER_KEYS = {'seed', 'loss', 'loss_kwargs', 'optimizer',
                 'optimizer_kwargs', 'scheduler', 'scheduler_kwargs',
@@ -127,9 +132,6 @@ def load_config(train_yaml, config_dir=None):
     if data.get('normalise'):
         _check_keys(data['normalise'], NORMALISE_KEYS,
                     f"data scenario {raw['data']!r} normalise block")
-    if data.get('domain'):
-        _check_keys(data['domain'], DOMAIN_KEYS,
-                    f"data scenario {raw['data']!r} domain block")
     if data.get('storm_panels'):
         _check_keys(data['storm_panels'], STORM_PANEL_KEYS,
                     f"data scenario {raw['data']!r} storm_panels block")

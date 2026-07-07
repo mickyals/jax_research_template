@@ -1,26 +1,23 @@
 # =============================================================================
-# cyclone_jax data scenario: TRAIN — full year-split training
+# cyclone_jax data scenario: GENERALISE — year-split training
 # =============================================================================
-# THE generalisation scenario: disjoint year lists over the library's
-# 2005-2024 coverage (2025 = the land-only diagnostic year, out — same
-# ruling as memorise_2005_2024). Fixes at multi-driver timestamps are
-# EXCLUDED (ambiguous supervision) — they form the multistorm.yaml OOD
-# scenario. NOTE the test ceiling means something different here:
-# input_collisions counts conflicts WITHIN the split, but a test fix
-# whose weather picture also occurred in training carries its label
-# boundary — flag when reporting.
+# Disjoint year lists over the library's 2005-2024 coverage (2025, the
+# land-only diagnostic year, out; multi-driver timestamps excluded —
+# ambiguous supervision). Pair with configs/train/generalise_mlp.yaml.
+# Same sources/channels/normalise as memorise.yaml — identical tokens,
+# so memorise vs generalise reads off ONE comparison line.
+# NOTE the test-ceiling semantics: input_collisions counts conflicts
+# WITHIN a split, but a test fix whose weather picture also occurred in
+# training carries its label boundary — flag when reporting.
 
 root: "E:/Caribbean-Obs"          # shell CYCLONE_JAX_ROOT overrides
 
-sources: [land, marine]           # variants: train_land / train_marine
-# explicit channel list = the sources' full union (the run-record
-# default); trim it to ablate variables. Per-source absence (e.g.
-# sst on land) stays NaN + missing-flag — no per-source selection.
-channels: [station_pressure, slp, air_temp, dewpoint, sst,
-           u_wind, v_wind]
+sources: [land, marine]
+channels: [slp, air_temp, u_wind, v_wind]   # keep in sync with
+                                            # memorise.yaml (one line)
 selection: all
 max_stations: null
-pad_to: 1536
+pad_to: 1536                      # fixed collate width (one jit shape)
 
 target: usa_sshs
 sshs_min: 3
@@ -31,9 +28,6 @@ source_id: {land: -1, upper: 0, marine: 1}
 timesteps: 1
 
 batch_size: 32
-
-# TRAIN-stream multiprocess assembly (see memorise.yaml for the knobs'
-# semantics). 0 = synchronous; >0 for Linux/fork multi-CPU boxes.
 num_workers: 0                    # shell CYCLONE_JAX_NUM_WORKERS overrides
 prefetch_factor: 2
 
@@ -55,7 +49,22 @@ storm_panels:
     - "2024181N09320"             # BERYL 2024
     - "2022266N12294"             # IAN 2022
 
+# Physical DECLARED bounds (SI) — see memorise.yaml for the entry forms.
+# All-declared: no per-split stats drift, no startup stats pass.
 normalise:
-  method: standardise
-  stats: auto                     # computed over THIS train split, saved
-                                  # to run_dir/norm_stats.json
+  surface_coordinate:             # the FOV; also feeds figures/sparsity.
+    lat: {min: 0.0, max: 30.0}    # library-verified 2026-07-06
+    lon: {min: -100.0, max: -30.0}
+  vertical_coordinate:            # land station_pressure + marine slp,
+    level: {min: 70000.0, max: 108000.0}    # Pa (library 70790..107450)
+  time_coordinate:
+    time: {scale: 10800.0}        # max lookback delta (3 h) -> [-1, 0]
+  variables:
+    slp:      {min: 87000.0, max: 105000.0}   # Caribbean max 1050 hPa
+    air_temp: {min: 193.0, max: 333.0}
+    u_wind:   {min: -115.0, max: 115.0}       # signed-symmetric: 0 -> 0
+    v_wind:   {min: -115.0, max: 115.0}
+    # inactive channels — activate in channels: WITH an entry here:
+    # dewpoint:         {min: 193.0, max: 308.0}
+    # station_pressure: auto
+    # sst:              auto

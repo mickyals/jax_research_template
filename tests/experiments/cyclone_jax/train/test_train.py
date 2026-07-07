@@ -19,6 +19,19 @@ TINY_MODEL = {
     'activation': 'relu',
 }
 
+# physical-bounds normalise block for the tiny scenario: slp declared
+# (the banner's minmax group), the other union channels explicit auto
+NORM_OVER = {'normalise': {
+    'surface_coordinate':  {'lat': {'min': 0.0, 'max': 30.0},
+                            'lon': {'min': -100.0, 'max': -30.0}},
+    'vertical_coordinate': {'level': 'auto'},
+    'time_coordinate':     {'time': {'scale': 10800.0}},
+    'variables': {'slp': {'min': 87000.0, 'max': 105000.0},
+                  **{c: 'auto' for c in
+                     ('station_pressure', 'air_temp', 'dewpoint',
+                      'sst', 'u_wind', 'v_wind')}},
+}}
+
 
 def _write_configs(config_dir, library_root, model=TINY_MODEL,
                    trainer=None, data_over=None):
@@ -244,13 +257,14 @@ class TestMain:
         """norm_stats.json (evaluate reuses) + data_manifest.json (what the
         run trained on) land in run_dir before training starts."""
         entry = _write_configs(
-            tmp_path / 'configs', library_root,
-            data_over={'normalise': {'method': 'standardise',
-                                     'stats': 'auto'}})
+            tmp_path / 'configs', library_root, data_over=NORM_OVER)
         main(entry, config_dir=tmp_path / 'configs')
         run = tmp_path / 'configs' / 'run'
         stats = json.loads((run / 'norm_stats.json').read_text())
-        assert stats['method'] == 'standardise'
+        # the resolved record: declared bounds verbatim, autos as numbers
+        assert (stats['stats']['variables']['slp']
+                == {'min': 87000.0, 'max': 105000.0})
+        assert stats['stats']['variables']['air_temp']['std'] > 0
         man = json.loads((run / 'data_manifest.json').read_text())
         tr = man['splits']['train']
         assert tr['size'] > 0
@@ -262,14 +276,13 @@ class TestMain:
         """Pre-tqdm banner: split sizes/class counts, norm line, model
         name + param count + nn.tabulate architecture table."""
         entry = _write_configs(
-            tmp_path / 'configs', library_root,
-            data_over={'normalise': {'method': 'standardise',
-                                     'stats': 'auto'}})
+            tmp_path / 'configs', library_root, data_over=NORM_OVER)
         main(entry, config_dir=tmp_path / 'configs')
         out = capsys.readouterr().out
         assert '[data] train:' in out
         assert '[data] channels (' in out      # the resolved union, named
-        assert '[norm] standardise' in out
+        assert '[norm] minmax(slp)' in out     # per-method channel groups
+        assert 'lat [0, 30]' in out
         assert '[model] X per sample' in out    # what enters the model
         # no encoding block -> the model consumes every token field
         assert '[model] consumes  level, time, id, obs, missing' in out

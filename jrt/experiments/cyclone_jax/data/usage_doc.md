@@ -110,27 +110,45 @@ batch['meta']    # sid list, lat/lon/time arrays, n_stations
 | `multistorm` | — | `{'test': ...}` = all fixes at multi-driver timestamps (OOD) |
 | *(absent)* | — | `{'all': ...}` for exploration |
 
-## Normalisation (`cfg['normalise']` + `cfg['domain']`)
+## Normalisation (`cfg['normalise']` — physical declared bounds, 2026-07-06)
 
-`normalise: {method: standardise|minmax_01|minmax_11, stats: auto|inline}`;
-no block or `method: none` = raw values. Mechanics live in
-`utils/normalise` (shared registry); policy in `normalise.py` (NormSpec —
-third sibling of Input/TargetSpec).
+Grouped per-field block; the KEYED PAIR selects the method. No block =
+raw values. Policy in `normalise.py` (NormSpec — third sibling of
+Input/TargetSpec); the stats accumulator lives in `utils/normalise`.
 
-- **Stats are properties of a training distribution**: `stats: auto`
-  computes them over the TRAIN split (or `all`) inside `build_data`, and
-  train.py saves them to `run_dir/norm_stats.json` (+ wandb config +
-  manifest). Evaluation must REUSE a training run's saved stats.
-- **Scenarios with no train split** (multistorm) cannot self-compute —
-  `build_data` raises with instructions. Provide inline stats in the yaml
-  or point evaluation at the training run (`--stats <run_dir>`), i.e. say
-  WHICH training distribution the stress test is relative to.
-- Coverage: obs per-channel by `method` **before** the NaN->0 fill (so
-  zero-fill == mean-fill); level by `method`; time / lookback -> [-1, 0];
-  lat/lon -> [-1, 1] over `domain:` bounds (fallback: train min/max,
-  logged). `y` and `meta` stay RAW — they are eval metadata.
-- `domain: {lat: [lo, hi], lon: [lo, hi]}` pins the FOV for coord scaling;
-  station selection (haversine) always runs on real degrees regardless.
+```yaml
+normalise:
+  surface_coordinate:                 # -> minmax_11, [-1, 1]; also the FOV
+    lat: {min: 0.0, max: 30.0}        #    for figures + network_sparsity
+    lon: {min: -100.0, max: -30.0}
+  vertical_coordinate:
+    level: {min: 70000.0, max: 108000.0}
+  time_coordinate:
+    time: {scale: 10800.0}            # dt / scale -> [-1, 0]
+  variables:                          # the obs channels
+    slp:      {min: 87000.0, max: 105000.0}   # -> [-1, 1]
+    air_temp: {mean: 300.0, std: 5.0}         # -> z-score
+    sst:      auto                    # train-split mean/std
+```
+
+- **Declared bounds are the default**: tokens are identical across
+  land/marine/channel-subset scenarios (no per-scenario stats drift) and
+  materialise with NO data pass. Signed-symmetric `{min: -x, max: x}`
+  keeps 0 at 0 (u/v wind). Out-of-bounds values scale slightly outside
+  [-1, 1] — no clipping, QC outliers stay visible.
+- **`auto` is the explicit fallback**: computed over the TRAIN split (or
+  `all`) inside `build_data` — variables/level get mean/std, lat/lon the
+  observed min/max, time `scale = max |dt|`. Any auto entry costs one
+  raw pass. Every ACTIVE channel needs an entry; missing = config error.
+- The RESOLVED record (autos filled) goes to `run_dir/norm_stats.json`
+  (+ wandb config + manifest); evaluation REUSES it. Scenarios with no
+  train split (multistorm) must be fully declared or evaluated with the
+  training run's saved stats (`--stats <run_dir>`) — say WHICH training
+  distribution the stress test is relative to.
+- Obs scale **before** the NaN->0 fill: a filled zero sits at the
+  declared midpoint/mean and the missing FLAG disambiguates it from a
+  real mid-range value; the additive position encoding then localises
+  the flag. Station selection (haversine) always runs on real degrees.
 
 ## Units
 

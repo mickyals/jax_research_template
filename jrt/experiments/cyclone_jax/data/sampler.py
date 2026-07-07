@@ -25,10 +25,12 @@ so every variable owns one fixed union position (inputs.CHANNEL_ORDER).
 
 Normalisation (normalise.NormSpec, attached by interface.build_data as
 loader.norms; None = raw): obs are scaled INSIDE _source_x, before the
-NaN->0 missingness fill, so a filled zero sits at the channel mean (the
-scaling is NaN-propagating — the mask is unaffected). lat/lon/time/level
-are scaled at the END of build, after max_stations selection, because
-haversine needs real degrees. y is NEVER normalised (eval metadata).
+NaN->0 missingness fill, so a filled zero sits at the declared midpoint
+(minmax) or mean (standardise) and the missing flag disambiguates it
+(the scaling is NaN-propagating — the mask is unaffected). lat/lon/time/
+level are scaled at the END of build, after max_stations selection,
+because haversine needs real degrees. y is NEVER normalised (eval
+metadata).
 Everything x carries after build is float32 either way.
 
 Leakage allowlist holds by construction: x is built from obs volumes plus
@@ -131,7 +133,7 @@ class Loader:
                 if channel in ch:
                     vals[:, ch[channel]] = arr
         if self.norms is not None:
-            vals = self.norms.obs(vals)      # pre-fill: zero-fill == mean
+            vals = self.norms.obs(vals)      # pre-fill: 0 = midpoint/mean
         vals, missing = build_missingness(vals)
 
         dt = ((np.asarray(obs['report_timestamp'][lo:hi]).astype('int64')

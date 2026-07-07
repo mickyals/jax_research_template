@@ -106,12 +106,9 @@ def _emit(fig, name, split, global_step, logger, run_dir):
 
 
 def _domain_from_norms(norms):
-    """Coordinate-scaling bounds double as the effective FOV when the data
-    yaml has no explicit domain block (both feed the same stats record)."""
-    if norms is None:
-        return None
-    return {'lat': [norms.stats['lat']['min'], norms.stats['lat']['max']],
-            'lon': [norms.stats['lon']['min'], norms.stats['lon']['max']]}
+    """The declared surface_coordinate bounds ARE the FOV — sparsity and
+    figure extents read them off the NormSpec (raw runs have no FOV)."""
+    return norms.domain if norms is not None else None
 
 
 def _storm_track(fixes, sid, until):
@@ -270,7 +267,7 @@ def build_callbacks(cfg, data, logger) -> list:
     ctx = {'data': data, 'logger': logger,
            'run_dir': cfg['trainer'].get('run_dir'),
            'storm_panels': cfg['data'].get('storm_panels'),
-           'domain': cfg['data'].get('domain')}
+           'domain': _domain_from_norms(data.norms)}
     default_every = (len(data.streams['train'])
                      if 'train' in data.streams else None)
 
@@ -427,7 +424,7 @@ def _prediction_records(cfg, data, logger, state, global_step, basemap):
     if 'lat' not in fixes or 'lon' not in fixes:
         return                               # fix table without coords
     batch_size = int(cfg['data'].get('batch_size') or 256)
-    domain = cfg['data'].get('domain') or _domain_from_norms(data.norms)
+    domain = _domain_from_norms(data.norms)
     run_dir = cfg['trainer'].get('run_dir')
     class_names = data.targets.class_names
     # the ceiling hashes ONLY what the model consumes: its encoding.fields
@@ -577,7 +574,7 @@ def end_of_run(cfg, data, logger, state, global_step,
     ctx = {'data': data, 'logger': logger,
            'run_dir': cfg['trainer'].get('run_dir'),
            'storm_panels': cfg['data'].get('storm_panels'),
-           'domain': cfg['data'].get('domain')}
+           'domain': _domain_from_norms(data.norms)}
     if 'test' in data.streams:
         CALLBACKS.get('confusion_matrix', ctx=ctx, split='test')(
             state, 0, global_step)
@@ -602,7 +599,7 @@ def end_of_run(cfg, data, logger, state, global_step,
         sids = [str(rng.choice(np.unique(split_sids)))]
     else:
         sids = [str(sel)]
-    domain = ctx['domain'] or _domain_from_norms(data.norms)
+    domain = ctx['domain']
     run_dir = ctx['run_dir']
 
     for sid in sids:

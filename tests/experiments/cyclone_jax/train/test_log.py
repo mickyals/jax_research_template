@@ -25,6 +25,15 @@ from tests.experiments.cyclone_jax.fakes import (N_CLS, FakeLoader,
 DOMAIN = {'lat': [0, 30], 'lon': [-100, -30]}
 
 
+class FakeNorms:
+    """The two things log.py reads off a NormSpec: the declared FOV and
+    the coordinate inverse (identity — fake coords are real degrees)."""
+    domain = DOMAIN
+
+    def invert_coords(self, lat, lon):
+        return lat, lon
+
+
 def _targets():
     return TargetSpec(variable='usa_sshs', kind='categorical',
                       class_set=(3, 4, 5, 6, 7, 8))
@@ -370,9 +379,10 @@ class TestPredictionRecords:
     def _run(self, run_dir=None, splits=None):
         data = _bundle({}, loader=FakeLoader(('B', 'A', 'B', 'B', 'A')),
                        splits=splits if splits is not None
-                       else {'test': np.arange(5)})
+                       else {'test': np.arange(5)},
+                       norms=FakeNorms())    # the FOV rides the NormSpec
         logger = FakeLogger()
-        cfg = {'data': {'domain': DOMAIN, 'batch_size': 2}, 'model': None,
+        cfg = {'data': {'batch_size': 2}, 'model': None,
                'trainer': {'run_dir': run_dir}}
         end_of_run(cfg, data, logger, _dual_state(pred=2), global_step=5,
                    basemap=False)

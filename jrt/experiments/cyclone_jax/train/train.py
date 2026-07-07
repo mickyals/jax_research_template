@@ -191,10 +191,7 @@ def print_startup_banner(cfg, data, model, seed, log=None) -> None:
         log.info(f"  [data] {name}: {info['size']} fixes  "
                  f"{info['class_counts']}")
     if data.norms is not None:
-        s = data.norms.stats
-        log.info(f"  [norm] {data.norms.method}  "
-                 f"lat [{s['lat']['min']:g}, {s['lat']['max']:g}]  "
-                 f"lon [{s['lon']['min']:g}, {s['lon']['max']:g}]")
+        log.info(f"  [norm] {data.norms.describe()}")
     else:
         log.info("  [norm] raw (no normalise block)")
 

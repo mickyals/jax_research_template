@@ -10,9 +10,9 @@ arcana volume/bookshelf data layer. Branch of record: `jrtv2`.
 cyclone_jax/
 ├── config.py        # load_config: resolves train-config pointers, validates keys
 ├── configs/
-│   ├── data/        #   scenarios: overfit / train / memorise / test / multistorm
+│   ├── data/        #   scenarios: memorise / generalise (variants by editing)
 │   ├── models/      #   one yaml per model: mlp / siren / finer (+ wandb tags)
-│   └── train/       #   entry points: train.yaml points at {data, model}
+│   └── train/       #   entry points: {memorise,generalise}_mlp + tune pairs
 ├── data/            # the whole data side — see data/usage_doc.md
 ├── models/          # MODELS registry + build_model — see models/usage_doc.md
 ├── train/           # train.py entry + losses/metrics/log builders
@@ -28,7 +28,7 @@ cyclone_jax/
 from experiments.cyclone_jax.config import load_config, CONFIG_DIR
 from experiments.cyclone_jax.data.interface import build_data
 
-cfg  = load_config(CONFIG_DIR / 'train' / 'train.yaml')
+cfg  = load_config(CONFIG_DIR / 'train' / 'memorise_mlp.yaml')
 data = build_data(cfg['data'], seed=cfg['trainer']['seed'])
 
 sample = data.loader.build(0)          # one named ragged sample {'x', 'y'}
@@ -44,7 +44,7 @@ model, tags = build_model(cfg['model'], data.targets)   # tags -> wandb
 export PYTHONPATH=jrt
 export WANDB_API_KEY=...           # trainer.logger: wandb
 python -m experiments.cyclone_jax.train.train \
-    jrt/experiments/cyclone_jax/configs/train/train.yaml --gpu 0
+    jrt/experiments/cyclone_jax/configs/train/memorise_mlp.yaml --gpu 0
 ```
 
 - Model swap = edit the entry yaml's `model:` pointer (`mlp` / `siren` /
@@ -59,13 +59,17 @@ python -m experiments.cyclone_jax.train.train \
   figures land in `run_dir/figures/` and on the logger (confusion matrices,
   storm panels per `trainer.callbacks`; end-of-run test CM + storm
   sequence gif per the data yaml's `storm_panels` block).
-- Full-dataset memorisation probe: `data: memorise`; run
-  `data.identifiability.input_collisions` first for the accuracy ceiling.
-- Dataset variants: `train` / `memorise` (land+marine) have `_land` /
-  `_marine` clones — swap the entry yaml's `data:` pointer. All variants
-  share `pad_to: 1536` on purpose: the MLP input width is `pad_to × F`
-  (`features.flatten`), so a shared pad keeps architectures identical
-  across variants and the jit shape single.
+- Full-dataset memorisation probe: `data: memorise`; the identifiability
+  ceiling (`input_collisions`) is logged at end of run per split.
+- Scenario variants (single source, channel subsets, other splits) are
+  made by EDITING the scenario yaml's `sources:`/`channels:`/`split:` —
+  the working set is deliberately two files. Keep `pad_to: 1536` across
+  variants: the MLP input width is `pad_to × F` (`features.flatten`), so
+  a shared pad keeps architectures identical and the jit shape single.
+- `normalise:` = physical DECLARED bounds per field (keyed pair selects
+  minmax vs z-score; explicit `auto` = train-split stats) — identical
+  tokens across scenarios, no startup stats pass when fully declared.
+  Schema + values: `data/usage_doc.md` Normalisation.
 
 ## Hyperparameter search (CLI)
 
@@ -110,7 +114,7 @@ export CYCLONE_JAX_ROOT=/data/Caribbean-Obs
 export CYCLONE_JAX_NUM_WORKERS=8            # ~CPU cores; fork = Linux payoff
 
 python -m experiments.cyclone_jax.train.train \
-    jrt/experiments/cyclone_jax/configs/train/train.yaml --gpu 0
+    jrt/experiments/cyclone_jax/configs/train/memorise_mlp.yaml --gpu 0
 ```
 
 - Copy the built library (volumes + bookshelf + `meta.json` sidecars) to

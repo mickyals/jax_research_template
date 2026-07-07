@@ -256,7 +256,17 @@ class TestStreams:
 # Normalisation through build_data (policy detail: test_normalise.py)
 # ---------------------------------------------------------------------------
 
-NORM = {'normalise': {'method': 'standardise', 'stats': 'auto'}}
+# declared physical bounds for coords/level/time; obs channels 'auto' so
+# the train-split path through build_data stays exercised
+NORM = {'normalise': {
+    'surface_coordinate':  {'lat': {'min': 0.0, 'max': 30.0},
+                            'lon': {'min': -100.0, 'max': -30.0}},
+    'vertical_coordinate': {'level': {'min': 70000.0, 'max': 108000.0}},
+    'time_coordinate':     {'time': {'scale': 10800.0}},
+    'variables': {c: 'auto' for c in
+                  ('station_pressure', 'slp', 'air_temp', 'dewpoint',
+                   'sst', 'u_wind', 'v_wind')},
+}}
 
 
 class TestBuildDataNormalisation:
@@ -270,15 +280,16 @@ class TestBuildDataNormalisation:
         assert data.norms is not None
         assert data.loader.norms is data.norms
 
-    def test_stats_come_from_the_train_split_only(self, library_root):
-        """Different train splits -> different stats (they are properties
-        of a training distribution, computed + logged per run)."""
+    def test_auto_stats_come_from_the_train_split_only(self, library_root):
+        """Different train splits -> different auto numbers (they are
+        properties of a training distribution, computed + logged per
+        run); declared bounds would be identical by construction."""
         full = build_data(_cfg(library_root, **NORM))
         sub = build_data(_cfg(
             library_root, **NORM,
             split={'strategy': 'stratified', 'n_per_class': 2}))
-        assert (full.norms.stats['obs']['slp']['count']
-                > sub.norms.stats['obs']['slp']['count'])
+        assert (full.norms.stats['variables']['slp']
+                != sub.norms.stats['variables']['slp'])
 
     def test_batches_are_normalised(self, library_root):
         data = build_data(_cfg(library_root, **NORM))
@@ -288,10 +299,23 @@ class TestBuildDataNormalisation:
         lat = batch['X']['lat'][batch['X']['station_mask']]
         assert float(lat.min()) >= -1.0 and float(lat.max()) <= 1.0
 
+    def test_all_declared_needs_no_split(self, library_root):
+        """Fully declared bounds materialise WITHOUT a train split — the
+        multistorm-style scenario works once nothing says 'auto'."""
+        declared = {'normalise': {
+            **{k: v for k, v in NORM['normalise'].items()
+               if k != 'variables'},
+            'variables': {c: {'mean': 1.0, 'std': 2.0}
+                          for c in NORM['normalise']['variables']},
+        }}
+        data = build_data(_cfg(library_root, **declared,
+                               split={'strategy': 'multistorm'}))
+        assert data.norms is not None
+
     def test_scenario_without_train_split_raises_instructive(
             self, library_root):
-        """The documented rule: a stress-test scenario must NAME its
-        training distribution (inline stats or the run's saved stats)."""
+        """The documented rule: 'auto' entries must NAME their training
+        distribution (declare the numbers or point at a run's stats)."""
         with pytest.raises(ValueError, match='norm_stats.json'):
             build_data(_cfg(library_root, **NORM,
                             split={'strategy': 'multistorm'}))

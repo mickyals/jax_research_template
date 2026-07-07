@@ -5,21 +5,22 @@ notebooks/CLI only ever load one file:
 
 ```python
 from experiments.cyclone_jax.config import load_config, CONFIG_DIR
-cfg = load_config(CONFIG_DIR / 'train' / 'train.yaml')
+cfg = load_config(CONFIG_DIR / 'train' / 'memorise_mlp.yaml')
 # -> {'data': <scenario dict>, 'model': <dict|None>, 'trainer': <dict>}
 ```
 
 ```
 configs/
-├── data/     # run SCENARIOS — self-contained (no inheritance; diffable):
-│   #  overfit.yaml     stratified n_per_class subset, train==val (memorisation gate)
-│   #  train.yaml       year split 2005-18/2019-21/2022-24 (generalisation)
-│   #  train_land.yaml / train_marine.yaml   single-source variants (same
-│   #              splits; pad_to stays 1536 so architectures stay identical)
-│   #  memorise.yaml    FULL-dataset memorisation probe (train==val==all fixes)
-│   #  memorise_land.yaml / memorise_marine.yaml   its source variants
-│   #  test.yaml        same years, evaluation passes            !! keep in sync
-│   #  multistorm.yaml  the excluded multi-driver fixes as OOD test
+├── data/     # run SCENARIOS — self-contained (no inheritance; diffable).
+│   #  The working set is deliberately TWO files (2026-07-06):
+│   #  memorise.yaml    full-library memorisation probe (train==val==all
+│   #                   2005-2024 fixes)
+│   #  generalise.yaml  year split 2005-18/2019-21/2022-24
+│   #  Variants (single source, channel subsets, other split strategies)
+│   #  are made by EDITING sources:/channels:/split: — not by shipping a
+│   #  yaml per combination (the old variants live in git history).
+│   #  normalise: = physical declared bounds per field (data/usage_doc.md);
+│   #  every active channel needs an entry ('auto' = train-split stats)
 │   #  site overrides: shell CYCLONE_JAX_ROOT / CYCLONE_JAX_NUM_WORKERS
 │   #  beat the yaml root / num_workers (machine properties)
 │   #  channels: filters the sources' union (per-source availability
@@ -30,7 +31,8 @@ configs/
 │   #  siren.yaml  StationSIREN — raw coords, omegas
 │   #  finer.yaml  StationFINER — siren keys + bias_k
 │   #  n_classes stays null — injected from TargetSpec by models.build_model
-└── train/    # train.yaml: data: <scenario>, model: <name|null>, trainer: {...}
+└── train/    # entry points: data: <scenario>, model: <name|null>, trainer: {...}
+          #  memorise_mlp.yaml / generalise_mlp.yaml + their tune pairs
           #  top-level gpu: pins CUDA_VISIBLE_DEVICES (--gpu CLI overrides;
           #  a shell setting always wins)
           #  tune_*.yaml: HP search over a base train yaml (train/tune.py)

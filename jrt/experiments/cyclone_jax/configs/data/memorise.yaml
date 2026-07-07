@@ -1,23 +1,21 @@
 # =============================================================================
-# cyclone_jax data scenario: MEMORISE_2005_2024 — full-library memorisation
+# cyclone_jax data scenario: MEMORISE — full-library memorisation probe
 # =============================================================================
-# The memorisation run of record: train == val == every 2005-2024 fix
-# (2025 — the natural land-only diagnostic year — deliberately held out;
-# multi-driver timestamps excluded as always). See memorise.yaml for the
-# probe's semantics and train-yaml pairing notes. Six showpiece storms
-# render as end-of-run sequences (gif + stills) via storm_panels.test —
-# with no test split they draw from the train split.
+# train == val == every 2005-2024 fix (2025, the land-only diagnostic
+# year, held out; multi-driver timestamps excluded). Pair with
+# configs/train/memorise_mlp.yaml. Variants (single source, channel
+# subsets, other split strategies) are made by EDITING sources: /
+# channels: / split: here — no yaml per combination.
 
 root: "E:/Caribbean-Obs"          # shell CYCLONE_JAX_ROOT overrides
 
 sources: [land, marine]
-# explicit channel list = the sources' full union (the run-record
-# default); trim it to ablate variables. Per-source absence (e.g.
-# sst on land) stays NaN + missing-flag — no per-source selection.
-channels: [slp, air_temp, u_wind, v_wind]
+channels: [slp, air_temp, u_wind, v_wind]   # subset of the union; each
+                                            # active channel needs a
+                                            # normalise.variables entry
 selection: all
 max_stations: null
-pad_to: 1536
+pad_to: 1536                      # fixed collate width (one jit shape)
 
 target: usa_sshs
 sshs_min: 3
@@ -28,7 +26,6 @@ source_id: {land: -1, upper: 0, marine: 1}
 timesteps: 1
 
 batch_size: 32
-
 num_workers: 0                    # shell CYCLONE_JAX_NUM_WORKERS overrides
 prefetch_factor: 2
 
@@ -41,18 +38,35 @@ split:
 tags: [memorise, identifiability, y2005-2024, epoch100]
 
 storm_panels:
-  train: "2024181N09320"          # BERYL 2024 — SAME storm every run, so
-                                  # the panel shows the classification
-                                  # effect across runs, not a lottery
-  test:                           # end-of-run sequences (sids from the library)
-    - "2024181N09320"             # BERYL 2024
-    - "2017242N16333"             # IRMA 2017
-    - "2007225N12331"             # DEAN 2007
-    - "2022266N12294"             # IAN 2022
-    - "2010236N12341"             # EARL 2010
-    - "2020318N16289"             # IOTA 2020
+  train: "2024181N09320"          # BERYL 2024 — same storm every run, so
+                                  # panels compare across runs
+  test:                           # end-of-run sequences (no test split ->
+    - "2024181N09320"             #   drawn from train): BERYL 2024,
+    - "2017242N16333"             #   IRMA 2017,
+    - "2007225N12331"             #   DEAN 2007,
+    - "2022266N12294"             #   IAN 2022,
+    - "2010236N12341"             #   EARL 2010,
+    - "2020318N16289"             #   IOTA 2020
 
+# Physical DECLARED bounds (SI) — the keyed pair selects the method per
+# field: {min, max} -> [-1, 1], {mean, std} -> z-score, 'auto' -> computed
+# over the train split (one extra pass). All-declared = identical tokens
+# across scenarios and NO startup stats pass. Values outside bounds scale
+# slightly outside [-1, 1] (no clipping — QC outliers stay visible).
 normalise:
-  method: standardise
-  stats: auto                     # over the train split = the whole set —
-                                  # correct for memorisation
+  surface_coordinate:             # the FOV; also feeds figures/sparsity.
+    lat: {min: 0.0, max: 30.0}    # library-verified 2026-07-06:
+    lon: {min: -100.0, max: -30.0}  # lat 0..30, lon -100..-30
+  vertical_coordinate:            # land station_pressure + marine slp,
+    level: {min: 70000.0, max: 108000.0}    # Pa (library 70790..107450)
+  time_coordinate:
+    time: {scale: 10800.0}        # max lookback delta (3 h) -> [-1, 0]
+  variables:
+    slp:      {min: 87000.0, max: 105000.0}   # Caribbean max 1050 hPa
+    air_temp: {min: 193.0, max: 333.0}
+    u_wind:   {min: -115.0, max: 115.0}       # signed-symmetric: 0 -> 0
+    v_wind:   {min: -115.0, max: 115.0}
+    # inactive channels — activate in channels: WITH an entry here:
+    # dewpoint:         {min: 193.0, max: 308.0}
+    # station_pressure: auto
+    # sst:              auto

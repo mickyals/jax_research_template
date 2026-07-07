@@ -14,7 +14,8 @@ future additions):
                                      raw network (the "why a learned prior"
                                      number for a data-limited basin)
 
-The FOV is the data yaml's domain block ({lat: [lo, hi], lon: [lo, hi]});
+The FOV is the declared normalise.surface_coordinate bounds, read off the
+NormSpec as norms.domain ({lat: [lo, hi], lon: [lo, hi]});
 its area is exact on the sphere (utils.geoscience.latlon_box_area).
 n_stations means DISTINCT sensor locations in the sample/window, not
 observation rows. Consumers: EDA notebooks now; per-sample prediction-table
@@ -36,7 +37,7 @@ def network_sparsity(n_stations: int, domain: dict) -> dict:
         Distinct sensor locations present (e.g. station_mask.sum() for a
         sample, or unique active stations in a time window).
     domain : dict
-        The data yaml domain block: {'lat': [lo, hi], 'lon': [lo, hi]}.
+        The FOV (NormSpec.domain): {'lat': [lo, hi], 'lon': [lo, hi]}.
 
     Returns
     -------
