@@ -26,6 +26,6 @@ search:
   trainer.scheduler_kwargs.value: {low: 1.0e-4, high: 1.0e-2, log: true}
   trainer.optimizer_kwargs.weight_decay: {low: 1.0e-6, high: 1.0e-2, log: true}
   model.dropout_rate: {low: 0.0, high: 0.5}
-  model.hidden_features: {choices: [64, 128, 256, 512]}
+  model.hidden_features: {choices: [32, 64, 128, 256]}
   model.n_layers: {choices: [1, 2, 3]}
-  model.encoding.embedding_kwargs.mapping_dim: {choices: [16, 32, 64]}
+  model.encoding.embedding_kwargs.mapping_dim: {choices: [8, 16, 32, 64]}

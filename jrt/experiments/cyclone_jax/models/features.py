@@ -76,7 +76,7 @@ def pack_coords(X) -> jnp.ndarray:
 
 def flatten(tokens: jnp.ndarray) -> jnp.ndarray:
     """(B, N, F) tokens -> (B, N*F) flat vector (slot-sensitive: position
-    in the vector = station slot; fine for the memorisation gate)."""
+    in the vector = station slot; fine for the mebmorisation gate)."""
     return tokens.reshape(tokens.shape[0], -1)
 
 

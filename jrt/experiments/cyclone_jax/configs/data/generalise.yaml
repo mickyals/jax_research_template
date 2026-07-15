@@ -29,12 +29,12 @@ timesteps: 1
 
 batch_size: 32
 num_workers: 0                    # shell CYCLONE_JAX_NUM_WORKERS overrides
-prefetch_factor: 2
+prefetch_factor: 4
 
 # permute station order WITHIN each sample (seeded per fix — builds stay
 # deterministic, input_collisions valid): breaks storage-order slot
 # identity so a flat MLP cannot key weights to slots
-shuffle_samples: false
+shuffle_samples: true
 
 split:
   strategy: year
@@ -45,12 +45,12 @@ split:
     val:  [2021]
     test: [2022, 2024]      # holds Ian 2022 + Beryl 2024
 
-tags: [year-split, generalise]    # -> wandb, with model tags
+tags: [year-split, generalise, shuffle_samples]    # -> wandb, with model tags
 
 storm_panels:
   train:
     "2017242N16333"             #   IRMA 2017,
-  val:
+  val:md
     "2021182N09317"               # ELSA 2021
   test:                           # end-of-run sequences from TEST years
     - "2024181N09320"             # BERYL 2024
@@ -69,7 +69,7 @@ normalise:
   variables:
     slp:      {min: 87000.0, max: 108400.0}
     air_temp: {min: 193.0, max: 333.0}
-    u_wind:   {min: -115.0, max: 115.0}       # signed-symmetric: 0 -> 0 #note to self 0 to 115 and readd the negative for direction
+    u_wind:   {min: -115.0, max: 115.0}       # signed-symmetric: 0 -> 0
     v_wind:   {min: -115.0, max: 115.0}
     # inactive channels — activate in channels: WITH an entry here:
     # dewpoint:         {min: 193.0, max: 308.0}

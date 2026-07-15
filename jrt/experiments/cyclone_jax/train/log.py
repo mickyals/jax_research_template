@@ -15,7 +15,7 @@ the train stream's batches-per-epoch. A val confusion matrix at step
 cadence runs a full val pass — the scenarios here are small, that is
 deliberate.
 
-yaml surface (key sets validated in config.py):
+YAML surface (key sets validated in config.py):
 
     trainer:
       callbacks:

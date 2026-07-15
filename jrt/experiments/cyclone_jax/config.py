@@ -110,7 +110,7 @@ def _check_keys(block, allowed, where):
 
 
 def load_config(train_yaml, config_dir=None):
-    """Train yaml -> {'data': dict, 'model': dict | None, 'trainer': dict}
+    """Train YAML -> {'data': dict, 'model': dict | None, 'trainer': dict}
     with pointers resolved and key sets validated.
 
     config_dir overrides the pointer root (tests); default = configs/
@@ -174,7 +174,7 @@ def load_config(train_yaml, config_dir=None):
 
 
 def load_tune_config(tune_yaml):
-    """Tune yaml -> validated dict (train/tune.py resolves the base).
+    """Tune YAML -> validated dict (train/tune.py resolves the base).
 
     Surface: {base: <train cfg name>, study?, n_trials?, retrain_best?,
     n_startup_trials?, n_warmup_steps?, search: {dotted.path: spec}}.

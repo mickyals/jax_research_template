@@ -194,7 +194,7 @@ def accuracy_hexbin_figure(lon, lat, correct, domain=None, basemap=True,
     hb = ax.hexbin(np.asarray(lon, float), np.asarray(lat, float),
                    C=np.asarray(correct, float),
                    reduce_C_function=np.mean, gridsize=gridsize,
-                   extent=hex_extent, cmap='RdYlGn', vmin=0.0, vmax=1.0,
+                   extent=hex_extent, cmap='viridis', vmin=0.0, vmax=1.0,
                    mincnt=1, linewidths=0.2, zorder=2, **tkw)
     if use_map:
         # coastline/border linework ABOVE the bins (make_geoaxes drew the
