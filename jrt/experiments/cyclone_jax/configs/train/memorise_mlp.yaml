@@ -1,0 +1,40 @@
+# =============================================================================
+# cyclone_jax entry: MEMORISE-MLP — full-library memorisation, MLP baseline
+# =============================================================================
+# MLP (relu, encoding concat, dropout 0 — see models/mlp.yaml) on the
+# 2005-2024 memorise scenario. Watch train/loss go to ~0; regularisation
+# stays OFF (adam, no weight decay). train == val, so every val pass /
+# CM callback is a full extra sweep — cadence knobs are set sparse.
+# Capacity ladder = clone models/mlp.yaml at rising hidden_features and
+# swap the model: pointer.
+
+data: memorise
+model: mlp
+
+trainer:
+  seed: 78138
+  loss: cross_entropy
+  optimizer: adam                 # no weight decay — memorisation probe
+  scheduler: constant
+  scheduler_kwargs: {value: 1.0e-4}
+
+  num_epochs: 100
+  patience: 10                   # on train/loss — generous; loss should fall
+  patience_metric: train/loss
+  check_val_every_n_epoch: 1      # val == train: keep extra sweeps sparse
+
+  metrics: [cross_entropy, accuracy]
+
+  callbacks:
+    # exact CM + per-class accuracy scalars + figure; every N STEPS.
+    # Verified against the library 2026-07-06: 5739 train fixes / 32
+    # = 179 steps/epoch -> every 900 ~ one full extra sweep per 5 epochs.
+    - {name: confusion_matrix, split: val, every: 100}
+    - {name: storm_panel, split: train, every: 100}
+
+  logger: wandb                   # swap to null for an offline smoke run
+  logger_kwargs: {project: cyclone_jax}
+
+  # Site path — EDIT per box; FRESH dir per run (orbax overwrite +
+  # OneDrive locks on Windows: keep run dirs OFF OneDrive).
+  run_dir: "E:/cyclone_runs/memorise-mlp-s0"

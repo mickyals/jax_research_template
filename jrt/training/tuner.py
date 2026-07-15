@@ -165,12 +165,20 @@ class Tuner:
         Copied deeply inside each trial — never mutated.
     model_fn : callable(config) -> flax.linen.Module
         Builds the model from the trial's config dict.
-    metrics_fns : dict[str, Callable]
-        Metric functions passed to Trainer unchanged.
+    metrics_fns : dict[str, Callable] or callable(config) -> dict
+        Metric functions passed to Trainer.  A callable is invoked with
+        the TRIAL's sampled config each trial — use this when a tuned
+        hyperparameter changes the metric/loss construction (e.g. loss
+        term weights).
     train_loader_fn : callable() -> iterable
         Called fresh each trial.  Must return a re-iterable loader.
     val_loader_fn : callable() -> iterable
         Called fresh each trial.
+    logger_fn : callable(trial) -> logger, optional
+        Builds a fresh logger per trial (e.g. one wandb run per trial,
+        grouped by study).  The tuner passes it to Trainer(logger=...)
+        and FINALIZES it when the trial ends (pruned trials included) —
+        the caller only constructs.
     study_name : str
         Optuna study identifier.
     direction : str
@@ -197,6 +205,7 @@ class Tuner:
         storage:         Optional[str] = None,
         n_startup_trials: int  = 5,
         n_warmup_steps:   int  = 50,
+        logger_fn:       Optional[Callable] = None,
     ) -> None:
         self._suggest_fn        = suggest_fn
         self._base_config       = base_config
@@ -209,13 +218,15 @@ class Tuner:
         self._storage           = storage
         self._n_startup_trials  = n_startup_trials
         self._n_warmup_steps    = n_warmup_steps
+        self._logger_fn         = logger_fn
         self._study             = None
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
-    def run(self, n_trials: int = 25) -> "optuna.Study":
+    def run(self, n_trials: int = 25,
+            callbacks: Optional[list] = None) -> "optuna.Study":
         """Run the hyperparameter search for up to n_trials trials.
 
         If a persistent study already exists at ``storage`` it is resumed
@@ -226,6 +237,9 @@ class Tuner:
         n_trials : int
             Total number of trials to run (including any already completed
             when resuming).
+        callbacks : list of callable(study, trial), optional
+            Forwarded to study.optimize() — called after every trial
+            (e.g. an experiment-side trials.csv appender).
 
         Returns
         -------
@@ -256,8 +270,9 @@ class Tuner:
 
         self._study.optimize(
             self._make_objective(),
-            n_trials = remaining,
-            n_jobs   = 1,
+            n_trials  = remaining,
+            n_jobs    = 1,
+            callbacks = list(callbacks) if callbacks else None,
         )
         return self._study
 
@@ -316,6 +331,7 @@ class Tuner:
         metrics_fns     = self._metrics_fns
         train_loader_fn = self._train_loader_fn
         val_loader_fn   = self._val_loader_fn
+        logger_fn       = self._logger_fn
 
         def objective(trial):
             import optuna
@@ -343,8 +359,15 @@ class Tuner:
             trainer_cfg["use_tqdm"] = False
 
             model   = model_fn(config)
-            trainer = Trainer(model, metrics_fns, trainer_cfg)
+            metrics = (metrics_fns(config) if callable(metrics_fns)
+                       else metrics_fns)
+            logger  = logger_fn(trial) if logger_fn is not None else None
+            trainer = Trainer(model, metrics, trainer_cfg, logger=logger)
 
+            # A pruned trial is a NORMAL outcome — its logger still
+            # finalizes 'success' (a wandb run marked crashed would lie);
+            # real exceptions finalize 'failed'.
+            status = "failed"
             try:
                 trainer.fit(
                     train_loader_fn(),
@@ -352,10 +375,14 @@ class Tuner:
                     trial=trial,
                 )
                 result = trainer._best_metric_value
+                status = "success"
             except optuna.TrialPruned:
                 result = trainer._best_metric_value
+                status = "success"
                 raise
             finally:
+                if logger is not None:
+                    logger.finalize(status)
                 del trainer
                 gc.collect()
 

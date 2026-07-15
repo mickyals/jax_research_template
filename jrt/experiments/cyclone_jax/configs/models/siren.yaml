@@ -1,0 +1,16 @@
+# =============================================================================
+# cyclone_jax model: SIREN (Sitzmann et al. 2020)
+# =============================================================================
+# Same flat-input skeleton as the MLP; RAW coords, no positional encoding
+# (sine is the encoding). Paper inits: first layer in the shared station
+# perceptron, hidden scheme in the body. n_classes injected at build.
+
+name: siren
+tags: [siren, inr]
+
+n_classes: null
+station_features: 64
+hidden_features: 256
+n_layers: 3
+first_omega: 30.0
+hidden_omega: 30.0

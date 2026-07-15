@@ -43,6 +43,9 @@ Optional  (defaults shown)
     num_steps         int    inf    stop at whichever limit is hit first
     patience          int    10
     patience_metric   str    'val/<first metrics_fns key>'
+                             any 'val/<metric>' works, as does
+                             'train/<loss_key>' — early stopping on the
+                             training loss (memorisation/overfit gates)
     patience_direction str   'lower_is_better'  or  'higher_is_better'
     max_grad_norm     float  None   gradient clipping; None = disabled
     checkpoint_dir    str    'checkpoints'
@@ -172,6 +175,11 @@ class Trainer:
         (pred, target) -> scalar.  The key specified by config['loss_key']
         (default: first key) is differentiated during training.  All keys
         are evaluated during validation and test.
+        The loss entry may also be a training.losses.LossStack (or any
+        callable with ``needs_model=True``): it is then called with
+        ``params/apply_fn/batch`` keywords so model terms (weight-space
+        penalties, physics residuals) can participate; multi-term stacks
+        get their per-term values logged under ``<loss_key>/<term>``.
     config : dict
         The YAML  trainer:  block loaded into a plain dict.
     """
@@ -199,6 +207,11 @@ class Trainer:
         self._num_epochs      = config.get("num_epochs", 1_000)
         self._num_steps       = config.get("num_steps",  float("inf"))
         self._patience        = config.get("patience",   10)
+        # validate every N epochs (always on the final budgeted epoch);
+        # skipped-val epochs do not tick patience unless the patience
+        # metric is train-side (train metrics exist every epoch).
+        self._check_val_every = max(
+            1, int(config.get("check_val_every_n_epoch") or 1))
         self._patience_metric = config.get(
             "patience_metric", f"val/{self._loss_key}"
         )
@@ -276,6 +289,7 @@ class Trainer:
         self._global_step:      int   = 0
         self._last_state:       Optional[TrainState] = None
         self._best_metric_value: float = float("nan")
+        self._donate:           bool  = False   # resolved in _build_steps
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -311,10 +325,26 @@ class Trainer:
         has_batch_stats is resolved once so JAX specialises the correct branch.
         The training loss is metrics_fns[loss_key]; all metrics are evaluated
         in eval_step.
+
+        Loss functions that carry ``needs_model=True`` (e.g. a
+        training.losses.LossStack with model terms) are called with
+        ``params/apply_fn/batch`` keywords in both steps, so terms can
+        penalise parameters or re-differentiate through the model; plain
+        ``(pred, y)`` losses keep the unchanged path. A multi-term stack's
+        ``detailed`` method additionally surfaces per-term values in the
+        step metrics under ``<loss_key>/<term>`` (single-term stacks emit
+        no redundant extra curve). Both are resolved here, at build time,
+        as compile-time constants.
         """
         model       = self.model
         metrics_fns = self.metrics_fns
         loss_key    = self._loss_key
+
+        loss_fn     = metrics_fns[loss_key]
+        needs_model = bool(getattr(loss_fn, "needs_model", False))
+        detailed    = getattr(loss_fn, "detailed", None)
+        log_terms   = (detailed is not None
+                       and len(getattr(loss_fn, "term_names", ())) > 1)
 
         def train_step(state: TrainState, batch: dict):
             rng, dropout_rng = jax.random.split(state.rng)
@@ -334,10 +364,15 @@ class Trainer:
                         batch["X"], train=True, rngs=rngs,
                     )
                     new_batch_stats = None
-                loss = metrics_fns[loss_key](pred, batch["y"])
-                return loss, new_batch_stats
+                kw = ({"params": params, "apply_fn": model.apply,
+                       "batch": batch} if needs_model else {})
+                if log_terms:
+                    loss, term_vals = detailed(pred, batch["y"], **kw)
+                else:
+                    loss, term_vals = loss_fn(pred, batch["y"], **kw), {}
+                return loss, (new_batch_stats, term_vals)
 
-            (loss, new_batch_stats), grads = jax.value_and_grad(
+            (loss, (new_batch_stats, term_vals)), grads = jax.value_and_grad(
                 compute_loss, has_aux=True
             )(state.params)
 
@@ -346,17 +381,48 @@ class Trainer:
                 batch_stats = new_batch_stats,
                 rng         = rng,
             )
-            return new_state, {loss_key: loss}
+            step_metrics = {loss_key: loss}
+            step_metrics.update(
+                {f"{loss_key}/{k}": v for k, v in term_vals.items()})
+            return new_state, step_metrics
 
         def eval_step(state: TrainState, batch: dict):
             variables = {"params": state.params}
             if has_batch_stats:
                 variables["batch_stats"] = state.batch_stats
             pred = model.apply(variables, batch["X"], train=False)
-            return {k: fn(pred, batch["y"]) for k, fn in metrics_fns.items()}
+            out = {}
+            for k, fn in metrics_fns.items():
+                if k == loss_key and needs_model:
+                    out[k] = fn(pred, batch["y"], params=state.params,
+                                apply_fn=model.apply, batch=batch)
+                else:
+                    out[k] = fn(pred, batch["y"])
+            return out
 
-        self._train_step = jax.jit(train_step)
+        # Donate the incoming state's buffers to train_step on
+        # accelerators — the old state is dead after the loop's
+        # reassignment, and donation roughly halves param+opt peak memory
+        # (capacity-ladder headroom). CPU XLA cannot donate (it would only
+        # warn per compile). fit()'s best_state snapshots go through
+        # _snapshot_state, which COPIES when donation is live, so the
+        # returned state never aliases donated buffers.
+        self._donate = jax.default_backend() in ("gpu", "tpu")
+        self._train_step = jax.jit(
+            train_step, donate_argnums=(0,) if self._donate else ())
         self._eval_step  = jax.jit(eval_step)
+
+    def _snapshot_state(self, state: TrainState) -> TrainState:
+        """A state safe to hold across future train steps.
+
+        With donation live, the held state's buffers are invalidated the
+        moment it (or its successor sharing them) re-enters train_step —
+        so snapshots must copy. Without donation the reference is fine.
+        """
+        if not self._donate:
+            return state
+        return jax.tree_util.tree_map(
+            lambda x: x.copy() if isinstance(x, jax.Array) else x, state)
 
     # ------------------------------------------------------------------
     # Epoch helpers
@@ -434,6 +500,11 @@ class Trainer:
                     for k, v in self._eval_step(state, batch).items()
                 }
                 all_metrics[self._loss_key] = loss_val
+                # Per-term loss values (multi-term LossStack) ride along from
+                # the backward pass under '<loss_key>/<term>'.
+                for k, v in step_metrics.items():
+                    if k != self._loss_key:
+                        all_metrics[k] = float(v)
                 log_dict = {f"train/{k}": v for k, v in all_metrics.items()}
                 log_dict['train/lr'] = float(self._schedule(self._global_step))
                 self._logger.log_metrics(log_dict, step=self._global_step)
@@ -617,6 +688,13 @@ class Trainer:
         """The experiment logger (read-only)."""
         return self._logger
 
+    @property
+    def global_step(self) -> int:
+        """Optimiser steps completed so far (read-only) — post-training
+        hookups (end-of-run figures, test tables) log at this step so
+        everything shares one x-axis."""
+        return self._global_step
+
     def log_hyperparams(self, params: dict) -> None:
         """Log a hyperparameter dict to the experiment logger."""
         self._logger.log_hyperparams(params)
@@ -752,7 +830,7 @@ class Trainer:
         start_epoch    = 0
         best_metric    = float("inf") if self._lower_is_better else float("-inf")
         patience_count = 0
-        best_state     = state
+        best_state     = self._snapshot_state(state)
         self._global_step = 0
 
         if resume:
@@ -761,7 +839,7 @@ class Trainer:
             self._global_step = meta["global_step"]
             best_metric    = meta["best_metric"]
             patience_count = meta["patience_count"]
-            best_state     = state
+            best_state     = self._snapshot_state(state)
             print(
                 f"Resuming from epoch {start_epoch}, "
                 f"step {self._global_step}, "
@@ -792,7 +870,13 @@ class Trainer:
             state, train_metrics = self._train_epoch(
                 state, train_loader, epoch, step_callbacks=step_callbacks
             )
-            val_metrics = self._eval_model(state, val_loader, prefix="val")
+            # check_val_every_n_epoch: skip val on off-cadence epochs
+            # (train == val scenarios make every val pass a full extra
+            # sweep); the final budgeted epoch always validates.
+            run_val = ((epoch + 1) % self._check_val_every == 0
+                       or epoch == self._num_epochs - 1)
+            val_metrics = (self._eval_model(state, val_loader, prefix="val")
+                           if run_val else {})
 
             # Epoch-level log — use global_step so all metrics share one x-axis
             # with the step-level train/loss and attention entropy curves.
@@ -804,18 +888,26 @@ class Trainer:
                 for cb in epoch_callbacks:
                     cb(state, epoch, self._global_step)
 
-            if self._patience_metric not in val_metrics:
-                raise KeyError(
-                    f"patience_metric '{self._patience_metric}' not found in "
-                    f"val_metrics. Available: {list(val_metrics.keys())}. "
-                    "Check patience_metric in config."
-                )
-            current  = val_metrics[self._patience_metric]
-            improved = self.is_better(current, best_metric)
+            epoch_metrics = {**train_metrics, **val_metrics}
+            if self._patience_metric not in epoch_metrics:
+                if run_val:
+                    raise KeyError(
+                        f"patience_metric '{self._patience_metric}' not found "
+                        f"in epoch metrics. Available: "
+                        f"{list(epoch_metrics.keys())}. "
+                        "Check patience_metric in config."
+                    )
+                # val skipped and the patience metric is val-side: no
+                # patience tick, no best update — just save-latest + budget
+                # checks below.
+                current, improved = None, False
+            else:
+                current  = epoch_metrics[self._patience_metric]
+                improved = self.is_better(current, best_metric)
 
             # optuna pruning: report intermediate value and stop early if
             # the trial looks unpromising.  Lazy import keeps optuna optional.
-            if trial is not None:
+            if trial is not None and current is not None:
                 import optuna as _optuna
                 trial.report(float(current), epoch)
                 if trial.should_prune():
@@ -824,10 +916,10 @@ class Trainer:
 
             if improved:
                 best_metric    = current
-                best_state     = state
+                best_state     = self._snapshot_state(state)
                 patience_count = 0
                 self.save_checkpoint(state)
-            else:
+            elif current is not None:
                 patience_count += 1
 
             # Save latest state + metadata every epoch (enables resume)
@@ -835,10 +927,11 @@ class Trainer:
                               best_metric, patience_count)
 
             train_key = f"train/{self._loss_key}"
+            current_str = "skipped" if current is None else f"{current:.5f}"
             summary = (
                 f"epoch {epoch:4d} | "
                 f"{train_key} {train_metrics[train_key]:.5f} | "
-                f"{self._patience_metric} {current:.5f} | "
+                f"{self._patience_metric} {current_str} | "
                 f"patience {patience_count}/{self._patience}"
                 + (" [best]" if improved else "")
             )
@@ -846,7 +939,8 @@ class Trainer:
             if use_tqdm and epoch_bar is not None:
                 epoch_bar.set_postfix({
                     f"tr/{self._loss_key}": f"{train_metrics[train_key]:.4f}",
-                    "val":       f"{current:.4f}",
+                    "val": ("skipped" if current is None
+                            else f"{current:.4f}"),
                     "patience":  f"{patience_count}/{self._patience}",
                 })
             else:

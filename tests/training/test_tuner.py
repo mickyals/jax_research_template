@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 from flax import linen as nn
 
+from training.logger import NullLogger
 from training.losses import mse
 from training.trainer import Trainer, TrainState
 from training.tuner import Tuner, apply_search_space
@@ -390,3 +391,98 @@ class TestTuner:
                     if t.state == optuna.trial.TrialState.COMPLETE]
         # At least some trials should complete or be pruned — no crashes
         assert len(pruned) + len(complete) == 4
+
+
+# ---------------------------------------------------------------------------
+# TestTunerExtensions — callbacks= / logger_fn= / callable metrics_fns
+# ---------------------------------------------------------------------------
+
+class _RecordingLogger(NullLogger):
+    """NullLogger that records its finalize status."""
+
+    def __init__(self, tmp_path):
+        super().__init__(log_dir=tmp_path, verbose=False)
+        self.finalized = None
+
+    def finalize(self, status="success"):
+        self.finalized = status
+        super().finalize(status)
+
+
+class TestTunerExtensions:
+
+    def _make_tuner(self, tmp_path, metrics_fns=None, logger_fn=None):
+        cfg = _base_config(tmp_path, num_epochs=2, patience=10)
+        return Tuner(
+            suggest_fn       = _suggest_fn,
+            base_config      = cfg,
+            model_fn         = _model_fn,
+            metrics_fns      = metrics_fns or {"mse": mse},
+            train_loader_fn  = lambda: _make_loader(TRAIN_ARRS),
+            val_loader_fn    = lambda: _make_loader(VAL_ARRS, shuffle=False),
+            study_name       = "ext_test",
+            storage          = None,
+            n_startup_trials = 1,
+            n_warmup_steps   = 0,
+            logger_fn        = logger_fn,
+        )
+
+    def test_optuna_callbacks_forwarded(self, tmp_path):
+        seen = []
+        tuner = self._make_tuner(tmp_path)
+        tuner.run(n_trials=2,
+                  callbacks=[lambda study, trial: seen.append(trial.number)])
+        assert seen == [0, 1]
+
+    def test_logger_fn_called_per_trial_and_finalized(self, tmp_path):
+        made = []
+
+        def logger_fn(trial):
+            logger = _RecordingLogger(tmp_path / f"log_{trial.number}")
+            made.append(logger)
+            return logger
+
+        tuner = self._make_tuner(tmp_path, logger_fn=logger_fn)
+        tuner.run(n_trials=2)
+        assert len(made) == 2
+        assert all(lg.finalized == "success" for lg in made)
+
+    def test_logger_fn_finalized_on_pruned_trial(self, tmp_path):
+        made = []
+
+        def logger_fn(trial):
+            logger = _RecordingLogger(tmp_path / f"log_{trial.number}")
+            made.append(logger)
+            return logger
+
+        cfg = _base_config(tmp_path, num_epochs=10, patience=10)
+        tuner = Tuner(
+            suggest_fn       = _suggest_fn,
+            base_config      = cfg,
+            model_fn         = _model_fn,
+            metrics_fns      = {"mse": mse},
+            train_loader_fn  = lambda: _make_loader(TRAIN_ARRS),
+            val_loader_fn    = lambda: _make_loader(VAL_ARRS, shuffle=False),
+            study_name       = "prune_finalize_test",
+            storage          = None,
+            n_startup_trials = 1,
+            n_warmup_steps   = 1,   # prune aggressively
+            logger_fn        = logger_fn,
+        )
+        tuner.run(n_trials=4)
+        assert len(made) == 4
+        # every trial's logger got finalized, pruned ones included
+        assert all(lg.finalized == "success" for lg in made)
+
+    def test_metrics_fns_callable_rebuilt_per_trial(self, tmp_path):
+        calls = []
+
+        def metrics_factory(config):
+            calls.append(config)
+            return {"mse": mse}
+
+        tuner = self._make_tuner(tmp_path, metrics_fns=metrics_factory)
+        tuner.run(n_trials=2)
+        assert len(calls) == 2
+        # the factory sees the TRIAL's sampled config, not the base
+        assert all("scheduler_kwargs" in c for c in calls)

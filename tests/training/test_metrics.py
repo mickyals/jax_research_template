@@ -13,6 +13,13 @@ TestMaeClass          exact match = 0.0; off-by-one = 1.0; larger offset;
                       non-negative; scalar shape
 TestMetricsRegistry   registered names; get returns callable; case-insensitive;
                       threshold forwarded; unknown raises
+TestConfusionCounts   known matrix; exact summation across batches
+TestUpdateCm          accumulates confusion_counts into the state array;
+                      dtype preserved; matches whole-split matrix
+TestComputeFinalMetrics
+                      tp/tn/fp/fn from a known cm; exact macro P/R; overall +
+                      per-class (recall) accuracy; OVA accuracy; pairwise
+                      accuracy matrix; zero-support classes excluded
 """
 
 import jax.numpy as jnp
@@ -21,20 +28,15 @@ import pytest
 
 from training.metrics import (
     METRICS,
-    FULL_SET_METRICS,
     accuracy,
-    average_precision,
     binary_accuracy,
-    binary_pr_auc,
-    binary_pr_curve,
-    compute_full_set_metrics,
+    compute_final_metrics,
+    confusion_counts,
     cross_entropy,
     get_metric,
-    list_full_set_metrics,
     list_metrics,
     mae_class,
-    per_class_pr_curves,
-    precision_recall_curve,
+    update_cm,
 )
 
 B     = 8
@@ -190,9 +192,17 @@ class TestMaeClass:
 class TestMetricsRegistry:
 
     def test_registered_names(self):
+        # macro precision/recall deliberately absent: ratios don't average
+        # across batches — exact values come from update_cm +
+        # compute_final_metrics instead (PR #5 ruling).
         assert set(list_metrics()) == {
             'CROSS_ENTROPY', 'ACCURACY', 'BINARY_ACCURACY', 'MAE_CLASS',
         }
+
+    def test_macro_metrics_no_longer_registered(self):
+        for name in ('macro_precision', 'macro_recall'):
+            with pytest.raises(ValueError):
+                get_metric(name)
 
     def test_get_returns_callable_metric(self):
         logits = _rand_logits()
@@ -220,89 +230,123 @@ class TestMetricsRegistry:
 
 
 # ---------------------------------------------------------------------------
-# TestFullSetMetrics — mAP / pr_auc (full-set, NumPy)
+# Confusion-matrix accumulator (jrt-v2, reshaped per PR #5 review)
 # ---------------------------------------------------------------------------
 
-class TestFullSetMetrics:
-
-    def _separable(self):
-        # 2-class, perfectly score-separable (class 0 vs class 1).
-        logits = np.array([[6., -6.], [-6., 6.], [6., -6.], [-6., 6.]], np.float32)
-        labels = np.array([0, 1, 0, 1], np.int32)
-        return logits, labels
-
-    def test_perfect_separation_gives_one(self):
-        logits, labels = self._separable()
-        assert average_precision(logits, labels) == pytest.approx(1.0, abs=1e-6)
-        assert binary_pr_auc(logits, labels)     == pytest.approx(1.0, abs=1e-6)
-
-    def test_metrics_in_unit_interval(self):
-        rng    = np.random.default_rng(0)
-        logits = rng.standard_normal((50, N_CLS)).astype(np.float32)
-        labels = rng.integers(0, N_CLS, size=50).astype(np.int32)
-        assert 0.0 <= average_precision(logits, labels) <= 1.0
-        assert 0.0 <= binary_pr_auc(logits, labels)     <= 1.0
-
-    def test_average_precision_skips_absent_classes(self):
-        # Only classes 0 and 1 occur; the metric must still be well-defined.
-        logits, labels = self._separable()
-        assert 0.0 <= average_precision(logits, labels) <= 1.0
-
-    def test_no_positives_pr_auc_is_zero(self):
-        # All background (class 0) → no positives for the thr=1 detection AP.
-        logits = np.zeros((5, N_CLS), np.float32)
-        labels = np.zeros(5, np.int32)
-        assert binary_pr_auc(logits, labels) == 0.0
-
-    def test_compute_full_set_metrics_dict(self):
-        logits, labels = self._separable()
-        m = compute_full_set_metrics(logits, labels)
-        assert set(m) == {'mAP', 'pr_auc'}
-        assert all(0.0 <= v <= 1.0 for v in m.values())
-
-    def test_registry_lists_names(self):
-        assert set(list_full_set_metrics()) == {'MAP', 'PR_AUC'}
-
-    def test_registry_get_is_case_insensitive(self):
-        assert FULL_SET_METRICS.get('mAP') is average_precision
+def _logits_for_preds(preds, n_cls=N_CLS):
+    """Logits whose argmax is exactly `preds`."""
+    out = np.full((len(preds), n_cls), -100.0, np.float32)
+    out[np.arange(len(preds)), preds] = 100.0
+    return jnp.array(out)
 
 
-class TestPRCurves:
+class TestConfusionCounts:
 
-    def _rand(self, seed=1, n=60):
-        rng    = np.random.default_rng(seed)
-        logits = rng.standard_normal((n, N_CLS)).astype(np.float32)
-        labels = rng.integers(0, N_CLS, n).astype(np.int32)
-        return logits, labels
+    def test_known_matrix(self):
+        # truth [0,0,1], preds [0,1,1]
+        cm = confusion_counts(_logits_for_preds([0, 1, 1]),
+                              jnp.array([0, 0, 1]))
+        assert cm.shape == (N_CLS, N_CLS)
+        assert float(cm[0, 0]) == 1. and float(cm[0, 1]) == 1.
+        assert float(cm[1, 1]) == 1. and float(cm.sum()) == 3.
 
-    def test_curve_ap_equals_scalar(self):
-        # The figure's AP must match the pr_auc scalar (shared code path).
-        logits, labels = self._rand()
-        cv = binary_pr_curve(logits, labels)
-        assert cv['ap'] == pytest.approx(binary_pr_auc(logits, labels), abs=1e-9)
+    def test_sums_exactly_across_batches(self):
+        rng = np.random.default_rng(3)
+        preds  = rng.integers(0, N_CLS, 32)
+        labels = jnp.array(rng.integers(0, N_CLS, 32), dtype=jnp.int32)
+        logits = _logits_for_preds(preds)
+        whole = confusion_counts(logits, labels)
+        assert jnp.allclose(whole,
+                            confusion_counts(logits[:16], labels[:16])
+                            + confusion_counts(logits[16:], labels[16:]))
 
-    def test_curve_shape_and_bounds(self):
-        logits, labels = self._rand()
-        cv = binary_pr_curve(logits, labels)
-        assert len(cv['precision']) == len(cv['recall'])
-        assert cv['recall'][0] == 0.0
-        assert cv['recall'][-1] == pytest.approx(1.0)
-        assert np.all((cv['precision'] >= 0) & (cv['precision'] <= 1.0 + 1e-9))
-        assert 0.0 <= cv['base_rate'] <= 1.0
 
-    def test_recall_is_monotonic(self):
-        logits, labels = self._rand(seed=2)
-        cv = binary_pr_curve(logits, labels)
-        assert np.all(np.diff(cv['recall']) >= -1e-9)
+class TestUpdateCm:
 
-    def test_per_class_curves_match_map(self):
-        # Mean of present-class APs equals mAP exactly.
-        logits, labels = self._rand(seed=3)
-        curves = per_class_pr_curves(logits, labels)
-        assert set(curves) == set(np.unique(labels).tolist())
-        mean_ap = float(np.mean([cv['ap'] for cv in curves.values()]))
-        assert mean_ap == pytest.approx(average_precision(logits, labels), abs=1e-9)
+    def test_single_update_equals_confusion_counts(self):
+        logits, labels = _logits_for_preds([0, 1, 1]), jnp.array([0, 0, 1])
+        cm = update_cm(jnp.zeros((N_CLS, N_CLS), jnp.float32), logits, labels)
+        assert jnp.allclose(cm, confusion_counts(logits, labels))
 
-    def test_no_positives_curve_is_degenerate(self):
-        cv = precision_recall_curve(np.zeros(5), np.zeros(5, dtype=bool))
-        assert cv['ap'] == 0.0 and cv['base_rate'] == 0.0
+    def test_accumulates_to_whole_split_matrix(self):
+        rng = np.random.default_rng(7)
+        preds  = rng.integers(0, N_CLS, 48)
+        labels = jnp.array(rng.integers(0, N_CLS, 48), dtype=jnp.int32)
+        logits = _logits_for_preds(preds)
+        cm = jnp.zeros((N_CLS, N_CLS), jnp.float32)
+        for lo in range(0, 48, 16):                       # 3 "batches"
+            cm = update_cm(cm, logits[lo:lo + 16], labels[lo:lo + 16])
+        assert jnp.allclose(cm, confusion_counts(logits, labels))
+        assert float(cm.sum()) == 48.0
+
+    def test_state_dtype_preserved(self):
+        cm = update_cm(jnp.zeros((N_CLS, N_CLS), jnp.int32),
+                       _logits_for_preds([2]), jnp.array([2]))
+        assert cm.dtype == jnp.int32 and int(cm[2, 2]) == 1
+
+
+class TestComputeFinalMetrics:
+
+    # truth [0,0,1], preds [0,1,1] over 3 classes:
+    #   cm = [[1,1,0],[0,1,0],[0,0,0]]
+    @staticmethod
+    def _known_cm():
+        return jnp.array([[1., 1., 0.], [0., 1., 0.], [0., 0., 0.]])
+
+    def test_count_primitives(self):
+        m = compute_final_metrics(self._known_cm())
+        assert jnp.allclose(m['tp'], jnp.array([1., 1., 0.]))
+        assert jnp.allclose(m['fp'], jnp.array([0., 1., 0.]))
+        assert jnp.allclose(m['fn'], jnp.array([1., 0., 0.]))
+        assert jnp.allclose(m['tn'], jnp.array([1., 1., 3.]))
+        assert jnp.allclose(m['support'], jnp.array([2., 1., 0.]))
+
+    def test_exact_macro_precision_recall(self):
+        m = compute_final_metrics(self._known_cm())
+        # precision: c0 1/1, c1 1/2 (c2 never predicted -> excluded) -> 0.75
+        # recall:    c0 1/2, c1 1/1 (c2 no support -> excluded)     -> 0.75
+        assert float(m['macro_precision']) == pytest.approx(0.75)
+        assert float(m['macro_recall'])    == pytest.approx(0.75)
+        assert jnp.allclose(m['precision'], jnp.array([1.0, 0.5, 0.0]))
+        assert jnp.allclose(m['recall'],    jnp.array([0.5, 1.0, 0.0]))
+
+    def test_overall_and_ova_accuracy(self):
+        m = compute_final_metrics(self._known_cm())
+        assert float(m['accuracy']) == pytest.approx(2.0 / 3.0)
+        # OVA k vs rest: (tp_k + tn_k) / n
+        assert jnp.allclose(m['ova_accuracy'],
+                            jnp.array([2 / 3, 2 / 3, 1.0]))
+
+    def test_pairwise_accuracy_matrix(self):
+        m = compute_final_metrics(self._known_cm())
+        pw = m['pairwise_accuracy']
+        assert pw.shape == (3, 3)
+        # (0,1): (1+1)/(1+1+1+0) = 2/3 ; symmetric
+        assert float(pw[0, 1]) == pytest.approx(2 / 3)
+        assert float(pw[1, 0]) == pytest.approx(2 / 3)
+        # (0,2) and (1,2): no cross-confusion -> 1.0
+        assert float(pw[0, 2]) == pytest.approx(1.0)
+        assert float(pw[1, 2]) == pytest.approx(1.0)
+        # diagonal: trivial self-pair -> 1.0 where the class has correct hits
+        assert float(pw[0, 0]) == pytest.approx(1.0)
+
+    def test_perfect_cm_gives_ones(self):
+        cm = jnp.diag(jnp.array([5., 3., 2.]))
+        m = compute_final_metrics(cm)
+        assert float(m['accuracy'])        == pytest.approx(1.0)
+        assert float(m['macro_precision']) == pytest.approx(1.0)
+        assert float(m['macro_recall'])    == pytest.approx(1.0)
+        assert jnp.allclose(m['ova_accuracy'], jnp.ones(3))
+
+    def test_matches_accumulated_stream(self):
+        rng = np.random.default_rng(11)
+        preds  = rng.integers(0, N_CLS, 64)
+        labels_np = rng.integers(0, N_CLS, 64)
+        labels = jnp.array(labels_np, dtype=jnp.int32)
+        logits = _logits_for_preds(preds)
+        cm = jnp.zeros((N_CLS, N_CLS), jnp.float32)
+        for lo in range(0, 64, 16):
+            cm = update_cm(cm, logits[lo:lo + 16], labels[lo:lo + 16])
+        m = compute_final_metrics(cm)
+        assert float(m['accuracy']) == pytest.approx(
+            float(np.mean(preds == labels_np)))

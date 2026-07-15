@@ -336,3 +336,44 @@ class TestStandardise:
         x = jnp.ones((4, 8, 3))
         out = standardise(x, axis=1)
         assert out.shape == (4, 8, 3)
+
+class TestEvalForward:
+    """Jitted eval-mode forward (apply_fn static): the shared helper the
+    experiment callback/evaluate forwards build on. The Trainer keeps its
+    own fused inline copy — cross-referenced in both docstrings."""
+
+    @staticmethod
+    def _apply(variables, X, train):
+        assert train is False
+        return X['a'] @ variables['params']['w']
+
+    def test_matches_direct_apply(self):
+        from utils.jax_core.helpers import eval_forward
+        params = {'w': jnp.arange(6, dtype=jnp.float32).reshape(3, 2)}
+        X = {'a': jnp.ones((4, 3), jnp.float32)}
+        out = eval_forward(self._apply, params, X)
+        expected = X['a'] @ params['w']
+        assert jnp.allclose(out, expected)
+
+    def test_batch_stats_joins_variables(self):
+        from utils.jax_core.helpers import eval_forward
+
+        def apply(variables, X, train):
+            return X['a'] + variables['batch_stats']['mu']
+
+        out = eval_forward(apply, {}, {'a': jnp.zeros((2,))},
+                           batch_stats={'mu': jnp.ones(())})
+        assert jnp.allclose(out, jnp.ones((2,)))
+
+    def test_jit_reuses_one_trace_per_shape(self):
+        from utils.jax_core.helpers import eval_forward
+        calls = []
+
+        def apply(variables, X, train):
+            calls.append(1)          # trace-time only
+            return X['a'] * 2.0
+
+        X = {'a': jnp.ones((2, 2))}
+        eval_forward(apply, {}, X)
+        eval_forward(apply, {}, X)
+        assert len(calls) == 1       # second call hit the jit cache

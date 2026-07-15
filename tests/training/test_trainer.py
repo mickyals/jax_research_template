@@ -27,6 +27,10 @@ TestFit                 loss decreases; early stopping; step budget (sub-epoch);
                         tqdm flag accepted; any-iterable loader accepted
 TestResume              resume=True loads latest state + metadata and continues
 TestTest                raises before fit; all metric keys present; any loader
+TestLossStackTrainer    needs_model losses: model terms get params/apply_fn/
+                        batch in train/eval steps; per-term step metrics for
+                        multi-term stacks; BatchNorm composes; plain losses
+                        emit unchanged keys; full fit
 """
 
 import json
@@ -39,7 +43,7 @@ import pytest
 from flax import linen as nn
 
 from datasets.datamodule import ArrayLoader
-from training.losses import mse
+from training.losses import build_loss_stack, mse
 from training.trainer import Trainer, TrainState, _TQDM_AVAILABLE
 from utils.jax_core.helpers import create_rng
 
@@ -247,6 +251,11 @@ class TestTrainerInit:
         t = Trainer(_TinyMLP(), _METRICS, _base_config(tmp_path))
         assert t._train_step is None
         assert t._eval_step  is None
+
+    def test_global_step_property_tracks_counter(self, trainer):
+        assert trainer.global_step == 0
+        trainer._global_step = 7
+        assert trainer.global_step == 7
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +681,15 @@ class TestFit:
         with pytest.raises(KeyError, match="nonexistent"):
             Trainer(_TinyMLP(), _METRICS, cfg).fit(train_loader, val_loader)
 
+    def test_patience_metric_may_watch_train_loss(self, tmp_path, train_loader,
+                                                  val_loader):
+        """Early stopping on 'train/<loss_key>' — memorisation/overfit gates."""
+        cfg = _base_config(tmp_path, patience_metric="train/mse", num_epochs=2)
+        trainer = Trainer(_TinyMLP(), _METRICS, cfg)
+        trainer.fit(train_loader, val_loader)
+        assert np.isfinite(trainer._best_metric_value)
+        assert (trainer._checkpoint_dir / "best").exists()
+
     def test_latest_checkpoint_saved_each_epoch(self, tmp_path, train_loader, val_loader):
         cfg     = _base_config(tmp_path, num_epochs=3, patience=10)
         trainer = Trainer(_TinyMLP(), _METRICS, cfg)
@@ -704,6 +722,64 @@ class TestFit:
 
         vals = [v for v in (_ex(l) for l in lines) if v is not None]
         assert vals[-1] < vals[0]
+
+
+# ---------------------------------------------------------------------------
+# TestCheckValEvery — check_val_every_n_epoch cadence + patience semantics
+# ---------------------------------------------------------------------------
+
+class _CountingValLoader:
+    """Re-iterable wrapper counting how many val passes fit() runs."""
+
+    def __init__(self, loader):
+        self._loader = loader
+        self.n_iters = 0
+
+    def __len__(self):
+        return len(self._loader)
+
+    def __iter__(self):
+        self.n_iters += 1
+        return iter(self._loader)
+
+
+class TestCheckValEvery:
+
+    def test_val_runs_on_cadence_only(self, tmp_path, train_loader, val_arrs):
+        vl = _CountingValLoader(_make_loader(val_arrs, shuffle=False))
+        cfg = _base_config(tmp_path, num_epochs=4, patience=100,
+                           check_val_every_n_epoch=2,
+                           patience_metric="train/mse")
+        Trainer(_TinyMLP(), _METRICS, cfg).fit(train_loader, vl)
+        assert vl.n_iters == 2                      # epochs 1 and 3
+
+    def test_final_epoch_always_validates(self, tmp_path, train_loader,
+                                          val_arrs):
+        vl = _CountingValLoader(_make_loader(val_arrs, shuffle=False))
+        cfg = _base_config(tmp_path, num_epochs=3, patience=100,
+                           check_val_every_n_epoch=5,
+                           patience_metric="train/mse")
+        Trainer(_TinyMLP(), _METRICS, cfg).fit(train_loader, vl)
+        assert vl.n_iters == 1                      # final epoch only
+
+    def test_skipped_val_with_val_patience_metric_no_error(
+            self, tmp_path, train_loader, val_loader, capsys):
+        """Skipped-val epochs must not raise for a val-side patience metric
+        and must not tick patience — they print 'skipped' instead."""
+        cfg = _base_config(tmp_path, num_epochs=2, patience=100,
+                           check_val_every_n_epoch=2)     # val/mse patience
+        result = Trainer(_TinyMLP(), _METRICS, cfg).fit(train_loader,
+                                                        val_loader)
+        assert isinstance(result, TrainState)
+        out = capsys.readouterr().out
+        assert "skipped" in out and "patience 0/" in out
+
+    def test_default_cadence_validates_every_epoch(self, tmp_path,
+                                                   train_loader, val_arrs):
+        vl = _CountingValLoader(_make_loader(val_arrs, shuffle=False))
+        cfg = _base_config(tmp_path, num_epochs=3, patience=100)
+        Trainer(_TinyMLP(), _METRICS, cfg).fit(train_loader, vl)
+        assert vl.n_iters == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1103,3 +1179,143 @@ class TestProfiling:
         trainer = Trainer(model, _METRICS, cfg)
         trainer.fit(_make_loader(train_arrs), _make_loader(val_arrs, shuffle=False))
         assert not Path(trainer._profile_dir).exists()
+
+
+# ---------------------------------------------------------------------------
+# TestLossStackTrainer — needs_model losses + per-term step metrics
+# ---------------------------------------------------------------------------
+
+class TestLossStackTrainer:
+    """LossStack integration: model terms receive params/apply_fn/batch,
+    per-term values surface in step metrics (multi-term stacks only), and
+    plain-loss trainers emit exactly the keys they always did."""
+
+    L1_W = 0.1
+
+    def _mixed_metrics(self):
+        stack = build_loss_stack([
+            {"name": "mse"},
+            {"name": "l1_params", "weight": self.L1_W},
+        ])
+        return {"loss": stack, "mse": mse}
+
+    def _trainer(self, tmp_path, model, metrics):
+        cfg = _base_config(tmp_path, patience_metric="val/loss")
+        return Trainer(model, metrics, cfg)
+
+    @staticmethod
+    def _l1(params) -> float:
+        leaves = jax.tree_util.tree_leaves(params)
+        return float(sum(jnp.sum(jnp.abs(l)) for l in leaves)
+                     / sum(l.size for l in leaves))
+
+    # --- train_step ---
+    def test_train_step_runs_and_updates_params(self, tmp_path, model, train_arrs):
+        t = self._trainer(tmp_path, model, self._mixed_metrics())
+        state = t._init_state({k: v[:4] for k, v in train_arrs.items()})
+        batch = {k: jnp.asarray(v) for k, v in train_arrs.items()}
+        new_state, metrics = t._train_step(state, batch)
+        assert bool(jnp.isfinite(metrics["loss"]))
+        p0 = jax.tree_util.tree_leaves(state.params)
+        p1 = jax.tree_util.tree_leaves(new_state.params)
+        assert any(not jnp.allclose(a, b) for a, b in zip(p0, p1))
+
+    def test_step_metrics_contain_per_term_keys(self, tmp_path, model, train_arrs):
+        t = self._trainer(tmp_path, model, self._mixed_metrics())
+        state = t._init_state({k: v[:4] for k, v in train_arrs.items()})
+        batch = {k: jnp.asarray(v) for k, v in train_arrs.items()}
+        _, metrics = t._train_step(state, batch)
+        assert set(metrics) == {"loss", "loss/mse", "loss/l1_params"}
+        # total = weighted sum of the (unweighted) per-term values
+        assert float(metrics["loss"]) == pytest.approx(
+            float(metrics["loss/mse"])
+            + self.L1_W * float(metrics["loss/l1_params"]), rel=1e-5)
+
+    def test_single_term_stack_emits_no_per_term_keys(
+        self, tmp_path, model, train_arrs,
+    ):
+        metrics = {"loss": build_loss_stack([{"name": "mse"}]), "mse": mse}
+        t = self._trainer(tmp_path, model, metrics)
+        state = t._init_state({k: v[:4] for k, v in train_arrs.items()})
+        batch = {k: jnp.asarray(v) for k, v in train_arrs.items()}
+        _, step_metrics = t._train_step(state, batch)
+        assert set(step_metrics) == {"loss"}
+
+    def test_plain_loss_step_metrics_unchanged(self, trainer, state, train_arrs):
+        batch = {k: jnp.asarray(v) for k, v in train_arrs.items()}
+        _, metrics = trainer._train_step(state, batch)
+        assert set(metrics) == {"mse"}
+
+    # --- eval_step ---
+    def test_eval_loss_matches_manual_composition(self, tmp_path, model, train_arrs):
+        t = self._trainer(tmp_path, model, self._mixed_metrics())
+        state = t._init_state({k: v[:4] for k, v in train_arrs.items()})
+        batch = {k: jnp.asarray(v) for k, v in train_arrs.items()}
+        out = t._eval_step(state, batch)
+        pred = model.apply({"params": state.params}, batch["X"], train=False)
+        manual = float(mse(pred, batch["y"])) + self.L1_W * self._l1(state.params)
+        assert float(out["loss"]) == pytest.approx(manual, rel=1e-5)
+        assert set(out) == {"loss", "mse"}
+
+    # --- batch_stats interaction ---
+    def test_model_term_composes_with_batchnorm(self, tmp_path, train_arrs):
+        t = self._trainer(tmp_path, _TinyMLPBatchNorm(), self._mixed_metrics())
+        state = t._init_state({k: v[:4] for k, v in train_arrs.items()})
+        batch = {k: jnp.asarray(v) for k, v in train_arrs.items()}
+        new_state, metrics = t._train_step(state, batch)
+        assert bool(jnp.isfinite(metrics["loss"]))
+        bs0 = jax.tree_util.tree_leaves(state.batch_stats)
+        bs1 = jax.tree_util.tree_leaves(new_state.batch_stats)
+        assert any(not jnp.allclose(a, b) for a, b in zip(bs0, bs1))
+
+    # --- full fit ---
+    def test_fit_with_model_term(self, tmp_path, model, train_arrs, val_arrs):
+        t = self._trainer(tmp_path, model, self._mixed_metrics())
+        best = t.fit(_make_loader(train_arrs),
+                     _make_loader(val_arrs, shuffle=False))
+        assert best is not None
+        val = t._eval_model(best, _make_loader(val_arrs, shuffle=False))
+        assert bool(np.isfinite(val["val/loss"]))
+        # l1 term really participates: its value is positive on a fitted net
+        assert self._l1(best.params) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestDonation — donate_argnums on train_step (gpu/tpu) + snapshot copies
+# ---------------------------------------------------------------------------
+
+class TestDonation:
+    """Donation halves param/opt peak memory on accelerators; fit()'s
+    best_state snapshots must COPY when it is live (the snapshotted
+    buffers re-enter the donating step next batch). CPU XLA cannot
+    donate, so the flag must be off here (this suite runs on CPU)."""
+
+    def test_cpu_backend_disables_donation(self, trainer, state):
+        # _build_steps ran inside _init_state (state fixture)
+        assert trainer._donate is False
+
+    def test_snapshot_is_identity_when_not_donating(self, trainer, state):
+        assert trainer._snapshot_state(state) is state
+
+    def test_snapshot_copies_arrays_when_donating(self, trainer, state):
+        trainer._donate = True
+        snap = trainer._snapshot_state(state)
+        for a, b in zip(jax.tree_util.tree_leaves(state.params),
+                        jax.tree_util.tree_leaves(snap.params)):
+            assert a is not b
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def test_forced_donation_fit_still_returns_valid_best(
+            self, tmp_path, model, train_arrs, val_arrs, monkeypatch):
+        """Force the donate flag through _build_steps on CPU (XLA ignores
+        the donation with a warning) — the snapshot/copy path is exercised
+        end-to-end and the returned best state must remain usable."""
+        import training.trainer as tr
+        monkeypatch.setattr(
+            tr.jax, 'default_backend', lambda: 'gpu', raising=True)
+        t = Trainer(model, _METRICS, _base_config(tmp_path))
+        best = t.fit(_make_loader(train_arrs),
+                     _make_loader(val_arrs, shuffle=False))
+        assert t._donate is True
+        val = t._eval_model(best, _make_loader(val_arrs, shuffle=False))
+        assert bool(np.isfinite(val["val/mse"]))

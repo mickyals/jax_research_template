@@ -12,9 +12,13 @@ A research template for building JAX/Flax deep learning experiments in geoscienc
 |-------|-------------------|
 | `jrt/core/` | Registry-based attention, embeddings, norms, activations, initializers, pooling, and assembled nets (MLP, CNN, Transformer, ViT, Swin) |
 | `jrt/datasets/` | Generic `.npz` dataset loader, batching utilities, and a `DataModule` ABC that any experiment can subclass |
-| `jrt/training/` | Single-device `Trainer` with early stopping, checkpointing, and logging; loss library; optimizer/scheduler registry; Optuna `Tuner` |
-| `jrt/utils/` | Geoscience helpers (Haversine, Vincenty, met conversions), JAX utilities, coordinate sampling, and plotting |
+| `jrt/training/` | Single-device `Trainer` (early stopping, checkpointing, val cadence, step callbacks); loss stack with prediction + model terms; metrics atoms (exact confusion-matrix accumulation); optimizer/scheduler registry; wandb/TensorBoard/null logger; multiprocess `ProcessPrefetcher`; Optuna `Tuner` |
+| `jrt/utils/` | Geoscience helpers (haversine, met/unit conversions, geodesic areas), JAX utilities, numpy normalisers, coordinate sampling, and plotting mechanics (geo axes, heatmaps, curves) |
 | `jrt/experiments/` | Self-contained experiment directories that wire together the above components |
+
+The layering rule: experiments import `jrt/*` freely; `jrt` never imports
+experiments. Reusable mechanics get promoted UP into `jrt`; policy (which
+variables, which losses, which figures) stays in the experiment.
 
 ---
 
@@ -25,14 +29,23 @@ jax_research_template/
 ├── jrt/
 │   ├── core/               Model building blocks and registered nets
 │   ├── datasets/           Generic data loading and batching
-│   ├── training/           Trainer, losses, optimizers, logger, tuner
-│   ├── utils/              Geoscience, JAX helpers, plotting, sampling
+│   ├── training/           Trainer, losses, metrics, optimizers, prefetch,
+│   │                       logger, tuner
+│   ├── utils/              Geoscience, JAX helpers, plotting, normalisers,
+│   │                       coordinate sampling
 │   └── experiments/        One directory per experiment
-│       └── tc_perceiver_io/   Tropical cyclone classifier (reference impl)
+│       ├── cyclone_jax/       CURRENT: TC intensity from sparse in-situ obs
+│       │                      (the canonical example — start here)
+│       └── tc_perceiver_io/   frozen v1 line (kept for reference)
 ├── tests/                  Pytest suite mirroring jrt/ structure
 ├── environment.yaml        Conda environment (name: jrt)
 └── pytest.ini
 ```
+
+Documentation trail: this README → an experiment's `README.md` (layout +
+CLI) → per-package `usage_doc.md` files (`data/`, `models/`) for the
+deep-dive on each surface. Every knob a yaml accepts is key-set validated
+(a typo is an error, not a silent default).
 
 ---
 
@@ -40,47 +53,57 @@ jax_research_template/
 
 ### 1. Create the environment
 
+`requirements.txt` is the single source of truth; `environment.yaml` is a
+thin conda shell that installs it. Two equivalent paths:
+
 ```bash
+# Conda box (workstation):
 conda env create -f environment.yaml   # creates the 'jrt' environment
 conda activate jrt
+
+# pip-only box (many clusters expose only venv + pip):
+python3 -m venv ~/jrt-venv
+. ~/jrt-venv/bin/activate
+pip install -r requirements.txt
 ```
 
-For GPU/TPU support, follow the [JAX install guide](https://jax.readthedocs.io/en/latest/installation.html) after activating the environment:
+Register the Jupyter kernel once per environment (notebooks then select
+"Python (jrt)"):
 
 ```bash
-pip install --upgrade "jax[cuda12]"   # CUDA 12.x
+python -m ipykernel install --user --name jrt --display-name "Python (jrt)"
 ```
 
-### 2. Run the reference experiment
+The default JAX build is `jax[cuda13]` (Linux GPU). For CUDA 12 or
+CPU-only boxes edit the one jax line in `requirements.txt` (variants are
+listed there) — and never type `pip install jax>=0.10` bare in a shell:
+the `>` redirects and you get an unconstrained install.
+
+### 2. Run the current experiment (cyclone_jax)
 
 ```bash
-# Edit data paths in the config
-jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml
-
 # Put jrt/ on the Python path once (packages are rooted there):
 #   export PYTHONPATH=jrt        (bash)   |   $env:PYTHONPATH="jrt"   (PowerShell)
 
-# Train
-python -m experiments.tc_perceiver_io.train.train \
-    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml
+# Site knobs (machine properties — the yamls never need editing per box):
+export CYCLONE_JAX_ROOT=/data/Caribbean-Obs    # overrides the yamls' root:
+export CYCLONE_JAX_NUM_WORKERS=8               # overrides num_workers (Linux)
+export WANDB_API_KEY=...                       # when trainer.logger: wandb
 
-# Resume interrupted training
-python -m experiments.tc_perceiver_io.train.train \
-    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml \
-    --resume
-
-# Evaluate (config path is positional)
-python -m experiments.tc_perceiver_io.train.evaluate \
-    jrt/experiments/tc_perceiver_io/configs/tc_classifier.yaml \
-    --checkpoint_dir runs/tc_classifier/run_01/checkpoints \
-    --output_dir runs/tc_classifier/run_01/eval
-
-# Hyperparameter search
-python -m experiments.tc_perceiver_io.train.tune \
-    jrt/experiments/tc_perceiver_io/configs/tc_tune.yaml \
-    --n_trials 25 \
-    --storage sqlite:///runs/tc_classifier/hp_search/study.db
+python -m experiments.cyclone_jax.train.train \
+    jrt/experiments/cyclone_jax/configs/train/train.yaml --gpu 0
 ```
+
+Prefer notebooks? `jrt/experiments/cyclone_jax/notebooks/run_experiment.ipynb`
+has the cells ready (kernel `jrt`): env pinning first, collision-ceiling
+check, then `main(yaml)`.
+
+The entry yaml points at one data scenario and one model config
+(`data: overfit`, `model: mlp | siren | finer`) — swapping either is a
+one-line edit; `config.load_config` resolves the pointers and validates
+every key. See `jrt/experiments/cyclone_jax/README.md` for the run
+records (norm stats, data manifest, figures), GPU pinning, and the
+`num_workers` knob for multi-CPU boxes.
 
 ### 3. Run tests
 
@@ -93,21 +116,30 @@ pytest tests/
 
 ## Starting a new experiment
 
-Each experiment lives in its own directory under `jrt/experiments/`. The reference experiment `tc_perceiver_io/` is the canonical example of how to structure one.
-
-**Minimum files:**
+Each experiment lives in its own directory under `jrt/experiments/`.
+`cyclone_jax/` is the canonical example of how to structure one; the
+shape that has worked:
 
 ```
 jrt/experiments/my_experiment/
-├── dataset.py       Subclass NpzDataset or write a custom loader
-├── datamodule.py    Subclass BaseDataModule; expose train/val/test loaders
-├── model.py         Flax nn.Module; __call__(X, train: bool) -> predictions
-├── metrics.py       Dict of scalar loss/metric functions
-├── train.py         Load config → build model + datamodule → Trainer.fit()
-├── evaluate.py      Load checkpoint → run predictions → figures
-└── configs/
-    └── my_config.yaml
+├── config.py        load_config: resolve config pointers, validate key sets
+├── configs/
+│   ├── data/        one yaml per DATA SCENARIO (splits, normalisation, tags)
+│   ├── models/      one yaml per model (registry name + hyperparams + tags)
+│   └── train/       entry points: point at {data, model}, inline trainer block
+├── data/            spec objects (Input/Target/NormSpec) → Loader → streams;
+│                    one build_data(cfg, seed) entry point returning a bundle
+├── models/          MODELS registry + build_model(cfg, targets)
+├── train/           train.py orchestrator + thin losses/metrics/log builders
+│                    (mechanics live in jrt.training; these files are glue)
+└── visualise/       figure mechanics (log.py decides when/what to log)
 ```
+
+Principles that keep it tractable: ONE seed drives model init and data
+order; data modules stay jax-free (multiprocess-worker purity) with a
+fixed `pad_to` so jit compiles once; batches are named dicts
+`{'X', 'y', 'meta'}` (meta = eval/plot identity, never model input);
+thin experiment files — anything reusable gets promoted into `jrt`.
 
 **Wiring the Trainer:**
 
@@ -129,10 +161,12 @@ runs/my_experiment/run_01/
 ├── checkpoints/
 │   ├── best/       Best validation checkpoint (orbax pytree)
 │   └── latest/     End-of-epoch checkpoint for resume
+├── figures/        svg + png stills (training.logger.emit_figure)
+├── norm_stats.json      cyclone_jax: stats evaluation must reuse
+├── data_manifest.json   cyclone_jax: split sizes/class counts + config
 └── logs/
     ├── hparams.json
-    ├── figures/    Saved figures (NullLogger) or WandB local cache
-    └── wandb/      (when log_backend: wandb)
+    └── wandb/      (when logging to wandb)
 ```
 
 ---
@@ -160,7 +194,9 @@ See [`jrt/core/README.md`](jrt/core/README.md) for the full registry listing.
 
 ## Logging backends
 
-Set `trainer.log_backend` in the YAML config:
+Set `trainer.log_backend` in the YAML config (cyclone_jax builds its
+logger itself — `trainer.logger` + `logger_kwargs` — so model/data tags
+and the `{model}-{data}-s{seed}` run name reach wandb):
 
 | Backend | Config value | Notes |
 |---------|-------------|-------|
@@ -174,7 +210,7 @@ All three backends expose the same interface: `log_metrics`, `log_hyperparams`, 
 
 ## Hyperparameter tuning
 
-The `Tuner` in `jrt/training/tuner.py` wraps Optuna around the existing `Trainer`. Experiments provide a `tune.py` entry point with a `SEARCH_SPACE` dict and a `suggest_fn` that maps trial samples into the config.
+The `Tuner` in `jrt/training/tuner.py` wraps Optuna around the existing `Trainer`. Experiments provide a `tune.py` entry point with a `SEARCH_SPACE` dict and a `suggest_fn` that maps trial samples into the config (tc_perceiver_io pattern; cyclone_jax's tune.py is the next build step).
 
 ```bash
 python -m experiments.my_experiment.tune configs/my_tune.yaml \

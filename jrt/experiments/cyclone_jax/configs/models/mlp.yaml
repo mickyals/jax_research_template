@@ -1,0 +1,34 @@
+# =============================================================================
+# cyclone_jax model: MLP baseline
+# =============================================================================
+# Shared per-station perceptron -> flat concat (pad_to x station_features)
+# -> core MLP body -> logits. Self-contained (no yaml inheritance);
+# keys validated by config.MODEL_KEYS, values by models.build_model.
+# n_classes STAYS null — injected from TargetSpec at build.
+
+name: mlp                         # MODELS registry key
+tags: [mlp, baseline, concat]     # -> wandb run tags
+
+n_classes: null
+station_features: null            # null = NO per-station perceptron — raw
+                                  # encoded tokens flatten directly (the
+                                  # "raw stations, positionally encoded"
+                                  # probe; pair with encoding concat)
+hidden_features: 64
+n_layers: 1
+activation: relu                  # relu | gelu | silu | leaky_relu
+dropout_rate: 0.0                 # keep 0 for the memorisation gate
+
+encoding:
+  mode: additive                    # concat | additive
+  # fields = which x fields build the station vector (the MODEL's input
+  # contract; the sample always carries everything). Ruled 2026-07-06:
+  # obs + missingness + position ONLY — level/time/id excluded so
+  # per-station timestamps can't make every vector trivially unique
+  # (identifiability must come from the weather, not the clock).
+  fields: [obs, missing]          # subset of level|time|id|obs|missing
+  embedding: GAUSSIAN_POSITIONAL  # null = raw coords; or a core/embeddings name
+  embedding_kwargs:
+    input_dim: 2                  # (lat, lon)
+    mapping_dim: 8               # even; mapping_dim/2 cos + sin pairs
+    scale: 1.0

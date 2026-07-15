@@ -19,6 +19,31 @@ name via trainer.loss + trainer.loss_kwargs. Registered entries:
 (A CORAL ordinal loss + K-1-logit head is a planned Tier-3 addition; not yet
 present.)
 
+Loss stacks (weighted term lists)
+---------------------------------
+``build_loss_stack(terms)`` folds a list of ``{name, weight, kwargs}`` term
+specs into one ``LossStack`` callable — a weighted sum over terms of TWO kinds,
+the kind declared by where the name is registered:
+
+  * **prediction terms** (this LOSSES registry): ``(pred, y) -> scalar``.
+  * **model terms** (MODEL_TERMS registry): ``(params, apply_fn, batch, pred)
+    -> scalar`` — penalties/objectives over model internals (weight-space
+    penalties ``l1_params``/``l2_params``; future physics residuals that
+    re-run ``apply_fn`` under ``jax.jvp`` for input gradients). NOTE:
+    ``l2_params`` is coupled L2 through the loss; adamw ``weight_decay`` is
+    decoupled decay outside the gradient — configure one or the other, not
+    both.
+
+The Trainer detects model terms via the stack's ``needs_model`` attribute and
+passes ``params/apply_fn/batch`` as keywords (plain ``(pred, y)`` losses have
+no such attribute and keep the unchanged fast path). ``stack.detailed`` also
+returns each term's UNWEIGHTED value for per-term logging; a term with
+``weight: 0.0`` is thereby a monitor — computed and logged, contributing
+nothing. Future re-entry points, deliberately not built yet: hypernetwork
+generated weights arrive as an ``intermediates`` keyword (flax sow) and
+data-derived constants (normalisation stats, domain bounds) as a build-time
+``ctx`` argument, both additive.
+
 Optax's element-wise losses (squared_error, etc.) are the computational backend
 and are re-exported below for direct use. MSE is the canonical regression base;
 other reductions (RMSE/MAE/Huber/log-cosh) live in optax and can be wrapped and
@@ -277,3 +302,165 @@ def _cross_entropy_loss(
         )
     return loss_fn
 
+
+# ---------------------------------------------------------------------------
+# Model-term registry — loss terms over model internals
+# ---------------------------------------------------------------------------
+# Same factory machinery as LOSSES, different contract: a registered factory
+# returns ``(params, apply_fn, batch, pred) -> scalar``. ``params`` is the
+# model's param pytree, ``apply_fn`` the flax apply (for terms that must
+# re-differentiate through the model — in JAX, ``pred`` carries no tape, so
+# input-gradient terms recompute via ``jax.jvp(lambda x: apply_fn(...), ...)``),
+# ``batch`` the meta-stripped batch dict, ``pred`` the forward output. Terms
+# that need only some inputs ignore the rest (see l1_params).
+
+MODEL_TERMS = Registry("ModelTerm")
+register_model_term = MODEL_TERMS.register
+
+
+@register_model_term(
+    "l1_params",
+    description=(
+        "Mean absolute value over all parameter leaves — an L1/lasso weight "
+        "penalty (unlike L2, not expressible optimizer-side as adamw "
+        "weight_decay). Uses only params; ignores apply_fn/batch/pred."
+    ),
+)
+def _l1_params() -> Callable:
+    def term(params, apply_fn, batch, pred) -> jax.Array:
+        leaves = jax.tree_util.tree_leaves(params)
+        total  = sum(jnp.sum(jnp.abs(leaf)) for leaf in leaves)
+        n      = sum(leaf.size for leaf in leaves)
+        return total / n
+    return term
+
+
+@register_model_term(
+    "l2_params",
+    description=(
+        "Mean squared value over all parameter leaves — COUPLED L2 "
+        "regularisation (the penalty flows through the loss gradient, so "
+        "adaptive optimizers rescale it per-parameter). Deliberately "
+        "distinct from adamw weight_decay, which is DECOUPLED decay applied "
+        "outside the gradient (Loshchilov & Hutter 2019). WARNING: use adamw "
+        "weight_decay OR this term, not both — combining them double-"
+        "penalises weight magnitude. Uses only params; ignores "
+        "apply_fn/batch/pred."
+    ),
+)
+def _l2_params() -> Callable:
+    def term(params, apply_fn, batch, pred) -> jax.Array:
+        leaves = jax.tree_util.tree_leaves(params)
+        total  = sum(jnp.sum(jnp.square(leaf)) for leaf in leaves)
+        n      = sum(leaf.size for leaf in leaves)
+        return total / n
+    return term
+
+
+# ---------------------------------------------------------------------------
+# LossStack — a weighted term list folded into one callable
+# ---------------------------------------------------------------------------
+
+_TERM_KEYS = {"name", "weight", "kwargs"}
+
+
+class LossStack:
+    """Weighted sum of instantiated loss terms, callable like a plain loss.
+
+    ``stack(pred, y)`` satisfies the Trainer's metrics_fns contract when no
+    model term is present; with model terms the Trainer passes
+    ``params/apply_fn/batch`` as keywords (it branches on ``needs_model`` at
+    step-build time, so plain losses keep the unchanged code path).
+
+    Attributes
+    ----------
+    term_names : tuple[str, ...]   config order, lowercased; repeated names
+                                   carry suffixed labels (name, name_2, ...)
+    needs_model : bool             True if any term is a model term
+    """
+
+    def __init__(self, terms: list[tuple[str, float, str, Callable]]) -> None:
+        # terms: (name, weight, kind 'prediction'|'model', instantiated fn)
+        self._terms = tuple(terms)
+
+    @property
+    def term_names(self) -> tuple[str, ...]:
+        return tuple(name for name, _, _, _ in self._terms)
+
+    @property
+    def needs_model(self) -> bool:
+        return any(kind == "model" for _, _, kind, _ in self._terms)
+
+    def detailed(
+        self, pred, y, *, params=None, apply_fn=None, batch=None,
+    ) -> tuple[jax.Array, dict[str, jax.Array]]:
+        """(total, {term_name: UNWEIGHTED value}) — unweighted so per-term
+        curves stay comparable across weight sweeps."""
+        if self.needs_model and params is None:
+            raise ValueError(
+                f"loss stack contains model term(s) "
+                f"{[n for n, _, k, _ in self._terms if k == 'model']} which "
+                f"require params (and typically apply_fn/batch) — call as "
+                f"stack(pred, y, params=..., apply_fn=..., batch=...)."
+            )
+        total, values = 0.0, {}
+        for name, weight, kind, fn in self._terms:
+            value = (fn(pred, y) if kind == "prediction"
+                     else fn(params, apply_fn, batch, pred))
+            values[name] = value
+            total += weight * value
+        return total, values
+
+    def __call__(
+        self, pred, y, *, params=None, apply_fn=None, batch=None,
+    ) -> jax.Array:
+        total, _ = self.detailed(pred, y, params=params,
+                                 apply_fn=apply_fn, batch=batch)
+        return total
+
+
+def build_loss_stack(terms: list[dict]) -> LossStack:
+    """Fold ``[{name, weight, kwargs}, ...]`` term specs into a LossStack.
+
+    Each name resolves against MODEL_TERMS or LOSSES (the registration
+    declares the term's kind); ``weight`` defaults to 1.0 (0.0 = monitor
+    term: computed and reported, contributing nothing); ``kwargs`` go to
+    the term's factory. A name may repeat (e.g. plain + focal cross_entropy
+    with different kwargs) — repeats get suffixed labels (``cross_entropy``,
+    ``cross_entropy_2``) in term_names/detailed so their curves stay
+    distinct. Names in both registries, unknown names, and unknown spec
+    keys are errors.
+    """
+    if not terms:
+        raise ValueError("build_loss_stack needs at least one loss term.")
+    built, counts = [], {}
+    for spec in terms:
+        if not isinstance(spec, dict):
+            raise ValueError(f"loss term spec must be a dict "
+                             f"{{name, weight, kwargs}}, got {spec!r}")
+        unknown = set(spec) - _TERM_KEYS
+        if unknown:
+            raise ValueError(f"unknown key(s) {sorted(unknown)} in loss term "
+                             f"{spec!r} — allowed: {sorted(_TERM_KEYS)}")
+        name = spec.get("name")
+        if not name:
+            raise ValueError(f"loss term {spec!r} needs a 'name'.")
+        name = str(name).lower()
+        counts[name] = counts.get(name, 0) + 1
+        label = name if counts[name] == 1 else f"{name}_{counts[name]}"
+
+        in_pred, in_model = name in LOSSES, name in MODEL_TERMS
+        if in_pred and in_model:
+            raise ValueError(f"loss term '{name}' is ambiguous — registered "
+                             f"as both a prediction loss and a model term.")
+        if not (in_pred or in_model):
+            raise ValueError(
+                f"loss term '{name}' is not a registered prediction loss "
+                f"({', '.join(LOSSES.names()) or 'none'}) or model term "
+                f"({', '.join(MODEL_TERMS.names()) or 'none'})."
+            )
+        registry = LOSSES if in_pred else MODEL_TERMS
+        kind     = "prediction" if in_pred else "model"
+        fn       = registry.get(name, **(spec.get("kwargs") or {}))
+        built.append((label, float(spec.get("weight", 1.0)), kind, fn))
+    return LossStack(built)

@@ -120,7 +120,7 @@ def plot_pr_curve(
     Parameters
     ----------
     curve : dict
-        Output of ``training.metrics.binary_pr_curve`` —
+        Output of ``train.full_set_metrics.binary_pr_curve`` —
         {'precision', 'recall', 'ap', 'base_rate'}. The figure's AP is the
         same number logged as the ``pr_auc`` scalar (shared code path).
     """
@@ -151,7 +151,7 @@ def plot_pr_curves_per_class(
     Parameters
     ----------
     curves : dict[int, dict]
-        Output of ``training.metrics.per_class_pr_curves`` — keyed by class
+        Output of ``train.full_set_metrics.per_class_pr_curves`` — keyed by class
         index, each value a ``precision_recall_curve`` dict. Each class's AP
         (in the legend) is exactly its contribution to ``mAP``.
     class_names : list[str]
@@ -385,9 +385,9 @@ def plot_attention_geographic(
                     "encoding requires storm_latlon=(lat, lon) — available "
                     "as batch['meta']['query_lat']/['query_lon']."
                 )
-            from utils.plotting._geo import _make_geoaxes
+            from utils.plotting.geo import make_geoaxes
             r_m = radius_km * 1000.0
-            fig, ax, _ = _make_geoaxes(
+            fig, ax, _ = make_geoaxes(
                 figsize=(7, 7),
                 extent=[-1.08 * r_m, 1.08 * r_m, -1.08 * r_m, 1.08 * r_m],
                 projection='azimuthal',

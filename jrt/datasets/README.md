@@ -1,6 +1,16 @@
 # jrt/datasets
 
-Generic data loading and batching infrastructure. This layer handles how data is read, split, and served to the Trainer — it does not contain experiment-specific logic.
+Generic data loading and batching infrastructure for **array/npz-shaped
+data**. This layer handles how data is read, split, and served to the
+Trainer — it does not contain experiment-specific logic.
+
+Scope note: the current experiment (`cyclone_jax`) ships its own data
+layer (arcana volume/bookshelf store + `build_data` streams — see its
+`data/usage_doc.md`) and does not use these classes; the Trainer only
+requires re-iterable loaders yielding `{'X','y'[,'meta']}` dicts, which
+both layers satisfy. `class_weights.py` (per-class weight schemes from
+train-split counts) is consumed by `training/losses`' `cross_entropy`
+regardless of which data layer produced the counts.
 
 Experiment-specific datasets (custom loaders, domain filtering, coordinate encoding) live inside the experiment directory, typically as a subclass of `NpzDataset` or `BaseDataModule`.
 

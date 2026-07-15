@@ -487,3 +487,31 @@ def vincenty_jax(
         bearing_embedding = None
 
     return distance_km, forward_azimuth_deg, back_azimuth_deg, bearing_embedding
+
+
+# ---------------------------------------------------------------------------
+# Spherical areas
+# ---------------------------------------------------------------------------
+
+def latlon_box_area(lon_min, lon_max, lat_min, lat_max,
+                       radius: float = _AVG_EARTH_RADIUS_KM) -> float:
+    """EXACT area of a lon/lat box on the sphere (like haversine is the
+    exact great-circle distance, this is the exact spherical-surface area
+    of the box — NOT the flat-map dlon*dlat rectangle, which overstates
+    high-latitude area).
+
+    area = R^2 * dlon_rad * (sin(lat_max) - sin(lat_min))
+
+    Parameters
+    ----------
+    lon_min, lon_max, lat_min, lat_max : float, degrees
+    radius : float
+        Sphere radius; default mean earth radius in km -> area in km^2.
+
+    Returns
+    -------
+    float  area in radius-units squared.
+    """
+    dlon = np.radians(lon_max - lon_min)
+    return float(radius ** 2 * dlon
+                 * (np.sin(np.radians(lat_max)) - np.sin(np.radians(lat_min))))

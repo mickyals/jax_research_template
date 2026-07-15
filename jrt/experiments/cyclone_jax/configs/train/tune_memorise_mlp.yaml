@@ -1,0 +1,31 @@
+# =============================================================================
+# cyclone_jax tune: MEMORISE-MLP hyperparameter search
+# =============================================================================
+# Optuna search over the memorise_mlp base config. Direction derives
+# from the base trainer's patience_direction (train/loss ->
+# minimize) — never set separately. No sqlite: the study record is
+# <run_dir>/<study>/trials.csv + one wandb run per trial (group =
+# study) + best.yaml (the merged winning config, self-contained).
+#
+#   PYTHONPATH=jrt python -m experiments.cyclone_jax.train.tune \
+#       jrt/experiments/cyclone_jax/configs/train/tune_memorise_mlp.yaml
+#
+# Trial budget = the base config's num_epochs; the pruner starts
+# comparing after n_startup_trials trials / n_warmup_steps epochs.
+
+base: memorise_mlp                # configs/train/<name>.yaml
+study: memorise_mlp_hp            # wandb group + <run_dir>/<study>/
+n_trials: 48
+n_startup_trials: 4               # trials before the median pruner engages
+n_warmup_steps: 3                 # epochs per trial before pruning checks
+retrain_best: true                # best.yaml -> full run tagged {study}-best
+
+# dotted paths into the merged {data, model, trainer} config; specs are
+# {low, high, log?, step?} (int when both bounds are ints) or {choices}.
+search:
+  trainer.scheduler_kwargs.value: {low: 1.0e-4, high: 1.0e-2, log: true}
+  model.hidden_features: {choices: [32, 64, 128, 256]}
+  model.n_layers: {choices: [1, 2, 3, 4]}
+  model.encoding.embedding_kwargs.mapping_dim: {choices: [8, 16, 32, 64, 128]}
+  # gamma bandwidth is worth a look once the size knobs settle:
+  model.encoding.embedding_kwargs.scale: {low: 0.5, high: 8.0, log: true}

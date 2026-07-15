@@ -26,12 +26,26 @@ test_metrics = trainer.test(dm.test_loader())
 
 **What it manages:**
 - JIT-compiled `train_step` and `eval_step` (built once on first call to `fit`)
+- Buffer donation on accelerators: `train_step` donates the incoming
+  state's buffers when the backend is gpu/tpu (roughly halves param+opt
+  peak memory). `best_state` snapshots are copied when donation is live
+  (`_snapshot_state`) so the returned state never aliases donated buffers
+- Loss stacks: when `metrics_fns[loss_key]` is a `LossStack` with model
+  terms (`needs_model`), the step calls it with `params`/`apply_fn`/
+  `batch` kwargs; multi-term stacks log per-term step metrics
+  (`<loss_key>/<term>`)
 - Per-step logging (every `log_every_n_steps` gradient updates)
-- Epoch-level validation across all registered metrics
+- Epoch-level validation across all registered metrics;
+  `check_val_every_n_epoch` skips intermediate val passes (skipped epochs
+  never tick patience unless the patience metric is train-side; the final
+  budgeted epoch always validates)
 - Early stopping on `patience_metric` with configurable direction
 - Orbax checkpointing of both `best/` and `latest/` states
 - `num_steps` budget as an alternative to `num_epochs`
 - Epoch callbacks: `fit(..., epoch_callbacks=[fn])` where each `fn(state, epoch, global_step)` is called after validation
+- Step callbacks: `fit(..., step_callbacks=[(fn, every_n_steps), ...])` —
+  called inside the step loop whenever `global_step % every == 0`
+  (figure/diagnostic cadence for step-budgeted training)
 - Run manifests: `trainer.write_manifest(dm.manifest())` writes `manifest.json` under `checkpoint_dir` (the durable record of what the run trained on — e.g. resolved split membership) and pushes a copy to the logger via `log_hyperparams`
 
 **Config keys** (YAML `trainer:` block):
@@ -49,6 +63,7 @@ test_metrics = trainer.test(dm.test_loader())
 | `patience` | 10 | |
 | `patience_metric` | `val/<loss_key>` | metric to watch for early stopping |
 | `patience_direction` | `lower_is_better` | or `higher_is_better` |
+| `check_val_every_n_epoch` | 1 | validate every N epochs; skipped epochs don't tick patience (unless the patience metric is train-side); final epoch always validates |
 | `max_grad_norm` | None | gradient clipping; None = disabled |
 | `run_dir` | — | co-locates `checkpoints/` and `logs/` under one root |
 | `checkpoint_dir` | `checkpoints` | ignored when `run_dir` is set |
@@ -105,6 +120,24 @@ loss_fn = get_loss("cross_entropy", focal_gamma=2.0, class_weights=[1.0]*11)
 | `cross_entropy` | `focal_gamma`, `class_weights` (length-`n_classes` list), `emd_lambda` / `emd_omega` / `emd_mu` — all optional | Softmax CE; kwargs compose freely. `focal_gamma` = focal loss (Lin et al. 2017); `class_weights` = class-balanced (weighted mean, scale-comparable); `emd_lambda` adds the squared-EMD regulariser `λ·Σ pᵢ²(|i−k|^ω+μ)` (Hou et al. 2016 — the working *regulariser* form; the standalone EMD loss is not offered). |
 
 Class weighting is **method-agnostic**: the caller supplies the realized per-class vector. The deriving helper lives with the data layer (class imbalance is a data property) — `datasets/class_weights.py::class_weights_from_counts(counts, scheme, beta)` — `none` / `inverse_freq` / `sqrt_inverse_freq` / `effective_number` (Cui et al. 2019) / `median_freq` (Eigen & Fergus 2015); zero-count classes stay 1.0, present classes normalized to mean 1. Compute once from the train-split counts and record it (e.g. in the run manifest).
+
+**Loss stacks — weighted term lists (`LossStack`, `build_loss_stack`):**
+
+`trainer.loss` may be a weighted list of terms instead of one name; the
+experiment glue folds it into ONE callable via `build_loss_stack(terms)`.
+Two term kinds, resolved by which registry the name lives in:
+
+| Kind | Registry | Signature | Examples |
+|------|----------|-----------|----------|
+| prediction | `LOSSES` | `(pred, y) -> scalar` | `cross_entropy`, `mse` |
+| model | `MODEL_TERMS` | `(params, apply_fn, batch, pred) -> scalar` (kwargs call) | `l1_params`, `l2_params` |
+
+The stack exposes `needs_model` (Trainer branches at step-build time),
+`term_names`, and `detailed` (per-term unweighted values — the Trainer
+logs `<loss_key>/<term>` when there is more than one term; a weight-0
+term is a monitor). Repeated names auto-suffix (`cross_entropy_2` — plain
++ focal CE is the legitimate use). `l2_params` is the loss-side/coupled
+L2 — use it OR `adamw` `weight_decay` (decoupled), not both.
 
 Convention for classification experiments: a `trainer.loss` (+ `trainer.loss_kwargs`) config key selects the entry resolved via `get_loss` and bound to the `metrics_fns['loss']` key (which `loss_key` defaults to), so the training objective is configured the same way as `trainer.optimizer`/`trainer.scheduler`. An experiment may also compute `class_weights` at setup from a `data.class_weight_scheme` (see the tc_perceiver_io data config); an explicit `loss_kwargs.class_weights` overrides it.
 
@@ -176,6 +209,31 @@ All three share the same interface:
 
 Access the logger from anywhere in a training script via `trainer.logger` (read-only property).
 
+Module function `emit_figure(logger, figure, tag, step, run_dir=None,
+stem=None)` wraps the shared emit pattern: save svg + png stills under
+`run_dir/figures/` (editable-vector workflow), then `log_figure` — which
+closes the figure, so stills are saved first.
+
+---
+
+## `prefetch.py` — `ProcessPrefetcher`
+
+Multiprocess batch assembly for CPU-bound loaders (fork platforms —
+Linux; keep `num_workers: 0` on Windows, spawn would pickle mmaps).
+
+```python
+from training.prefetch import ProcessPrefetcher
+
+# worker_fn(worker_id, num_workers) -> iterator of batches
+for batch in ProcessPrefetcher(worker_fn, num_workers=8, prefetch_factor=2):
+    ...
+```
+
+Workers round-robin disjoint shards of the epoch; batch CONTENTS equal
+the synchronous path, batch ORDER is queue-arrival. The consumer is
+`cyclone_jax`'s `BatchStream` (train streams only — val/test stay
+synchronous for deterministic eval order).
+
 ---
 
 ## `metrics.py`
@@ -191,20 +249,22 @@ Per-batch metrics share the signature `(logits, labels) -> scalar` and slot dire
 | `binary_accuracy(logits, labels, threshold=1)` | Binary accuracy from a thresholded ordinal class index (e.g. class 0 vs. class > 0) |
 | `mae_class(logits, labels)` | Mean absolute error in class units (ordinal distance) |
 
-Full-set metrics — computed over accumulated predictions, not per-batch (too noisy on a single batch):
+The registry is SCAFFOLDING, not an encyclopedia: only metrics that
+average safely per-batch are registered (`cross_entropy`, `accuracy`,
+`binary_accuracy`, `mae_class`). Set-shaped quantities accumulate exactly
+via the confusion-matrix atoms instead:
 
 | Function | Description |
 |----------|-------------|
-| `quadratic_weighted_kappa(cm)` | Cohen's kappa with quadratic class-distance weights, from a confusion matrix |
-| `expected_calibration_error(probs, labels, n_bins=15)` | ECE — occupancy-weighted confidence-vs-accuracy gap |
-| `maximum_calibration_error(probs, labels, n_bins=15)` | MCE — worst single bin's gap (high-stakes; noisier than ECE) |
+| `confusion_counts(logits, labels)` | One batch's `(C, C)` count matrix (rows = true, cols = pred); SUMS exactly across batches |
+| `update_cm(cm, logits, labels)` | Jitted accumulate — the plain array IS the state |
+| `compute_final_metrics(cm)` | Exact accuracy, macro precision/recall, per-class recall (= per-class accuracy), OVA binary accuracy, pairwise accuracy matrix |
 
-Post-hoc calibration — temperature scaling (Guo et al. 2017), fit on a held-out split and applied to the eval split:
-
-| Function | Description |
-|----------|-------------|
-| `fit_temperature(logits, labels)` | Fit a single `T>0` minimizing NLL of `softmax(logits/T)` (exact ternary search; NLL convex in `1/T`) |
-| `apply_temperature(logits, T)` | `logits / T` — recalibrates confidence without changing the argmax |
+Accumulation lives with the CONSUMER (figure callbacks, evaluate passes),
+not the Trainer — per-batch macro P/R approximations were deliberately
+deregistered (ratios don't average; counts do). Calibration/QWK/PR-curve
+full-set metrics live with their only consumer
+(`experiments/tc_perceiver_io/train/full_set_metrics.py`).
 
 ---
 

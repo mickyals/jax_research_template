@@ -1,3 +1,5 @@
+import functools
+
 import jax
 import jax.numpy as jnp
 from typing import Callable, Literal
@@ -168,6 +170,41 @@ def grad_fn(fn: Callable, argnums: int | tuple[int, ...] = 0, has_aux: bool = Fa
 # (2026-06-17, plan r16) — they are geographic, not JAX-core, utilities.
 
 
+@functools.partial(jax.jit, static_argnums=0)
+def eval_forward(apply_fn, params, X, batch_stats=None):
+    """Jitted eval-mode model forward: ``apply_fn(variables, X, train=False)``.
+
+    The shared forward for host-side consumers that repeatedly evaluate a
+    fixed-shape batch outside the training loop — figure callbacks
+    sweeping a split for a confusion matrix, evaluation passes, panel
+    renders. ``apply_fn`` is static, so each (apply_fn, batch shape) pair
+    traces once and later calls hit the jit cache. The jrt Trainer keeps
+    its own fused eval_step (loss/metrics computed inside the same jit) —
+    that inline copy is deliberate, not a duplicate.
+
+    Parameters
+    ----------
+    apply_fn : callable
+        Flax ``model.apply`` (or anything with the same
+        ``(variables, X, train=...)`` signature). Static jit argument.
+    params : pytree
+        Model parameters; becomes ``variables['params']``.
+    X : pytree
+        The batch input (named dict of arrays; fixed shapes).
+    batch_stats : pytree, optional
+        BatchNorm statistics; joins ``variables`` when present.
+
+    Returns
+    -------
+    jax.Array
+        Whatever ``apply_fn`` returns (predictions/logits).
+    """
+    variables = {"params": params}
+    if batch_stats is not None:
+        variables["batch_stats"] = batch_stats
+    return apply_fn(variables, X, train=False)
+
+
 # ---------------------------------------------------------------------------
 # Normalisation
 # ---------------------------------------------------------------------------
@@ -229,6 +266,9 @@ def standardise(
     eps: float = 1e-8,
 ) -> jax.Array:
     """Standardise an array to zero mean and unit variance.
+
+    Device-side (jax). The numpy twin for data loaders / worker paths is
+    utils/normalise.py (NORMALISERS registry + stats accumulation).
 
     If ``mean`` and ``std`` are not provided they are computed from ``x``.
     Pass pre-computed statistics when standardising a test set using

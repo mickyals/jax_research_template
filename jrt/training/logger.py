@@ -19,6 +19,10 @@ Shared interface
     finalize(status)                    -- 'success' | 'failed'
     log_dir                             -- pathlib.Path to run directory
 
+Module function emit_figure(logger, figure, tag, step, run_dir, stem)
+wraps the common save-svg+png-then-log_figure pattern (the logger closes
+the figure).
+
 All backends accept matplotlib Figures for log_figure (no conversion
 required by the caller). log_image accepts HWC arrays in [0, 255] uint8
 or [0, 1] float32 — the backend handles any needed transposing.
@@ -38,6 +42,27 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+
+def emit_figure(logger, figure, tag: str, step: int,
+                run_dir=None, stem: str | None = None) -> None:
+    """Save svg + png stills under ``run_dir/figures/``, then hand the
+    figure to ``logger.log_figure`` — which closes it, so save first.
+
+    The shared editable-vector emit pattern (promoted from
+    experiments/cyclone_jax/train/log.py — every experiment wants it).
+    Stills are named ``<stem>_step<step:07d>.{svg,png}``; ``stem``
+    defaults to ``tag`` with '/' replaced by '_'. No ``run_dir`` = log
+    only, no stills.
+    """
+    if run_dir:
+        fig_dir = Path(run_dir) / "figures"
+        fig_dir.mkdir(parents=True, exist_ok=True)
+        base = str(fig_dir /
+                   f"{stem or tag.replace('/', '_')}_step{step:07d}")
+        figure.savefig(base + ".svg")
+        figure.savefig(base + ".png", dpi=150)
+    logger.log_figure(tag, figure, step)
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-Tests for utils/plotting/_geo.py and the geo= path of plot_scatter_overlay.
+Tests for utils/plotting/geo.py and the geo= path of plot_scatter_overlay.
 
 IMPORTANT: never call fig.canvas.draw() or fig.savefig() in this module.
 Natural Earth shapefiles download at *render* time, and these tests must
@@ -19,7 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from utils.plotting._geo import _add_map_features, _make_geoaxes
+from utils.plotting.geo import add_map_features, cartopy_available, make_geoaxes
 from utils.plotting.fields import plot_scatter_overlay
 
 try:
@@ -52,7 +52,7 @@ class TestMissingCartopy:
 
     def test_make_geoaxes_clear_error(self, no_cartopy):
         with pytest.raises(ImportError, match="pip install cartopy"):
-            _make_geoaxes()
+            make_geoaxes()
 
     def test_plot_scatter_overlay_clear_error(self, no_cartopy):
         x = np.linspace(-90.0, -50.0, 5)
@@ -62,53 +62,64 @@ class TestMissingCartopy:
 
 
 # ---------------------------------------------------------------------------
-# _make_geoaxes / _add_map_features
+# make_geoaxes / add_map_features / cartopy_available
 # ---------------------------------------------------------------------------
+
+class TestCartopyAvailable:
+
+    def test_matches_import_reality(self):
+        assert cartopy_available() is HAS_CARTOPY
+
+    def test_false_when_missing(self, monkeypatch):
+        for mod in ("cartopy", "cartopy.crs", "cartopy.feature"):
+            monkeypatch.setitem(sys.modules, mod, None)
+        assert cartopy_available() is False
+
 
 @needs_cartopy
 class TestMakeGeoaxes:
 
     def test_returns_fig_geoaxes_transform(self):
-        fig, ax, transform = _make_geoaxes()
+        fig, ax, transform = make_geoaxes()
         assert isinstance(fig, Figure)
         assert isinstance(ax.projection, ccrs.PlateCarree)
         assert isinstance(transform, ccrs.PlateCarree)
         plt.close(fig)
 
     def test_extent_applied(self):
-        fig, ax, transform = _make_geoaxes(extent=EXTENT)
+        fig, ax, transform = make_geoaxes(extent=EXTENT)
         assert np.allclose(ax.get_extent(crs=transform), EXTENT)
         plt.close(fig)
 
     def test_adds_three_features(self):
-        fig, ax, _ = _make_geoaxes()
+        fig, ax, _ = make_geoaxes()
         assert _count_feature_artists(ax) == 3
         plt.close(fig)
 
     def test_gridlines_on_by_default(self):
-        fig, ax, _ = _make_geoaxes()
+        fig, ax, _ = make_geoaxes()
         assert sum(isinstance(c, Gridliner) for c in ax.get_children()) == 1
         plt.close(fig)
 
     def test_gridlines_off(self):
-        fig, ax, _ = _make_geoaxes(gridlines=False)
+        fig, ax, _ = make_geoaxes(gridlines=False)
         assert not any(isinstance(c, Gridliner) for c in ax.get_children())
         plt.close(fig)
 
     def test_figsize(self):
-        fig, _, _ = _make_geoaxes(figsize=(9, 7))
+        fig, _, _ = make_geoaxes(figsize=(9, 7))
         assert np.allclose(fig.get_size_inches(), (9, 7))
         plt.close(fig)
 
     def test_style_overrides_run(self):
-        fig, ax, _ = _make_geoaxes(scale="110m", color="gray", lw=0.2)
+        fig, ax, _ = make_geoaxes(scale="110m", color="gray", lw=0.2)
         assert _count_feature_artists(ax) == 3
         plt.close(fig)
 
     # --- azimuthal projection (storm-centred local maps) ---
 
     def test_azimuthal_projection_and_lonlat_transform(self):
-        fig, ax, transform = _make_geoaxes(
+        fig, ax, transform = make_geoaxes(
             projection="azimuthal", center=(15.0, -75.0),
         )
         assert isinstance(ax.projection, ccrs.AzimuthalEquidistant)
@@ -117,7 +128,7 @@ class TestMakeGeoaxes:
         plt.close(fig)
 
     def test_azimuthal_centre_applied(self):
-        fig, ax, _ = _make_geoaxes(
+        fig, ax, _ = make_geoaxes(
             projection="azimuthal", center=(15.0, -75.0),
         )
         params = ax.projection.proj4_params
@@ -127,7 +138,7 @@ class TestMakeGeoaxes:
 
     def test_azimuthal_extent_in_metres(self):
         r_m = 500_000.0
-        fig, ax, _ = _make_geoaxes(
+        fig, ax, _ = make_geoaxes(
             projection="azimuthal", center=(15.0, -75.0),
             extent=[-r_m, r_m, -r_m, r_m],
         )
@@ -137,11 +148,11 @@ class TestMakeGeoaxes:
 
     def test_azimuthal_requires_center(self):
         with pytest.raises(ValueError, match="center"):
-            _make_geoaxes(projection="azimuthal")
+            make_geoaxes(projection="azimuthal")
 
     def test_unknown_projection_raises(self):
         with pytest.raises(ValueError, match="projection"):
-            _make_geoaxes(projection="mercator")
+            make_geoaxes(projection="mercator")
 
 
 @needs_cartopy
@@ -149,9 +160,29 @@ class TestAddMapFeatures:
 
     def test_adds_features_and_returns_ax(self):
         fig, ax = plt.subplots(subplot_kw={"projection": ccrs.PlateCarree()})
-        result = _add_map_features(ax)
+        result = add_map_features(ax)
         assert result is ax
         assert _count_feature_artists(ax) == 3
+        plt.close(fig)
+
+    def test_fill_adds_land_and_ocean(self):
+        fig, ax = plt.subplots(subplot_kw={"projection": ccrs.PlateCarree()})
+        add_map_features(ax, fill=True)
+        assert _count_feature_artists(ax) == 5          # + LAND + OCEAN
+        plt.close(fig)
+
+    def test_fill_forwarded_from_make_geoaxes(self):
+        fig, ax, _ = make_geoaxes(fill=True)
+        assert _count_feature_artists(ax) == 5
+        plt.close(fig)
+
+    def test_zorder_applied_to_linework(self):
+        # re-drawing coastlines ABOVE a data layer (accuracy hexbin path)
+        fig, ax = plt.subplots(subplot_kw={"projection": ccrs.PlateCarree()})
+        add_map_features(ax, zorder=3)
+        artists = [c for c in ax.get_children()
+                   if isinstance(c, FeatureArtist)]
+        assert artists and all(a.get_zorder() == 3 for a in artists)
         plt.close(fig)
 
 

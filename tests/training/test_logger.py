@@ -415,3 +415,45 @@ class TestFinalizeStatus:
             logger = self._wandb_logger()
             logger.finalize(status)
             logger._run.finish.assert_called_once_with(exit_code=1)
+
+
+# ---------------------------------------------------------------------------
+# emit_figure — the shared save-stills-then-log pattern
+# ---------------------------------------------------------------------------
+
+class TestEmitFigure:
+
+    class _Recorder:
+        def __init__(self):
+            self.calls = []
+
+        def log_figure(self, tag, figure, step):
+            self.calls.append((tag, step))
+            plt.close(figure)
+
+    def _fig(self):
+        fig, ax = plt.subplots()
+        ax.plot([0, 1], [0, 1])
+        return fig
+
+    def test_saves_stills_and_logs(self, tmp_path):
+        from training.logger import emit_figure
+        rec = self._Recorder()
+        emit_figure(rec, self._fig(), 'val/cm', 7, run_dir=tmp_path)
+        names = sorted(p.name for p in (tmp_path / 'figures').iterdir())
+        assert names == ['val_cm_step0000007.png', 'val_cm_step0000007.svg']
+        assert rec.calls == [('val/cm', 7)]
+
+    def test_stem_overrides_tag_naming(self, tmp_path):
+        from training.logger import emit_figure
+        emit_figure(self._Recorder(), self._fig(), 'val/cm', 3,
+                    run_dir=tmp_path, stem='cm_val')
+        names = sorted(p.name for p in (tmp_path / 'figures').iterdir())
+        assert names == ['cm_val_step0000003.png', 'cm_val_step0000003.svg']
+
+    def test_no_run_dir_logs_only(self, tmp_path):
+        from training.logger import emit_figure
+        rec = self._Recorder()
+        emit_figure(rec, self._fig(), 'a/b', 1)
+        assert rec.calls == [('a/b', 1)]
+        assert not (tmp_path / 'figures').exists()
