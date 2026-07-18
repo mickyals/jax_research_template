@@ -1,40 +1,46 @@
 # core/attention.py
 """
-Pure attention mechanisms for transformer / Perceiver architectures.
+Scaled dot-product attention — ONE primitive.
 
-Provides two attention modules and a small registry. Self- and cross-attention
-are the *only* attention primitives here (Perceiver IO, Jaegle et al. 2021/22:
-encode and decode are cross-attention, the processor is self-attention — three
-uses of one QKV operation). The full pre-LN residual block (eqs 4-6: LayerNorm
--> attention -> +residual -> MLP -> +residual) is assembled by the *model* that
-composes these, not baked in here.
+Cross- and self-attention differ solely by where the query comes from
+(Perceiver IO, Jaegle et al. 2021/22: encode and decode are cross-attention,
+the processor is self-attention — three uses of one QKV operation). This
+module provides that one operation:
 
-    MultiHeadAttention   scaled dot-product MHA. context=None -> self-attention;
-                         context given -> cross-attention. Owns its QKV
-                         projections for clean weight introspection.
-    CrossAttention       Q-from-one-source, KV-from-another. A thin, explicit
-                         wrapper over MultiHeadAttention for call-site clarity.
+    Attention        q from ``x_q``, k/v from ``x_kv``; self-attention is the
+                     call ``attn(x, x)``. Owns its q/k/v/out projections
+                     (DenseGeneral) so channel counts decouple:
 
-Registry (so models can select by name, mirroring activations/initializers):
-    get_attention("self_attention",  embed_dim=..., num_heads=...)  -> module
-    get_attention("cross_attention", embed_dim=..., num_heads=...)  -> module
+                         x_q  (B, Tq, num_latent_channels) --q_proj--+
+                         x_kv (B, Tk, data channels) --k_proj,v_proj-+-> arithmetic at
+                                                                     |   num_attn_channels,
+                         out  (B, Tq, num_out_channels) <--out_proj--+   split across heads
 
-Mask utilities (module-level functions):
-    make_causal_mask     autoregressive upper-triangular mask
-    make_padding_mask    variable-length sequence padding mask
+                     Returns ``(out, probs)`` where ``probs`` are the
+                     POST-softmax attention weights (B, num_heads, Tq, Tk) —
+                     the ruled observability output. Always returned; callers
+                     that don't want them ignore them.
 
-All attention modules share a consistent __call__ signature:
-    (x, context=None, mask=None, train=True, return_weights=False)
-where context=None means self-attention.
+Naming (v3 convention: the feature axis is "channels", ``num_*`` is a count):
+    num_attn_channels   channels q/k/v are projected INTO; the attention
+                        arithmetic runs here. None -> q input channels.
+                        Must be divisible by num_heads.
+    num_out_channels    output channels. None -> q input channels (the
+                        residual stream width, so blocks add without reshaping).
 
-return_weights=True returns (output, scores) where ``scores`` are the
-**pre-softmax** attention logits (QKᵀ / √head_dim, plus the mask bias), shape
-(B, num_heads, T_q, T_kv). Pre-softmax is the interpretable form for attention
-maps — post-softmax weights are very sparse/peaky and hard to read (Perceiver,
-Fig. 3). Masked entries appear as a large negative bias; a plotter that knows
-the padding can NaN those columns. Apply softmax to recover the true attention
-distribution (e.g. for entropy diagnostics). Diagnostics are intended for
-val/test only.
+Masks: build with ``flax.linen.make_attention_mask(q_valid, kv_valid,
+dtype=bool)`` / ``flax.linen.make_causal_mask``; True = attend. An additive
+float ``bias`` is also accepted (rotary/ALiBi-style extensions).
+
+The pre-LN residual block (LayerNorm -> attention -> +residual -> MLP ->
++residual) is assembled by ``core.nets.transformers``, not baked in here.
+
+----------------------------------------------------------------------------
+LEGACY (v2) SECTION at the bottom: MultiHeadAttention / CrossAttention / the
+ATTENTION registry / hand-rolled mask helpers. Kept ONLY because the frozen
+``experiments/tc_perceiver_io`` line imports ``get_attention``; delete the
+whole section when that experiment is deleted. New code composes
+``Attention`` directly — no registry.
 """
 
 from typing import Optional, Tuple, Union
@@ -43,86 +49,147 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
-from utils.registry import Registry
-
 
 # ---------------------------------------------------------------------------
-# Mask utilities
+# The one primitive
 # ---------------------------------------------------------------------------
 
-def make_causal_mask(seq_len: int) -> jax.Array:
-    """Upper-triangular causal mask for autoregressive attention.
+class Attention(nn.Module):
+    """Multi-head scaled dot-product attention; q from ``x_q``, k/v from ``x_kv``.
 
     Parameters
     ----------
-    seq_len : int
-        Sequence length.
-
-    Returns
-    -------
-    jax.Array
-        Boolean mask of shape (seq_len, seq_len). True where attention is
-        allowed (lower triangle + diagonal), False where blocked.
+    num_heads : int
+        Head count. head channels = num_attn_channels / num_heads (derived,
+        never set).
+    num_attn_channels : int, optional
+        Channels q/k/v are projected into — where the attention arithmetic
+        runs. None -> q input channels. Must be divisible by num_heads
+        (checked at call, when the input width is known).
+    num_out_channels : int, optional
+        Output channels. None -> q input channels.
+    dropout_rate : float
+        Dropout on the post-softmax attention probabilities. Requires
+        ``rngs={'dropout': key}`` when ``train=True`` and rate > 0.
+    use_bias : bool
+        Bias terms on the q/k/v/out projections. Default True.
 
     Notes
     -----
-    Pass as `mask` to MultiHeadAttention. Boolean masks are converted to
-    additive bias (0.0 / -1e9) internally before softmax.
+    Self-attention is ``attn(x, x)``. Returns ``(out, probs)``:
+    ``out`` (B, Tq, num_out_channels); ``probs`` (B, num_heads, Tq, Tk)
+    post-softmax attention weights (the observability output — apply nothing,
+    they already sum to 1 over Tk on unmasked rows).
 
     Example
     -------
-    >>> mask = make_causal_mask(4)
-    >>> mask.shape
-    (4, 4)
+    >>> attn = Attention(num_heads=4)
+    >>> out, probs = attn.apply(vs, latents, data_tokens, mask=mask)
+    """
+    num_heads: int
+    num_attn_channels: Optional[int] = None
+    num_out_channels: Optional[int] = None
+    dropout_rate: float = 0.0
+    use_bias: bool = True
+
+    @nn.compact
+    def __call__(
+        self,
+        x_q: jax.Array,
+        x_kv: jax.Array,
+        mask: Optional[jax.Array] = None,
+        bias: Optional[jax.Array] = None,
+        train: bool = False,
+    ) -> Tuple[jax.Array, jax.Array]:
+        """
+        Parameters
+        ----------
+        x_q : jax.Array
+            Query source (B, Tq, q channels).
+        x_kv : jax.Array
+            Key/value source (B, Tk, kv channels). Pass ``x_q`` for
+            self-attention.
+        mask : jax.Array, optional
+            Boolean, True = attend; broadcastable to
+            (B, num_heads, Tq, Tk) — ``flax.linen.make_attention_mask``
+            output shape (B, 1, Tq, Tk) broadcasts.
+        bias : jax.Array, optional
+            Additive float bias on the pre-softmax logits, same
+            broadcastability.
+        train : bool
+            Enables attention-probability dropout.
+
+        Returns
+        -------
+        (out, probs)
+            out (B, Tq, num_out_channels); probs (B, num_heads, Tq, Tk).
+        """
+        attn_channels = self.num_attn_channels or x_q.shape[-1]
+        out_channels = self.num_out_channels or x_q.shape[-1]
+        if attn_channels % self.num_heads != 0:
+            raise ValueError(
+                f"Attention: num_attn_channels={attn_channels} must be "
+                f"divisible by num_heads={self.num_heads}."
+            )
+        head_channels = attn_channels // self.num_heads
+
+        init = nn.initializers.xavier_uniform()
+        dense = lambda name: nn.DenseGeneral(
+            features=(self.num_heads, head_channels),
+            axis=-1, use_bias=self.use_bias, kernel_init=init, name=name,
+        )
+        q = dense("q_proj")(x_q)     # (B, Tq, H, head_channels)
+        k = dense("k_proj")(x_kv)    # (B, Tk, H, head_channels)
+        v = dense("v_proj")(x_kv)    # (B, Tk, H, head_channels)
+
+        dropout_rng = (
+            self.make_rng("dropout")
+            if (train and self.dropout_rate > 0.0) else None
+        )
+        # Post-softmax attention weights (flax handles the head_channels**-0.5
+        # scale, the mask -> -inf bias, and probability dropout).
+        probs = nn.dot_product_attention_weights(
+            q, k, bias=bias, mask=mask,
+            dropout_rng=dropout_rng,
+            dropout_rate=self.dropout_rate if train else 0.0,
+            deterministic=not train,
+        )                                                  # (B, H, Tq, Tk)
+
+        out = jnp.einsum('...hqk,...khd->...qhd', probs, v)  # (B, Tq, H, hd)
+        out = nn.DenseGeneral(
+            features=out_channels, axis=(-2, -1),
+            use_bias=self.use_bias, kernel_init=init, name="out_proj",
+        )(out)                                             # (B, Tq, out_channels)
+
+        return out, probs
+
+
+# ===========================================================================
+# LEGACY (v2) — kept ONLY for the frozen experiments/tc_perceiver_io line,
+# which imports ``get_attention``. Delete this whole section together with
+# that experiment. New code composes ``Attention`` above directly.
+# ===========================================================================
+
+from utils.registry import Registry
+
+
+def make_causal_mask(seq_len: int) -> jax.Array:
+    """LEGACY. Upper-triangular causal mask; True where attention is allowed.
+
+    New code: ``flax.linen.make_causal_mask``.
     """
     i = jnp.arange(seq_len)
     return i[:, None] >= i[None, :]   # (T, T) -- True where allowed
 
 
 def make_padding_mask(lengths: jax.Array, max_len: int) -> jax.Array:
-    """Boolean padding mask for variable-length sequences.
+    """LEGACY. Boolean padding mask for variable-length sequences.
 
-    Parameters
-    ----------
-    lengths : jax.Array
-        Integer array of shape (B,) with valid token counts per sequence.
-    max_len : int
-        Padded sequence length.
-
-    Returns
-    -------
-    jax.Array
-        Boolean mask of shape (B, max_len). True for valid positions,
-        False for padding.
-
-    Notes
-    -----
-    To use as an attention mask, broadcast to (B, 1, max_len) before
-    passing to MultiHeadAttention. _build_bias handles the (B, T_q, T_kv)
-    -> (B, 1, T_q, T_kv) expansion, so passing (B, 1, max_len) with a
-    broadcast T_q dimension is the intended usage pattern:
-
-        pad_mask = make_padding_mask(lengths, max_len)   # (B, max_len)
-        mask = pad_mask[:, None, :]                      # (B, 1, max_len)
-        out = attn(x, mask=mask)
-
-    Example
-    -------
-    >>> lengths = jnp.array([3, 5, 2])
-    >>> mask = make_padding_mask(lengths, max_len=6)
-    >>> mask.shape
-    (3, 6)
+    New code: ``station_valid = arange(pad_to) < n_stations`` +
+    ``flax.linen.make_attention_mask``.
     """
     return jnp.arange(max_len)[None, :] < lengths[:, None]
 
-
-# ---------------------------------------------------------------------------
-# Attention registry
-# ---------------------------------------------------------------------------
-# Mirrors the activation/initializer registries: a model selects an attention
-# primitive by name from config. The two entries are the only attention types
-# Perceiver IO needs — self (processor) and cross (encode/decode). Each factory
-# returns a configured nn.Module instance.
 
 ATTENTION = Registry("attention")
 register_attention = ATTENTION.register
@@ -130,62 +197,15 @@ get_attention = ATTENTION.get
 
 
 def list_attention() -> dict[str, str]:
-    """Sorted ``{name: description}`` of all registered attention types."""
+    """LEGACY. Sorted ``{name: description}`` of registered attention types."""
     return dict(sorted(ATTENTION.describe().items()))
 
 
-# ---------------------------------------------------------------------------
-# MultiHeadAttention
-# ---------------------------------------------------------------------------
-
 class MultiHeadAttention(nn.Module):
-    """Multi-head scaled dot-product attention (self or cross).
+    """LEGACY (v2) multi-head attention: context=None -> self-attention.
 
-    Owns QKV projections explicitly, enabling clean attention weight
-    return without Flax intermediates machinery. The forward V-weighting
-    uses flax.linen.dot_product_attention_weights (softmax + optional
-    dropout); the returned diagnostic weights are the pre-softmax logits.
-
-    Parameters
-    ----------
-    embed_dim : int
-        Output and input dimensionality. Must be divisible by num_heads.
-    num_heads : int
-        Number of attention heads.
-    dropout_rate : float
-        Attention weight dropout applied during training. Default 0.0.
-    use_bias : bool
-        Whether QKV and output projections include bias. Default True.
-    causal : bool
-        If True, automatically applies a causal mask when no explicit
-        mask is provided. Default False.
-
-    Notes
-    -----
-    Input shape: (B, T, embed_dim).
-
-    Supported mask shapes (expanded to (B, num_heads, T_q, T_kv)):
-        (T_q, T_kv)               -- shared across batch and heads
-        (B, T_q, T_kv)            -- shared across heads
-        (B, num_heads, T_q, T_kv) -- fully specified
-
-    Boolean masks: True = attend, False = block.
-    Float masks: added directly to logits as additive bias.
-
-    If both causal=True and an explicit mask are provided, the explicit
-    mask takes precedence and causal is ignored.
-
-    For cross-attention, pass context as the second positional argument
-    or via the `context` keyword. Q is projected from x, K and V from
-    context.
-
-    Example
-    -------
-    >>> attn = MultiHeadAttention(embed_dim=128, num_heads=4)
-    >>> out = attn(x, train=False)                          # self-attention
-    >>> out = attn(x, context=memory, train=False)          # cross-attention
-    >>> out, s = attn(x, train=False, return_weights=True)  # pre-softmax logits
-    >>> s.shape  # (B, num_heads, T_q, T_kv)
+    ``return_weights=True`` returns PRE-softmax logits (v2 contract). The v3
+    primitive is ``Attention`` above (always returns post-softmax probs).
     """
     embed_dim: int
     num_heads: int
@@ -240,22 +260,11 @@ class MultiHeadAttention(nn.Module):
         kv_len: int,
     ) -> Optional[jax.Array]:
         """Convert mask to float additive bias broadcastable to
-        (B, num_heads, T_q, T_kv).
-
-        Supported input shapes:
-            (T_q, T_kv)               -> (1, 1, T_q, T_kv)
-            (B, T_q, T_kv)            -> (B, 1, T_q, T_kv)
-            (B, num_heads, T_q, T_kv) -> unchanged
-
-        If causal=True and mask is None, generates a causal mask.
-        Boolean masks are converted to 0.0 / -1e9.
-        Float masks are cast to float32 and used as-is.
-        """
+        (B, num_heads, T_q, T_kv)."""
         if mask is None and not self.causal:
             return None
 
         if mask is None:
-            # Causal: (T_q, T_kv) bool -> float
             raw = make_causal_mask(q_len)
             bias = jnp.where(raw, 0.0, -1e9).astype(jnp.float32)
         elif mask.dtype == jnp.bool_:
@@ -280,29 +289,6 @@ class MultiHeadAttention(nn.Module):
         train: bool = True,
         return_weights: bool = False,
     ) -> Union[jax.Array, Tuple[jax.Array, jax.Array]]:
-        """
-        Parameters
-        ----------
-        x : jax.Array
-            Query source (B, T_q, embed_dim).
-        context : jax.Array, optional
-            Key/value source (B, T_kv, embed_dim). None = self-attention.
-        mask : jax.Array, optional
-            Boolean or float mask. See class docstring for shape conventions.
-        train : bool
-            Enables attention dropout. Requires rngs={'dropout': key} when
-            train=True and dropout_rate > 0.
-        return_weights : bool
-            If True returns (output, scores) where ``scores`` are the
-            PRE-softmax attention logits (QKᵀ / √head_dim + mask bias), shape
-            (B, num_heads, T_q, T_kv). Apply softmax to recover the attention
-            distribution.
-
-        Returns
-        -------
-        jax.Array or tuple[jax.Array, jax.Array]
-            Output (B, T_q, embed_dim), optionally with pre-softmax logits.
-        """
         kv_src = x if context is None else context
         q_len  = x.shape[1]
         kv_len = kv_src.shape[1]
@@ -313,7 +299,6 @@ class MultiHeadAttention(nn.Module):
 
         bias = self._build_bias(mask, q_len, kv_len)
 
-        # Attention weights (post-softmax): (B, num_heads, T_q, T_kv)
         weights = nn.dot_product_attention_weights(
             query=q,
             key=k,
@@ -323,16 +308,10 @@ class MultiHeadAttention(nn.Module):
             deterministic=not train,
         )
 
-        # Aggregate: einsum over T_kv dimension
-        # weights: (B, num_heads, T_q, T_kv)
-        # v:       (B, T_kv, num_heads, head_dim)
         out = jnp.einsum('bnij,bjnd->bind', weights, v)  # (B, T_q, num_heads, head_dim)
         out = self.out_proj(out)                          # (B, T_q, embed_dim)
 
         if return_weights:
-            # Pre-softmax logits — the interpretable form for attention maps
-            # (post-softmax is too peaky; Perceiver Fig. 3). Includes the mask
-            # bias so softmax(scores) recovers the true attention distribution.
             scale  = 1.0 / jnp.sqrt(jnp.asarray(self.head_dim, q.dtype))
             scores = jnp.einsum('bihd,bjhd->bhij', q, k) * scale  # (B, H, T_q, T_kv)
             if bias is not None:
@@ -344,7 +323,7 @@ class MultiHeadAttention(nn.Module):
 
 @register_attention(
     "self_attention",
-    description="Multi-head self-attention (Q/K/V from one source) — Perceiver processor",
+    description="LEGACY v2 multi-head self-attention — kept for tc_perceiver_io",
 )
 def _self_attention(
     embed_dim: int,
@@ -360,41 +339,8 @@ def _self_attention(
     )
 
 
-# ---------------------------------------------------------------------------
-# CrossAttention
-# ---------------------------------------------------------------------------
-
 class CrossAttention(nn.Module):
-    """Explicit cross-attention: Q from x, K and V from context.
-
-    Functionally equivalent to MultiHeadAttention with context provided,
-    but makes the asymmetric Q/KV split structurally explicit at the call
-    site. Used for Perceiver encode (latents query the inputs) and decode
-    (an output query reads the latents).
-
-    Parameters
-    ----------
-    embed_dim : int
-        Output dimensionality.
-    num_heads : int
-        Number of attention heads.
-    dropout_rate : float
-        Default 0.0.
-    use_bias : bool
-        Default True.
-
-    Notes
-    -----
-    x and context may differ in sequence length but must share embed_dim.
-    Output shape matches x: (B, T_q, embed_dim).
-
-    Example
-    -------
-    >>> cross = CrossAttention(embed_dim=128, num_heads=4)
-    >>> out = cross(x, context=memory, train=False)
-    >>> out, s = cross(x, context=memory, train=False, return_weights=True)
-    >>> s.shape  # (B, num_heads, T_q, T_kv) pre-softmax logits
-    """
+    """LEGACY (v2) explicit cross-attention wrapper over MultiHeadAttention."""
     embed_dim: int
     num_heads: int
     dropout_rate: float = 0.0
@@ -417,20 +363,6 @@ class CrossAttention(nn.Module):
         train: bool = True,
         return_weights: bool = False,
     ) -> Union[jax.Array, Tuple[jax.Array, jax.Array]]:
-        """
-        Parameters
-        ----------
-        x : jax.Array
-            Query source (B, T_q, embed_dim).
-        context : jax.Array
-            Key/value source (B, T_kv, embed_dim).
-        mask : jax.Array, optional
-            Broadcastable to (B, num_heads, T_q, T_kv).
-        train : bool
-        return_weights : bool
-            Returns (output, scores) with pre-softmax logits
-            (B, num_heads, T_q, T_kv).
-        """
         return self.attn(
             x, context=context, mask=mask, train=train,
             return_weights=return_weights,
@@ -439,7 +371,7 @@ class CrossAttention(nn.Module):
 
 @register_attention(
     "cross_attention",
-    description="Cross-attention (Q from one source, K/V from another) — Perceiver encode/decode",
+    description="LEGACY v2 cross-attention — kept for tc_perceiver_io",
 )
 def _cross_attention(
     embed_dim: int,
