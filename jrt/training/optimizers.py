@@ -27,6 +27,8 @@ Optimizers
 ----------
 ADAM            Adam (Kingma & Ba 2015)
 ADAMW           Adam with decoupled weight decay (Loshchilov & Hutter 2019)
+LAMB            Layer-wise adaptive large-batch optimizer (You et al. 2020)
+                — the Perceiver / Perceiver IO / Senseiver papers' optimizer
 SGD             SGD with optional momentum and Nesterov
 RMSPROP         RMSProp
 LBFGS           L-BFGS — quasi-Newton (registered; requires specialised
@@ -182,6 +184,32 @@ def _sgd(
     nesterov:      bool  = False,
 ) -> optax.GradientTransformation:
     return optax.sgd(learning_rate, momentum=momentum, nesterov=nesterov)
+
+
+@register_optimizer(
+    "LAMB",
+    description=(
+        "LAMB — layer-wise adaptive large-batch optimizer (You et al. 2020); "
+        "the Perceiver/PIO/Senseiver papers' optimizer. weight_decay is "
+        "decoupled: use it OR the l2_params loss term, not both."
+    ),
+)
+def _lamb(
+    learning_rate: Schedule,
+    b1:            float = 0.9,
+    b2:            float = 0.999,
+    eps:           float = 1e-6,
+    weight_decay:  float = 0.0,
+) -> optax.GradientTransformation:
+    # optax's `mask` arg (decay masking) is a pytree/callable — not
+    # yaml-expressible. If masking is ever wanted it becomes a named preset
+    # built here (e.g. decay_mask: exclude_norm_and_bias). eps_root omitted
+    # (meta-gradient niche).
+    return optax.lamb(
+        learning_rate,
+        b1=b1, b2=b2, eps=eps,
+        weight_decay=weight_decay,
+    )
 
 
 @register_optimizer(

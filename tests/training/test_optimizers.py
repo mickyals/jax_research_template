@@ -40,7 +40,7 @@ from training.optimizers import (
 
 KEY = jax.random.PRNGKey(0)
 
-_ALL_OPTIMIZERS = ["adam", "adamw", "sgd", "rmsprop"]  # lbfgs excluded (raises)
+_ALL_OPTIMIZERS = ["adam", "adamw", "lamb", "sgd", "rmsprop"]  # lbfgs excluded (raises)
 
 _SCHEDULER_CONFIGS = {
     "constant":           dict(value=1e-3),
@@ -74,7 +74,7 @@ class TestOptimizerRegistry:
 
     def test_all_expected_names_present(self):
         names = list_optimizers()
-        for name in ["ADAM", "ADAMW", "SGD", "RMSPROP", "LBFGS"]:
+        for name in ["ADAM", "ADAMW", "LAMB", "SGD", "RMSPROP", "LBFGS"]:
             assert name in names, f"Expected '{name}' in list_optimizers()"
 
     def test_descriptions_are_strings(self):
@@ -170,6 +170,10 @@ class TestOptimizerInstantiation:
 
     def test_sgd_nesterov(self):
         opt = get_optimizer("sgd", learning_rate=0.1, momentum=0.9, nesterov=True)
+        assert isinstance(opt, optax.GradientTransformation)
+
+    def test_lamb_weight_decay(self):
+        opt = get_optimizer("lamb", learning_rate=1e-3, weight_decay=1e-2)
         assert isinstance(opt, optax.GradientTransformation)
 
     def test_rmsprop_centered(self):
