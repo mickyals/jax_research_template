@@ -16,7 +16,7 @@ observations, built as three explicit stages composed by one top module:
 
 Each stage wires the GPT-2-style pre-LN residual block (Perceiver IO eqs 4-6:
 LayerNorm -> attention -> +residual -> LayerNorm -> MLP -> +residual) around an
-attention primitive pulled from core.attention's registry (self/cross). The
+attention primitive pulled from the vendored legacy_attention registry (self/cross). The
 attention's output projection (f_O) lives inside that primitive; the residual
 always taps the *unnormalized* input.
 
@@ -78,7 +78,7 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
-from core.attention import get_attention
+from experiments.tc_perceiver_io.train.legacy_attention import get_attention
 from core.nets.mlp import MLP
 from core.embeddings import GaussianFourierEmbedding
 

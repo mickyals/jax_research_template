@@ -48,15 +48,18 @@ Standard and INR (implicit neural representation) activations.
 
 ### `attention.py`
 
-Core attention primitives used by `nets/transformers.py`.
+The ONE scaled dot-product attention primitive used by `nets/transformers.py`.
+Cross- and self-attention differ solely by where the query comes from.
 
 | Class | Description |
 |-------|-------------|
-| `MultiHeadAttention` | Standard scaled dot-product MHA with optional causal mask |
-| `CrossAttention` | MHA with separate query and key/value sequences |
-| `SwinWindowAttention` | Shifted-window local attention (Liu et al. 2021) |
+| `Attention` | q from `x_q`, k/v from `x_kv` (self-attention = `attn(x, x)`); `num_attn_channels` / `num_out_channels` knobs; always returns `(out, probs)` — post-softmax attention weights |
 
-Mask convention: `True` = attend, `False` = ignore (padding). 3D masks `(B, T_q, T_kv)` are broadcast across heads; 2D masks `(B, T_kv)` are broadcast across both heads and query positions.
+Mask convention: `True` = attend, `False` = ignore; build with
+`flax.linen.make_attention_mask(q_valid, kv_valid, dtype=bool)` — its
+`(B, 1, Tq, Tk)` output broadcasts over heads. An additive float `bias` is
+also accepted. The v2 MHA + registry live vendored in
+`experiments/tc_perceiver_io/train/legacy_attention.py` (die with that line).
 
 ### `embeddings.py`
 

@@ -61,7 +61,7 @@ This is a binary + ordinal classification problem over **9 classes**, ordered by
 - **Processor** — `L` self-attention blocks over the `N` latents (depth decoupled from `M`; no re-read — that is the original Perceiver, pointless at small `M`).
 - **Decoder** — maps latents → logits. Two tracks (Fig. 6): `attention` (a single learned output query cross-attends the latents, then value-proj + MLP — the Perceiver IO default, more expressive) or `avgproj` (mean-pool the latents → one linear).
 
-Each stage wraps the GPT-2-style pre-LN residual block (Perceiver IO eqs 4–6: `LayerNorm → attention → +residual → LayerNorm → MLP → +residual`) around a self/cross attention primitive pulled from `core.attention`'s registry (`get_attention`). A trailing `LayerNorm` after the Processor produces the normalised latent representation — the encoder asset. There is **no CLS or query token**; the learned latent array is the encode query.
+Each stage wraps the GPT-2-style pre-LN residual block (Perceiver IO eqs 4–6: `LayerNorm → attention → +residual → LayerNorm → MLP → +residual`) around a self/cross attention primitive pulled from the vendored `train/legacy_attention.py` registry (`get_attention`; moved out of `core.attention` 2026-07-17 when core went to the single v3 primitive). A trailing `LayerNorm` after the Processor produces the normalised latent representation — the encoder asset. There is **no CLS or query token**; the learned latent array is the encode query.
 
 ### Token construction
 
